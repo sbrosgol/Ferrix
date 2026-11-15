@@ -69,6 +69,8 @@ pub struct Settings {
     pub header: Option<PageText>,
     #[serde(default)]
     pub footer: Option<PageText>,
+    #[serde(default)]
+    pub archival: bool,
 }
 
 /// A change to a document.
@@ -143,6 +145,7 @@ impl Document {
                 next.font.clone_from(&settings.font);
                 next.header.clone_from(&settings.header);
                 next.footer.clone_from(&settings.footer);
+                next.archival = settings.archival;
                 next.validate()?;
                 let inverse = Edit::Settings(self.settings());
                 *self = next;
@@ -161,6 +164,7 @@ impl Document {
             font: self.font.clone(),
             header: self.header.clone(),
             footer: self.footer.clone(),
+            archival: self.archival,
         }
     }
 

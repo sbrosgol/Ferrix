@@ -216,6 +216,8 @@ pub(crate) struct PageSetupForm {
     pub(crate) footer: String,
     /// Leave header and footer off the first page.
     pub(crate) skip_first: bool,
+    /// Save as PDF/A-3b.
+    pub(crate) archival: bool,
 }
 
 /// The find and replace bar of a written document.
@@ -388,6 +390,7 @@ pub enum Message {
     PageSetupHeader(String),
     PageSetupFooter(String),
     PageSetupSkipFirst(bool),
+    PageSetupArchival(bool),
     ApplyPageSetup,
     FindOpen,
     FindQuery(String),
@@ -1021,6 +1024,7 @@ impl App {
                             .map(|t| t.text.clone())
                             .unwrap_or_default(),
                         skip_first: doc.header.iter().chain(&doc.footer).any(|t| t.skip_first),
+                        archival: doc.archival,
                     });
                 }
             }
@@ -1057,6 +1061,11 @@ impl App {
             Message::PageSetupSkipFirst(skip) => {
                 if let Some(form) = &mut self.page_setup {
                     form.skip_first = skip;
+                }
+            }
+            Message::PageSetupArchival(on) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.archival = on;
                 }
             }
             Message::FindOpen => {
@@ -1148,6 +1157,7 @@ impl App {
                 };
                 settings.header = page_text(&form.header);
                 settings.footer = page_text(&form.footer);
+                settings.archival = form.archival;
                 if settings != w.editor.document().settings() {
                     w.editor.set_settings(settings);
                     return Task::batch([self.after_write(false), self.render()]);

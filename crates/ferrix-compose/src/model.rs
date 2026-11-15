@@ -20,6 +20,9 @@ pub struct Document {
     /// Text at the bottom of every page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footer: Option<PageText>,
+    /// Save as PDF/A-3b, for long-term archiving.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archival: bool,
     /// Never empty: a document always has at least one paragraph to type into.
     pub paragraphs: Vec<Paragraph>,
 }
@@ -38,6 +41,7 @@ impl Document {
             font: FontChoice::default(),
             header: None,
             footer: None,
+            archival: false,
             paragraphs: vec![Paragraph::new(ParagraphStyle::Normal)],
         }
     }

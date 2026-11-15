@@ -1173,11 +1173,25 @@ fn page_setup_dialog(form: &PageSetupForm) -> Element<'_, Message> {
             .size(16),
     ]
     .spacing(6);
+    let archival = column![
+        iced::widget::checkbox(form.archival)
+            .label("Save as PDF/A-3 for long-term archiving")
+            .on_toggle(Message::PageSetupArchival)
+            .text_size(13)
+            .size(16),
+        muted(
+            "For records that must stay readable for decades. The file is dated and checked \
+             against the standard when saved.",
+            11.0
+        ),
+    ]
+    .spacing(4);
     let card = column![
         text("Page Setup").size(16).font(SEMIBOLD),
         fields,
         title,
         page_text,
+        archival,
         Space::new().height(4),
         row![
             Space::new().width(Length::Fill),

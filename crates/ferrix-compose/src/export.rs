@@ -3,20 +3,26 @@
 use std::collections::HashMap;
 
 use ferrix_pdf::Source;
+use krilla::SerializeSettings;
 use krilla::color::rgb;
+use krilla::configure::{Archival, ConfigurationBuilder};
 use krilla::embed::{AssociationKind, EmbeddedFile, MimeType};
 use krilla::geom::{PathBuilder, Point, Rect};
-use krilla::metadata::Metadata;
+use krilla::metadata::{DateTime, Metadata};
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill, FillRule};
 use krilla::surface::Surface;
+use krilla::tagging::{
+    Artifact, ArtifactType, ContentTag, Identifier, ListNumbering, SpanTag, Tag, TagGroup, TagTree,
+};
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use serde::{Deserialize, Serialize};
 
 use crate::fonts::{EmbedFonts, Fonts};
 use crate::layout::{Layout, Line};
-use crate::model::{Color, Document, ModelError};
+use crate::model::{Color, Document, ListKind, ModelError, ParagraphStyle};
+use std::num::NonZeroU16;
 
 /// Name of the embedded source file.
 pub const SOURCE_NAME: &str = "ferrix-document.json";
@@ -74,7 +80,8 @@ fn export_with(
     layout: &Layout,
     fonts: &EmbedFonts,
 ) -> Result<Vec<u8>, ExportError> {
-    let plain = write(doc, layout, fonts, None)?;
+    let date = doc.archival.then(now);
+    let plain = write(doc, layout, fonts, None, date)?;
     let digest = ferrix_pdf::content_digest(Source::new(&plain))
         .map_err(|e| ExportError::Verify(e.to_string()))?;
 
@@ -84,7 +91,7 @@ fn export_with(
         document: serde_json::to_value(doc).map_err(|e| ExportError::Write(e.to_string()))?,
     };
     let source = serde_json::to_vec(&envelope).map_err(|e| ExportError::Write(e.to_string()))?;
-    let bytes = write(doc, layout, fonts, Some(source))?;
+    let bytes = write(doc, layout, fonts, Some(source), date)?;
 
     let check = ferrix_pdf::content_digest(Source::new(&bytes))
         .map_err(|e| ExportError::Verify(e.to_string()))?;
@@ -101,15 +108,32 @@ fn write(
     layout: &Layout,
     fonts: &EmbedFonts,
     source: Option<Vec<u8>>,
+    date: Option<DateTime>,
 ) -> Result<Vec<u8>, ExportError> {
-    let mut pdf = krilla::Document::new();
+    let mut settings = SerializeSettings {
+        enable_tagging: true,
+        ..SerializeSettings::default()
+    };
+    if doc.archival {
+        settings.configuration = ConfigurationBuilder::new()
+            .with_archival_validator(Archival::A3_B)
+            .finish()
+            .map_err(|e| ExportError::Write(format!("{e:?}")))?;
+    }
+    let mut pdf = krilla::Document::new_with(settings);
     let mut metadata = Metadata::new()
         .creator(format!("Ferrix {}", env!("CARGO_PKG_VERSION")))
         .producer("Ferrix".to_owned());
     if let Some(title) = doc.title.as_ref().filter(|t| !t.trim().is_empty()) {
         metadata = metadata.title(title.clone());
     }
+    // Archival files must be dated. Other exports are not, so they stay byte-for-byte
+    // reproducible.
+    if let Some(now) = date {
+        metadata = metadata.creation_date(now);
+    }
     pdf.set_metadata(metadata);
+    let mut tags = Tags::new(doc.paragraphs.len());
 
     let texts: Vec<String> = doc
         .paragraphs
@@ -125,16 +149,26 @@ fn write(
         let mut surface = page_out.surface();
         for line in &page.lines {
             let text = texts.get(line.block).map_or("", String::as_str);
-            draw_line(&mut surface, line, text, fonts, &mut cache)?;
+            draw_line(&mut surface, line, text, fonts, &mut cache, Some(&mut tags))?;
         }
-        // Headers and footers carry their own text: their glyph ranges index into it.
+        // Headers and footers are page decoration, not content, for screen readers. They carry
+        // their own text: their glyph ranges index into it.
         for line in &page.furniture {
             let text = page_text(line);
-            draw_line(&mut surface, line, &text, fonts, &mut cache)?;
+            let kind = if line.top > layout.page.height / 2.0 {
+                ArtifactType::Footer
+            } else {
+                ArtifactType::Header
+            };
+            surface.start_tagged(ContentTag::Artifact(Artifact::new(kind, None)));
+            draw_line(&mut surface, line, &text, fonts, &mut cache, None)?;
+            surface.end_tagged();
         }
         surface.finish();
         page_out.finish();
     }
+
+    pdf.set_tag_tree(tags.tree(doc));
 
     if let Some(data) = source {
         let file = EmbeddedFile {
@@ -143,7 +177,7 @@ fn write(
             description: Some("Ferrix document source, used to keep editing this PDF".to_owned()),
             association_kind: AssociationKind::Source,
             data: data.into(),
-            modification_date: None,
+            modification_date: date,
             compress: Some(true),
             location: None,
         };
@@ -174,26 +208,206 @@ fn draw_line(
     text: &str,
     fonts: &EmbedFonts,
     cache: &mut HashMap<cosmic_text::fontdb::ID, Font>,
+    mut tags: Option<&mut Tags>,
 ) -> Result<(), ExportError> {
+    let block = line.block;
     if let Some(image) = &line.image {
+        let id = tags
+            .as_ref()
+            .map(|_| surface.start_tagged(ContentTag::Other));
         draw_image(surface, image)?;
+        if let (Some(id), Some(tags)) = (id, tags.as_deref_mut()) {
+            surface.end_tagged();
+            tags.figures[block].push(id);
+        }
     }
-    draw_glyph_runs(surface, &line.glyphs, text, fonts, cache)?;
     if let Some((marker, glyphs)) = &line.marker {
+        let id = tags
+            .as_ref()
+            .map(|_| surface.start_tagged(ContentTag::Span(SpanTag::empty())));
         draw_glyph_runs(surface, glyphs, marker, fonts, cache)?;
+        if let (Some(id), Some(tags)) = (id, tags.as_deref_mut()) {
+            surface.end_tagged();
+            tags.markers[block].push(id);
+        }
     }
-    for bar in &line.decorations {
-        let Some(rect) = Rect::from_xywh(bar.x, bar.top, bar.width, bar.thickness) else {
-            continue;
-        };
-        let mut path = PathBuilder::new();
-        path.push_rect(rect);
-        if let Some(path) = path.finish() {
-            surface.set_fill(Some(fill(bar.color)));
-            surface.draw_path(&path);
+    if !line.glyphs.is_empty() {
+        let id = tags
+            .as_ref()
+            .map(|_| surface.start_tagged(ContentTag::Span(SpanTag::empty())));
+        draw_glyph_runs(surface, &line.glyphs, text, fonts, cache)?;
+        if let (Some(id), Some(tags)) = (id, tags.as_deref_mut()) {
+            surface.end_tagged();
+            tags.text[block].push(id);
+        }
+    }
+    if !line.decorations.is_empty() {
+        // Underlines and strike-through bars are drawing, not text.
+        let tagged = tags.is_some();
+        if tagged {
+            surface.start_tagged(ContentTag::Artifact(Artifact::new(
+                ArtifactType::Layout,
+                None,
+            )));
+        }
+        for bar in &line.decorations {
+            let Some(rect) = Rect::from_xywh(bar.x, bar.top, bar.width, bar.thickness) else {
+                continue;
+            };
+            let mut path = PathBuilder::new();
+            path.push_rect(rect);
+            if let Some(path) = path.finish() {
+                surface.set_fill(Some(fill(bar.color)));
+                surface.draw_path(&path);
+            }
+        }
+        if tagged {
+            surface.end_tagged();
         }
     }
     Ok(())
+}
+
+/// Marked content of each paragraph, gathered while drawing, for the structure tree.
+struct Tags {
+    text: Vec<Vec<Identifier>>,
+    markers: Vec<Vec<Identifier>>,
+    figures: Vec<Vec<Identifier>>,
+}
+
+impl Tags {
+    fn new(paragraphs: usize) -> Self {
+        Self {
+            text: vec![Vec::new(); paragraphs],
+            markers: vec![Vec::new(); paragraphs],
+            figures: vec![Vec::new(); paragraphs],
+        }
+    }
+
+    /// The document's logical structure in reading order: headings, paragraphs, figures (with
+    /// their caption as alternative text) and lists of items with label and body.
+    fn tree(self, doc: &Document) -> TagTree {
+        let mut tree = TagTree::new();
+        let mut list: Option<(ListKind, TagGroup)> = None;
+        let Self {
+            text,
+            markers,
+            figures,
+        } = self;
+        for (((paragraph, text), markers), figures) in
+            doc.paragraphs.iter().zip(text).zip(markers).zip(figures)
+        {
+            let content = (!text.is_empty()).then(|| {
+                let mut group = match paragraph.style {
+                    ParagraphStyle::Normal => TagGroup::new(Tag::P),
+                    style => {
+                        let level = match style {
+                            ParagraphStyle::Heading2 => 2,
+                            ParagraphStyle::Heading3 => 3,
+                            _ => 1,
+                        };
+                        TagGroup::new(Tag::Hn(
+                            NonZeroU16::new(level).unwrap_or(NonZeroU16::MIN),
+                            None,
+                        ))
+                    }
+                };
+                for id in text {
+                    group.push(id);
+                }
+                group
+            });
+            let figure = (!figures.is_empty()).then(|| {
+                let caption = paragraph.text();
+                let alt = if caption.trim().is_empty() {
+                    "Picture".to_owned()
+                } else {
+                    caption
+                };
+                let mut group = TagGroup::new(Tag::Figure(Some(alt)));
+                for id in figures {
+                    group.push(id);
+                }
+                group
+            });
+
+            match paragraph.format.list {
+                Some(item) => {
+                    if list.as_ref().is_some_and(|(kind, _)| *kind != item.kind)
+                        && let Some((_, group)) = list.take()
+                    {
+                        tree.push(group);
+                    }
+                    let (_, group) = list.get_or_insert_with(|| {
+                        let numbering = match item.kind {
+                            ListKind::Bullet => ListNumbering::Disc,
+                            ListKind::Numbered => ListNumbering::Decimal,
+                        };
+                        (item.kind, TagGroup::new(Tag::L(numbering)))
+                    });
+                    let mut li = TagGroup::new(Tag::LI);
+                    if !markers.is_empty() {
+                        let mut label = TagGroup::new(Tag::Lbl);
+                        for id in markers {
+                            label.push(id);
+                        }
+                        li.push(label);
+                    }
+                    let mut body = TagGroup::new(Tag::LBody);
+                    if let Some(figure) = figure {
+                        body.push(figure);
+                    }
+                    if let Some(content) = content {
+                        body.push(content);
+                    }
+                    li.push(body);
+                    group.push(li);
+                }
+                None => {
+                    if let Some((_, group)) = list.take() {
+                        tree.push(group);
+                    }
+                    if let Some(figure) = figure {
+                        tree.push(figure);
+                    }
+                    if let Some(content) = content {
+                        tree.push(content);
+                    }
+                }
+            }
+        }
+        if let Some((_, group)) = list {
+            tree.push(group);
+        }
+        tree
+    }
+}
+
+/// The current time in UTC, for archival metadata.
+fn now() -> DateTime {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let days = (seconds / 86_400) as i64;
+    let rest = seconds % 86_400;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = (yoe + era * 400 + i64::from(month <= 2)) as u16;
+    DateTime::new(year)
+        .month(month)
+        .day(day)
+        .hour((rest / 3600) as u8)
+        .minute((rest % 3600 / 60) as u8)
+        .second((rest % 60) as u8)
+        .utc_offset_hour(0)
+        .utc_offset_minute(0)
 }
 
 fn draw_image(
@@ -202,8 +416,8 @@ fn draw_image(
 ) -> Result<(), ExportError> {
     let data = krilla::Data::from(image.data.bytes.clone());
     let picture = match image.data.kind {
-        crate::model::ImageKind::Png => krilla::image::Image::from_png(data, true),
-        crate::model::ImageKind::Jpeg => krilla::image::Image::from_jpeg(data, true),
+        crate::model::ImageKind::Png => krilla::image::Image::from_png(data, false),
+        crate::model::ImageKind::Jpeg => krilla::image::Image::from_jpeg(data, false),
     }
     .map_err(|e| ExportError::Write(format!("a picture could not be embedded: {e}")))?;
     let Some(size) = krilla::geom::Size::from_wh(image.width, image.height) else {
