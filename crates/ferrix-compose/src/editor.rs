@@ -8,7 +8,8 @@ use crate::edit::{Applied, Edit, Fragment, Settings};
 use crate::fonts::Fonts;
 use crate::layout::{Layout, LayoutCache, Line, resolve};
 use crate::model::{
-    Align, CharFormat, Color, Document, Paragraph, ParagraphStyle, Position, TextRange,
+    Align, CharFormat, Color, Document, Image, ImageData, List, ListKind, Paragraph,
+    ParagraphStyle, Position, TextRange,
 };
 
 /// A rectangle on a page, in points from the page's top-left corner.
@@ -69,6 +70,7 @@ pub struct CaretFormat {
     pub style: ParagraphStyle,
     pub align: Align,
     pub line_spacing: f32,
+    pub list: Option<ListKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,6 +432,11 @@ impl Editor {
     /// Splits the paragraph at the caret (Enter).
     pub fn enter(&mut self) {
         let range = self.selection.range();
+        // Enter in an empty list item ends the list, as in every word processor.
+        let paragraph = &self.doc.paragraphs[range.start.block];
+        if range.is_empty() && paragraph.is_empty() && paragraph.format.list.is_some() {
+            return self.format_paragraphs("End List", |_, f| f.list = None);
+        }
         if let Ok(edit) = self.doc.split_paragraph(range) {
             self.commit(edit, "New Paragraph", None, |a| {
                 Selection::caret(a.range.end)
@@ -444,6 +451,22 @@ impl Editor {
             return self.delete_range(range, "Delete");
         }
         let at = range.start;
+        // At the start of a paragraph, Backspace first takes away what sits before its text:
+        // a list bullet, a picture, a page break.
+        if at.offset == 0 {
+            let paragraph = &self.doc.paragraphs[at.block];
+            if paragraph.format.list.is_some() {
+                return self.format_paragraphs("Remove from List", |_, f| f.list = None);
+            }
+            if paragraph.image.is_some() {
+                return self.remove_image();
+            }
+            if paragraph.format.page_break_before {
+                return self.format_paragraphs("Remove Page Break", |_, f| {
+                    f.page_break_before = false;
+                });
+            }
+        }
         if at.offset > 0 {
             let text = self.doc.paragraphs[at.block].text();
             let from = if word {
@@ -654,6 +677,7 @@ impl Editor {
             style: paragraph.style,
             align: paragraph.format.align.unwrap_or_default(),
             line_spacing: paragraph.format.line_spacing.unwrap_or(1.0),
+            list: paragraph.format.list.map(|l| l.kind),
         }
     }
 
@@ -670,6 +694,221 @@ impl Editor {
             let text = paragraph.text();
             paragraph.format_at(next_grapheme(&text, range.start.offset))
         }
+    }
+
+    // ── Lists, breaks and pictures ────────────────────────────────────────────
+
+    /// Makes the selected paragraphs list items of `kind`, or plain paragraphs if they all
+    /// already are.
+    pub fn toggle_list(&mut self, kind: ListKind) {
+        let range = self.selection.range();
+        let all = self.doc.paragraphs[range.start.block..=range.end.block]
+            .iter()
+            .all(|p| p.format.list.is_some_and(|l| l.kind == kind));
+        let label = match kind {
+            ListKind::Bullet => "Bulleted List",
+            ListKind::Numbered => "Numbered List",
+        };
+        self.format_paragraphs(label, move |_, f| {
+            f.list = if all {
+                None
+            } else {
+                Some(List {
+                    kind,
+                    level: f.list.map_or(0, |l| l.level),
+                })
+            };
+        });
+    }
+
+    /// Tab: in a list, nests the item one level deeper (Shift+Tab: one level out); elsewhere
+    /// types a tab.
+    pub fn tab(&mut self, back: bool) {
+        let range = self.selection.range();
+        let in_list = self.doc.paragraphs[range.start.block].format.list.is_some();
+        if in_list && (range.start.offset == 0 || !range.is_empty()) {
+            let label = if back {
+                "Decrease Indent"
+            } else {
+                "Increase Indent"
+            };
+            self.format_paragraphs(label, move |_, f| {
+                if let Some(list) = &mut f.list {
+                    list.level = if back {
+                        list.level.saturating_sub(1)
+                    } else {
+                        (list.level + 1).min(List::MAX_LEVEL)
+                    };
+                }
+            });
+        } else if !back {
+            self.type_text("\t");
+        }
+    }
+
+    /// Starts a new page at the caret.
+    pub fn page_break(&mut self) {
+        let range = self.selection.range();
+        let Ok(Edit::Replace { range, with }) = self.doc.split_paragraph(range) else {
+            return;
+        };
+        let mut parts = with.paragraphs().to_vec();
+        if let Some(last) = parts.last_mut() {
+            last.format.page_break_before = true;
+        }
+        let Some(with) = Fragment::new(parts) else {
+            return;
+        };
+        self.commit(Edit::Replace { range, with }, "Page Break", None, |a| {
+            Selection::caret(a.range.end)
+        });
+    }
+
+    /// Puts a picture in its own centred paragraph at the caret (or in the caret's paragraph,
+    /// if that is empty and has none).
+    pub fn insert_image(&mut self, data: ImageData) {
+        let width = data.natural_width().min(self.doc.page.content_width());
+        let image = Image {
+            data: std::sync::Arc::new(data),
+            width,
+        };
+        let range = self.selection.range();
+        let current = &self.doc.paragraphs[range.start.block];
+        let reuse = range.is_empty() && current.is_empty() && current.image.is_none();
+        let mut picture = Paragraph::new(ParagraphStyle::Normal);
+        picture.format.align = Some(Align::Center);
+        picture.image = Some(image);
+        let parts = if reuse {
+            vec![picture]
+        } else {
+            let mut before = current.empty_like();
+            before.runs.clear();
+            let after = self.doc.paragraphs[range.end.block].continuation();
+            vec![before, picture, after]
+        };
+        let Some(with) = Fragment::new(parts) else {
+            return;
+        };
+        self.commit(Edit::Replace { range, with }, "Insert Picture", None, |a| {
+            Selection::caret(a.range.end)
+        });
+    }
+
+    /// Removes the picture from the caret's paragraph, keeping its text.
+    pub fn remove_image(&mut self) {
+        let range = self.selection.range();
+        let paragraph = &self.doc.paragraphs[range.start.block];
+        if paragraph.image.is_none() {
+            return;
+        }
+        let whole = TextRange::between(
+            Position::new(range.start.block, 0),
+            Position::new(range.start.block, paragraph.len()),
+        );
+        let Ok(mut fragment) = self.doc.extract(whole) else {
+            return;
+        };
+        let mut parts = fragment.paragraphs().to_vec();
+        parts[0].image = None;
+        if let Some(f) = Fragment::new(parts) {
+            fragment = f;
+        }
+        let selection = self.selection;
+        self.commit(
+            Edit::Replace {
+                range: whole,
+                with: fragment,
+            },
+            "Delete Picture",
+            None,
+            |_| selection,
+        );
+    }
+
+    /// Whether the caret's paragraph has a picture.
+    pub fn has_image(&self) -> bool {
+        self.doc.paragraphs[self.selection.focus.block]
+            .image
+            .is_some()
+    }
+
+    // ── Find and replace ──────────────────────────────────────────────────────
+
+    /// Every occurrence of `query`, in document order. Matches never span paragraphs.
+    pub fn find_all(&self, query: &str, match_case: bool) -> Vec<TextRange> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        for (block, paragraph) in self.doc.paragraphs.iter().enumerate() {
+            let text = paragraph.text();
+            for (start, end) in find_in(&text, query, match_case) {
+                found.push(TextRange::between(
+                    Position::new(block, start),
+                    Position::new(block, end),
+                ));
+            }
+        }
+        found
+    }
+
+    /// Selects the next (or previous) match after the selection, wrapping around the
+    /// document. Returns whether there was one.
+    pub fn find_next(&mut self, query: &str, match_case: bool, backwards: bool) -> bool {
+        let matches = self.find_all(query, match_case);
+        let current = self.selection.range();
+        let next = if backwards {
+            matches
+                .iter()
+                .rev()
+                .find(|m| m.start < current.start)
+                .or_else(|| matches.last())
+        } else {
+            matches
+                .iter()
+                .find(|m| {
+                    m.start > current.start || (m.start == current.start && current.is_empty())
+                })
+                .or_else(|| matches.first())
+        };
+        match next.copied() {
+            Some(range) => {
+                self.select(range);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Replaces the selection if it is a match, then selects the next match.
+    pub fn replace(&mut self, query: &str, replacement: &str, match_case: bool) -> bool {
+        let range = self.selection.range();
+        if !range.is_empty()
+            && self.find_all(query, match_case).contains(&range)
+            && let Ok(edit) = self.doc.insert_text(range, replacement)
+        {
+            self.commit(edit, "Replace", None, |a| Selection::caret(a.range.end));
+        }
+        self.find_next(query, match_case, false)
+    }
+
+    /// Replaces every match as one undoable step; returns how many.
+    pub fn replace_all(&mut self, query: &str, replacement: &str, match_case: bool) -> usize {
+        let matches = self.find_all(query, match_case);
+        // Back to front, so earlier matches keep their positions.
+        let edits: Vec<Edit> = matches
+            .iter()
+            .rev()
+            .filter_map(|range| self.doc.insert_text(*range, replacement).ok())
+            .collect();
+        let count = edits.len();
+        if count > 0 {
+            let caret = self.selection.focus;
+            self.commit(Edit::Batch(edits), "Replace All", None, |_| {
+                Selection::caret(caret)
+            });
+        }
+        count
     }
 
     // ── Moving and selecting ──────────────────────────────────────────────────
@@ -1017,6 +1256,37 @@ fn replace_paragraph(block: usize, len: usize, with: Paragraph) -> Edit {
         range: TextRange::between(Position::new(block, 0), Position::new(block, len)),
         with: Fragment::single(with),
     }
+}
+
+/// Byte ranges of `query` in `text`, without overlaps. Case-insensitive matching compares
+/// lower-cased characters one for one.
+fn find_in(text: &str, query: &str, match_case: bool) -> Vec<(usize, usize)> {
+    let fold = |c: char| -> char {
+        if match_case {
+            c
+        } else {
+            c.to_lowercase().next().unwrap_or(c)
+        }
+    };
+    let query: Vec<char> = query.chars().map(fold).collect();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + query.len() <= chars.len() {
+        if chars[i..i + query.len()]
+            .iter()
+            .zip(&query)
+            .all(|((_, c), q)| fold(*c) == *q)
+        {
+            let start = chars[i].0;
+            let end = chars.get(i + query.len()).map_or(text.len(), |(o, _)| *o);
+            found.push((start, end));
+            i += query.len();
+        } else {
+            i += 1;
+        }
+    }
+    found
 }
 
 fn prev_grapheme(text: &str, offset: usize) -> usize {

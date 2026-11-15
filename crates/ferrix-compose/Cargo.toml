@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 cosmic-text.workspace = true
 ferrix-pdf.workspace = true
+image.workspace = true
 krilla.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -22,6 +23,7 @@ unicode-segmentation.workspace = true
 ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
 ferrix-types.workspace = true
+image.workspace = true
 
 [lints]
 workspace = true

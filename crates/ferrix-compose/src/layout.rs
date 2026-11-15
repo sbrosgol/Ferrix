@@ -9,13 +9,26 @@ use std::ops::Range;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight, Wrap, fontdb};
 
 use crate::fonts::Fonts;
-use crate::model::{Align, CharFormat, Color, Document, PageSetup, Paragraph};
+use crate::model::{
+    Align, CharFormat, Color, Document, ImageData, ListKind, PageSetup, PageText, Paragraph,
+    ParagraphStyle,
+};
 
 /// Normal line height as a multiple of the font size ("single" spacing).
 const LINE_HEIGHT: f32 = 1.15;
 
 /// Fewest lines of a paragraph left alone at the bottom or top of a page.
 const MIN_LINES: usize = 2;
+
+/// Indent per list level; the marker hangs in the first one.
+const LIST_INDENT: f32 = 18.0;
+
+/// Space between a picture and the paragraph's text.
+const IMAGE_GAP: f32 = 4.0;
+
+/// Header and footer text, relative to the base font size, and its colour.
+const PAGE_TEXT_SCALE: f32 = 0.8;
+const PAGE_TEXT_COLOR: Color = Color(0x5F, 0x63, 0x68);
 
 /// A laid-out document.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +41,8 @@ pub struct Layout {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PageLayout {
     pub lines: Vec<Line>,
+    /// Header and footer: drawn and exported, but not part of the editable text.
+    pub furniture: Vec<Line>,
 }
 
 /// One line of a paragraph, placed on a page.
@@ -48,6 +63,22 @@ pub struct Line {
     /// In visual order.
     pub glyphs: Vec<PlacedGlyph>,
     pub decorations: Vec<Decoration>,
+    /// A list item's bullet or number, hanging left of the first line: its text and glyphs.
+    pub marker: Option<(String, Vec<PlacedGlyph>)>,
+    /// A paragraph's picture, which gets a line of its own above the text.
+    pub image: Option<PlacedImage>,
+    /// For header and footer lines: the text their glyphs show (they belong to no paragraph).
+    pub source_text: Option<String>,
+}
+
+/// A picture at its final position and size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImage {
+    pub data: std::sync::Arc<ImageData>,
+    pub x: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// A glyph at its final position.
@@ -125,12 +156,19 @@ impl std::fmt::Debug for LayoutCache {
     }
 }
 
-fn cache_key(doc: &Document, paragraph: &Paragraph) -> u64 {
+fn cache_key(doc: &Document, paragraph: &Paragraph, marker: Option<&str>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_vec(paragraph)
+    // Pictures go in by their hash: serializing their bytes on every keystroke would be slow.
+    let mut text_only = paragraph.clone();
+    if let Some(image) = text_only.image.take() {
+        image.data.hash.hash(&mut hasher);
+        image.width.to_bits().hash(&mut hasher);
+    }
+    serde_json::to_vec(&text_only)
         .unwrap_or_default()
         .hash(&mut hasher);
+    marker.hash(&mut hasher);
     serde_json::to_vec(&doc.font)
         .unwrap_or_default()
         .hash(&mut hasher);
@@ -150,6 +188,7 @@ struct ParagraphLines {
     space_before: f32,
     space_after: f32,
     keep_with_next: bool,
+    page_break: bool,
     lines: Vec<Line>,
 }
 
@@ -163,29 +202,61 @@ impl Layout {
     /// the same cache.
     pub fn cached(doc: &Document, fonts: &mut Fonts, cache: &mut LayoutCache) -> Self {
         let mut used = std::collections::HashMap::with_capacity(doc.paragraphs.len());
+        let mut lay_out = |block: usize, p: &Paragraph, marker: Option<&str>, fonts: &mut Fonts| {
+            let key = cache_key(doc, p, marker);
+            let mut lines = match cache
+                .entries
+                .remove(&key)
+                .or_else(|| used.get(&key).cloned())
+            {
+                Some(lines) => lines,
+                None => break_lines(doc, block, p, marker, fonts),
+            };
+            for line in &mut lines.lines {
+                line.block = block;
+            }
+            used.insert(key, lines.clone());
+            lines
+        };
+        let markers = list_markers(doc);
         let paragraphs: Vec<ParagraphLines> = doc
             .paragraphs
             .iter()
             .enumerate()
-            .map(|(block, p)| {
-                let key = cache_key(doc, p);
-                let mut lines = match cache
-                    .entries
-                    .remove(&key)
-                    .or_else(|| used.get(&key).cloned())
-                {
-                    Some(lines) => lines,
-                    None => break_lines(doc, block, p, fonts),
-                };
-                for line in &mut lines.lines {
-                    line.block = block;
-                }
-                used.insert(key, lines.clone());
-                lines
-            })
+            .map(|(block, p)| lay_out(block, p, markers[block].as_deref(), fonts))
             .collect();
+        let mut layout = paginate(doc.page, paragraphs);
+
+        // Headers and footers, now that the page count is known.
+        let count = layout.pages.len();
+        for (index, page) in layout.pages.iter_mut().enumerate() {
+            for (text, footer) in [(&doc.header, false), (&doc.footer, true)] {
+                let Some(text) = text.as_ref().filter(|t| !(t.skip_first && index == 0)) else {
+                    continue;
+                };
+                let paragraph = page_text_paragraph(doc, text, index + 1, count);
+                let lines = lay_out(usize::MAX, &paragraph, None, fonts);
+                let Some(line) = lines.lines.first() else {
+                    continue;
+                };
+                let margin = if footer {
+                    doc.page.margins.bottom
+                } else {
+                    doc.page.margins.top
+                };
+                let centre = if footer {
+                    doc.page.height - margin / 2.0
+                } else {
+                    margin / 2.0
+                };
+                let mut line = place(line, (centre - line.height / 2.0).max(0.0));
+                line.block = usize::MAX;
+                line.source_text = Some(paragraph.text());
+                page.furniture.push(line);
+            }
+        }
         cache.entries = used;
-        paginate(doc.page, paragraphs)
+        layout
     }
 
     /// The page and line showing a position.
@@ -202,20 +273,105 @@ impl Layout {
     }
 }
 
+/// The paragraph a header or footer is laid out as.
+fn page_text_paragraph(doc: &Document, text: &PageText, page: usize, pages: usize) -> Paragraph {
+    let mut paragraph = Paragraph::new(ParagraphStyle::Normal).with_text(
+        &text.for_page(page, pages),
+        CharFormat {
+            size: Some(doc.font.size * PAGE_TEXT_SCALE),
+            color: Some(PAGE_TEXT_COLOR),
+            ..CharFormat::default()
+        },
+    );
+    paragraph.format.align = Some(text.align);
+    paragraph.format.space_after = Some(0.0);
+    paragraph
+}
+
+/// Each paragraph's list marker: bullets by level, or the item's number. Numbering continues
+/// while list items follow each other and restarts after any other paragraph.
+fn list_markers(doc: &Document) -> Vec<Option<String>> {
+    let mut counters = [0u32; crate::model::List::MAX_LEVEL as usize + 1];
+    doc.paragraphs
+        .iter()
+        .map(|p| {
+            let Some(list) = p.format.list else {
+                counters = [0; crate::model::List::MAX_LEVEL as usize + 1];
+                return None;
+            };
+            let level = usize::from(list.level.min(crate::model::List::MAX_LEVEL));
+            counters[level] += 1;
+            for deeper in &mut counters[level + 1..] {
+                *deeper = 0;
+            }
+            Some(match list.kind {
+                ListKind::Bullet => ["•", "◦", "▪"][level % 3].to_owned(),
+                ListKind::Numbered => number_label(counters[level], level),
+            })
+        })
+        .collect()
+}
+
+/// `1.`, `a.` or `i.` style numbers, by level.
+fn number_label(n: u32, level: usize) -> String {
+    match level % 3 {
+        0 => format!("{n}."),
+        1 => {
+            // a, b, ... z, aa, ab, ...
+            let mut n = n;
+            let mut letters = Vec::new();
+            while n > 0 {
+                n -= 1;
+                letters.push(char::from(b'a' + (n % 26) as u8));
+                n /= 26;
+            }
+            letters.iter().rev().collect::<String>() + "."
+        }
+        _ => {
+            const NUMERALS: [(u32, &str); 13] = [
+                (1000, "m"),
+                (900, "cm"),
+                (500, "d"),
+                (400, "cd"),
+                (100, "c"),
+                (90, "xc"),
+                (50, "l"),
+                (40, "xl"),
+                (10, "x"),
+                (9, "ix"),
+                (5, "v"),
+                (4, "iv"),
+                (1, "i"),
+            ];
+            let mut n = n.min(3999);
+            let mut out = String::new();
+            for (value, numeral) in NUMERALS {
+                while n >= value {
+                    out.push_str(numeral);
+                    n -= value;
+                }
+            }
+            out + "."
+        }
+    }
+}
+
 fn break_lines(
     doc: &Document,
     block: usize,
     paragraph: &Paragraph,
+    marker: Option<&str>,
     fonts: &mut Fonts,
 ) -> ParagraphLines {
     let style = paragraph.style.defaults();
     let format = paragraph.format;
     let format_align = format.align.unwrap_or_default();
     let spacing = format.line_spacing.unwrap_or(1.0).clamp(0.5, 5.0);
-    let indent = format
-        .indent
-        .unwrap_or(0.0)
-        .clamp(0.0, doc.page.content_width() / 2.0);
+    let list_indent = format.list.map_or(0.0, |l| {
+        LIST_INDENT * f32::from(l.level.min(crate::model::List::MAX_LEVEL) + 1)
+    });
+    let indent =
+        (format.indent.unwrap_or(0.0) + list_indent).clamp(0.0, doc.page.content_width() / 2.0);
     let left = doc.page.margins.left + indent;
     let width = doc.page.content_width() - indent;
 
@@ -359,6 +515,9 @@ fn break_lines(
             rtl: run.rtl,
             glyphs,
             decorations,
+            marker: None,
+            image: None,
+            source_text: None,
         });
     }
     if lines.is_empty() {
@@ -375,7 +534,39 @@ fn break_lines(
             rtl: false,
             glyphs: Vec::new(),
             decorations: Vec::new(),
+            marker: None,
+            image: None,
+            source_text: None,
         });
+    }
+
+    // The list marker hangs left of the first line, in the format of the paragraph's start.
+    if let Some(marker) = marker {
+        let mut buffer = Buffer::new(
+            system,
+            Metrics::new(first.size, first.size * LINE_HEIGHT * spacing),
+        );
+        buffer.set_size(system, None, None);
+        buffer.set_text(system, marker, &attrs[0], Shaping::Advanced, None);
+        buffer.shape_until_scroll(system, false);
+        let first_line = &lines[0];
+        let glyphs: Vec<PlacedGlyph> = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| PlacedGlyph {
+                font: g.font_id,
+                glyph_id: g.glyph_id,
+                size: g.font_size,
+                x: left - LIST_INDENT + g.x + g.x_offset,
+                y: first_line.baseline - g.y_offset,
+                advance: g.w,
+                range: g.start..g.end,
+                color: first.color,
+                rtl: false,
+                weight: g.font_weight,
+            })
+            .collect();
+        lines[0].marker = Some((marker.to_owned(), glyphs));
     }
     // Each line runs up to where the next starts; the last to the end of the paragraph.
     let len = paragraph.len();
@@ -385,10 +576,51 @@ fn break_lines(
         line.range = start..starts.get(i + 1).copied().unwrap_or(len);
     }
 
+    // A picture gets a line of its own above the text, aligned like the paragraph.
+    if let Some(image) = &paragraph.image {
+        let shown = image.width.min(width).max(1.0);
+        let height = image.data.height_for(shown);
+        let x = match format_align {
+            Align::Left | Align::Justify => left,
+            Align::Center => left + (width - shown) / 2.0,
+            Align::Right => left + width - shown,
+        };
+        let below = height + IMAGE_GAP;
+        for line in &mut lines {
+            *line = place(line, line.top + below);
+        }
+        lines.insert(
+            0,
+            Line {
+                block,
+                range: 0..0,
+                top: 0.0,
+                height: below,
+                baseline: height,
+                left,
+                width,
+                align: format_align,
+                rtl: false,
+                glyphs: Vec::new(),
+                decorations: Vec::new(),
+                marker: None,
+                source_text: None,
+                image: Some(PlacedImage {
+                    data: std::sync::Arc::clone(&image.data),
+                    x,
+                    top: 0.0,
+                    width: shown,
+                    height,
+                }),
+            },
+        );
+    }
+
     ParagraphLines {
         space_before: format.space_before.unwrap_or(style.space_before),
         space_after: format.space_after.unwrap_or(style.space_after),
         keep_with_next: paragraph.style.is_heading(),
+        page_break: format.page_break_before,
         lines,
     }
 }
@@ -405,6 +637,14 @@ fn place(line: &Line, y: f32) -> Line {
     for bar in &mut line.decorations {
         bar.top += dy;
     }
+    if let Some((_, glyphs)) = &mut line.marker {
+        for glyph in glyphs {
+            glyph.y += dy;
+        }
+    }
+    if let Some(image) = &mut line.image {
+        image.top += dy;
+    }
     line
 }
 
@@ -417,6 +657,11 @@ fn paginate(page: PageSetup, paragraphs: Vec<ParagraphLines>) -> Layout {
 
     for (index, paragraph) in paragraphs.iter().enumerate() {
         let lines = &paragraph.lines;
+        let started = pages.last().is_some_and(|p| !p.lines.is_empty());
+        if paragraph.page_break && started {
+            pages.push(PageLayout::default());
+            y = 0.0;
+        }
         let before = if y > 0.0 { paragraph.space_before } else { 0.0 };
 
         // Keep a heading with the start of the next paragraph.

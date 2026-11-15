@@ -14,6 +14,12 @@ pub struct Document {
     pub page: PageSetup,
     /// Base font for every style.
     pub font: FontChoice,
+    /// Text at the top of every page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<PageText>,
+    /// Text at the bottom of every page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<PageText>,
     /// Never empty: a document always has at least one paragraph to type into.
     pub paragraphs: Vec<Paragraph>,
 }
@@ -30,6 +36,8 @@ impl Document {
             title: None,
             page,
             font: FontChoice::default(),
+            header: None,
+            footer: None,
             paragraphs: vec![Paragraph::new(ParagraphStyle::Normal)],
         }
     }
@@ -71,6 +79,11 @@ impl Document {
         }
         self.page.validate()?;
         for paragraph in &self.paragraphs {
+            if let Some(image) = &paragraph.image
+                && !(1.0..=14_400.0).contains(&image.width)
+            {
+                return Err(ModelError::Invalid("an image has an invalid width".into()));
+            }
             for run in &paragraph.runs {
                 if let Some(size) = run.format.size
                     && !(1.0..=1000.0).contains(&size)
@@ -106,6 +119,35 @@ impl Document {
 impl Default for Document {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A header or footer: one line of text, where `{page}` and `{pages}` become the page number
+/// and the page count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageText {
+    pub text: String,
+    #[serde(default)]
+    pub align: Align,
+    /// Leave it off the first page (for a title page).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skip_first: bool,
+}
+
+impl PageText {
+    pub fn new(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            align: Align::Center,
+            skip_first: false,
+        }
+    }
+
+    /// The text for page `page` (1-based) of `pages`.
+    pub fn for_page(&self, page: usize, pages: usize) -> String {
+        self.text
+            .replace("{page}", &page.to_string())
+            .replace("{pages}", &pages.to_string())
     }
 }
 
@@ -221,6 +263,9 @@ pub struct Paragraph {
     pub format: ParagraphFormat,
     /// Normalized: no empty runs, and neighbouring runs differ in format.
     pub runs: Vec<Run>,
+    /// A picture shown above the paragraph's text (which then serves as its caption).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<Image>,
 }
 
 impl Paragraph {
@@ -229,6 +274,7 @@ impl Paragraph {
             style,
             format: ParagraphFormat::default(),
             runs: Vec::new(),
+            image: None,
         }
     }
 
@@ -238,7 +284,17 @@ impl Paragraph {
             style: self.style,
             format: self.format,
             runs: Vec::new(),
+            image: self.image.clone(),
         }
+    }
+
+    /// The paragraph that continues this one after a break (Enter): same style and formatting,
+    /// but no picture and no page break.
+    pub fn continuation(&self) -> Self {
+        let mut next = self.empty_like();
+        next.image = None;
+        next.format.page_break_before = false;
+        next
     }
 
     pub fn with_text(mut self, text: &str, format: CharFormat) -> Self {
@@ -407,6 +463,217 @@ pub struct ParagraphFormat {
     /// Left indent in points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub indent: Option<f32>,
+    /// A bulleted or numbered list item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<List>,
+    /// Starts a new page.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub page_break_before: bool,
+}
+
+/// List membership of a paragraph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct List {
+    pub kind: ListKind,
+    /// Nesting depth, 0 for the outermost level.
+    #[serde(default)]
+    pub level: u8,
+}
+
+impl List {
+    pub const MAX_LEVEL: u8 = 8;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+}
+
+/// A picture placed in a paragraph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Image {
+    pub data: std::sync::Arc<ImageData>,
+    /// Displayed width in points (shrunk to the text width if wider).
+    pub width: f32,
+}
+
+/// The encoded bytes of a picture, as found in the file it came from.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(try_from = "SerializedImage", into = "SerializedImage")]
+pub struct ImageData {
+    pub kind: ImageKind,
+    pub bytes: Vec<u8>,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    /// Identifies the bytes cheaply (for comparing and caching).
+    pub hash: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageKind {
+    Png,
+    Jpeg,
+}
+
+/// Pictures larger than this are refused.
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+impl ImageData {
+    /// Reads a PNG or JPEG file's bytes, checking that they decode.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ModelError> {
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return Err(ModelError::Invalid("the picture is too large".into()));
+        }
+        let kind = match image::guess_format(&bytes) {
+            Ok(image::ImageFormat::Png) => ImageKind::Png,
+            Ok(image::ImageFormat::Jpeg) => ImageKind::Jpeg,
+            _ => {
+                return Err(ModelError::Invalid(
+                    "only PNG and JPEG pictures are supported".into(),
+                ));
+            }
+        };
+        let (pixel_width, pixel_height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+            .with_guessed_format()
+            .map_err(|e| ModelError::Invalid(e.to_string()))?
+            .into_dimensions()
+            .map_err(|e| ModelError::Invalid(format!("the picture can't be read: {e}")))?;
+        if pixel_width == 0 || pixel_height == 0 || pixel_width > 30_000 || pixel_height > 30_000 {
+            return Err(ModelError::Invalid(
+                "the picture has an unusable size".into(),
+            ));
+        }
+        let hash = hash_bytes(&bytes);
+        Ok(Self {
+            kind,
+            bytes,
+            pixel_width,
+            pixel_height,
+            hash,
+        })
+    }
+
+    /// Height for a given displayed width, keeping the aspect ratio.
+    pub fn height_for(&self, width: f32) -> f32 {
+        width * self.pixel_height as f32 / self.pixel_width as f32
+    }
+
+    /// Natural width in points, at 96 pixels per inch.
+    pub fn natural_width(&self) -> f32 {
+        self.pixel_width as f32 * 0.75
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+impl PartialEq for ImageData {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.bytes == other.bytes
+    }
+}
+
+impl std::fmt::Debug for ImageData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageData")
+            .field("kind", &self.kind)
+            .field("size", &(self.pixel_width, self.pixel_height))
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// How a picture is stored in the JSON source: base64 bytes.
+#[derive(Serialize, Deserialize)]
+struct SerializedImage {
+    kind: ImageKind,
+    data: String,
+}
+
+impl From<ImageData> for SerializedImage {
+    fn from(image: ImageData) -> Self {
+        Self {
+            kind: image.kind,
+            data: base64::encode(&image.bytes),
+        }
+    }
+}
+
+impl TryFrom<SerializedImage> for ImageData {
+    type Error = String;
+
+    fn try_from(image: SerializedImage) -> Result<Self, String> {
+        let bytes = base64::decode(&image.data).ok_or("invalid picture data")?;
+        let data = Self::from_bytes(bytes).map_err(|e| e.to_string())?;
+        if data.kind != image.kind {
+            return Err("picture data does not match its kind".into());
+        }
+        Ok(data)
+    }
+}
+
+/// Standard base64 (RFC 4648) with padding.
+mod base64 {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub(super) fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    pub(super) fn decode(text: &str) -> Option<Vec<u8>> {
+        let text = text.trim_end_matches('=');
+        let mut out = Vec::with_capacity(text.len() * 3 / 4);
+        let (mut acc, mut bits) = (0u32, 0u32);
+        for c in text.bytes() {
+            let value = ALPHABET.iter().position(|&a| a == c)? as u32;
+            acc = (acc << 6) | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+                acc &= (1 << bits) - 1;
+            }
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn round_trips() {
+            for len in 0..20 {
+                let bytes: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+                let text = super::encode(&bytes);
+                assert_eq!(text.len() % 4, 0);
+                assert_eq!(super::decode(&text), Some(bytes));
+            }
+            assert_eq!(super::encode(b"Man"), "TWFu");
+            assert_eq!(super::encode(b"Ma"), "TWE=");
+            assert_eq!(super::decode("not base64!"), None);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

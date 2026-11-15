@@ -19,9 +19,10 @@ pub use edit::{Applied, Edit, EditError, Fragment, Settings};
 pub use editor::{CaretFormat, Clicks, Editor, Motion, Rect, Toggle};
 pub use export::{ExportError, ExportJob, Opened, SOURCE_NAME, export_pdf, open_pdf};
 pub use fonts::{EmbedFonts, Fonts};
-pub use layout::{Decoration, Layout, LayoutCache, Line, PageLayout, PlacedGlyph};
+pub use layout::{Decoration, Layout, LayoutCache, Line, PageLayout, PlacedGlyph, PlacedImage};
 pub use model::{
-    Align, CharFormat, Color, Document, FORMAT_VERSION, FontChoice, Margins, ModelError, PageSetup,
-    Paragraph, ParagraphFormat, ParagraphStyle, Position, Run, TextRange,
+    Align, CharFormat, Color, Document, FORMAT_VERSION, FontChoice, Image, ImageData, ImageKind,
+    List, ListKind, MAX_IMAGE_BYTES, Margins, ModelError, PageSetup, PageText, Paragraph,
+    ParagraphFormat, ParagraphStyle, Position, Run, TextRange,
 };
 pub use raster::{Raster, Rasterizer};

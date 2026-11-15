@@ -127,6 +127,11 @@ fn write(
             let text = texts.get(line.block).map_or("", String::as_str);
             draw_line(&mut surface, line, text, fonts, &mut cache)?;
         }
+        // Headers and footers carry their own text: their glyph ranges index into it.
+        for line in &page.furniture {
+            let text = page_text(line);
+            draw_line(&mut surface, line, &text, fonts, &mut cache)?;
+        }
         surface.finish();
         page_out.finish();
     }
@@ -158,6 +163,11 @@ fn fill(color: Color) -> Fill {
     }
 }
 
+/// The text of a header or footer line, rebuilt from the layout's paragraph.
+fn page_text(line: &Line) -> String {
+    line.source_text.clone().unwrap_or_default()
+}
+
 fn draw_line(
     surface: &mut Surface<'_>,
     line: &Line,
@@ -165,7 +175,53 @@ fn draw_line(
     fonts: &EmbedFonts,
     cache: &mut HashMap<cosmic_text::fontdb::ID, Font>,
 ) -> Result<(), ExportError> {
-    let glyphs = &line.glyphs;
+    if let Some(image) = &line.image {
+        draw_image(surface, image)?;
+    }
+    draw_glyph_runs(surface, &line.glyphs, text, fonts, cache)?;
+    if let Some((marker, glyphs)) = &line.marker {
+        draw_glyph_runs(surface, glyphs, marker, fonts, cache)?;
+    }
+    for bar in &line.decorations {
+        let Some(rect) = Rect::from_xywh(bar.x, bar.top, bar.width, bar.thickness) else {
+            continue;
+        };
+        let mut path = PathBuilder::new();
+        path.push_rect(rect);
+        if let Some(path) = path.finish() {
+            surface.set_fill(Some(fill(bar.color)));
+            surface.draw_path(&path);
+        }
+    }
+    Ok(())
+}
+
+fn draw_image(
+    surface: &mut Surface<'_>,
+    image: &crate::layout::PlacedImage,
+) -> Result<(), ExportError> {
+    let data = krilla::Data::from(image.data.bytes.clone());
+    let picture = match image.data.kind {
+        crate::model::ImageKind::Png => krilla::image::Image::from_png(data, true),
+        crate::model::ImageKind::Jpeg => krilla::image::Image::from_jpeg(data, true),
+    }
+    .map_err(|e| ExportError::Write(format!("a picture could not be embedded: {e}")))?;
+    let Some(size) = krilla::geom::Size::from_wh(image.width, image.height) else {
+        return Ok(());
+    };
+    surface.push_transform(&krilla::geom::Transform::from_translate(image.x, image.top));
+    surface.draw_image(picture, size);
+    surface.pop();
+    Ok(())
+}
+
+fn draw_glyph_runs(
+    surface: &mut Surface<'_>,
+    glyphs: &[crate::layout::PlacedGlyph],
+    text: &str,
+    fonts: &EmbedFonts,
+    cache: &mut HashMap<cosmic_text::fontdb::ID, Font>,
+) -> Result<(), ExportError> {
     let mut start = 0;
     while start < glyphs.len() {
         // A run of glyphs drawn in one go: same font, size, colour and baseline.
@@ -243,18 +299,6 @@ fn draw_line(
             false,
         );
         start = end;
-    }
-
-    for bar in &line.decorations {
-        let Some(rect) = Rect::from_xywh(bar.x, bar.top, bar.width, bar.thickness) else {
-            continue;
-        };
-        let mut path = PathBuilder::new();
-        path.push_rect(rect);
-        if let Some(path) = path.finish() {
-            surface.set_fill(Some(fill(bar.color)));
-            surface.draw_path(&path);
-        }
     }
     Ok(())
 }
