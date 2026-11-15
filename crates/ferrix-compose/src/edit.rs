@@ -192,6 +192,13 @@ impl Document {
         Ok(())
     }
 
+    /// Checks that pasting `fragment` keeps the document valid (font sizes, picture widths).
+    pub fn validate_fragment(&self, fragment: &Fragment) -> Result<(), crate::model::ModelError> {
+        let mut probe = Document::new();
+        probe.paragraphs = fragment.0.clone();
+        probe.validate()
+    }
+
     /// A copy of the text in `range`, each paragraph keeping its style and formatting.
     pub fn extract(&self, range: TextRange) -> Result<Fragment, EditError> {
         self.check_range(range)?;

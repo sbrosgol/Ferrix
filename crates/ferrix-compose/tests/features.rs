@@ -314,3 +314,35 @@ fn case_insensitive_matching_keeps_byte_offsets_right() {
         assert!(e.document().check(range.end).is_ok());
     }
 }
+
+#[test]
+fn pasting_formatted_text() {
+    use ferrix_compose::fragment_from_html;
+    let mut e = editor(&["Start end"]);
+    e.select(TextRange::caret(Position::new(0, 6)));
+    let fragment =
+        fragment_from_html("<h1>Big</h1><p>one <b>bold</b></p><ul><li>item</li></ul>").unwrap();
+    e.paste_fragment(&fragment);
+    assert_eq!(texts(&e), ["Start Big", "one bold", "itemend"]);
+    // The first pasted paragraph joins the caret's paragraph and keeps its style.
+    assert_eq!(e.document().paragraphs[0].style, ParagraphStyle::Normal);
+    assert_eq!(e.document().paragraphs[1].runs[1].format.bold, Some(true));
+    assert!(e.document().paragraphs[2].format.list.is_some());
+    assert_eq!(e.focus(), Position::new(2, 4));
+    assert_eq!(e.undo_label(), Some("Paste"));
+    e.undo();
+    assert_eq!(texts(&e), ["Start end"]);
+
+    // Copying and pasting within Ferrix keeps everything.
+    e.select(TextRange::between(Position::new(0, 0), Position::new(0, 5)));
+    e.toggle(ferrix_compose::Toggle::Bold);
+    let copied = e.copy_fragment().unwrap();
+    e.move_caret(Motion::DocumentEnd, false);
+    e.paste_fragment(&copied);
+    assert_eq!(texts(&e), ["Start endStart"]);
+    let last = e.document().paragraphs[0].runs.last().unwrap();
+    assert_eq!(
+        (last.text.as_str(), last.format.bold),
+        ("Start", Some(true))
+    );
+}

@@ -528,6 +528,43 @@ impl Editor {
             .unwrap_or_default()
     }
 
+    /// The selection with its formatting, for the clipboard.
+    pub fn copy_fragment(&self) -> Option<Fragment> {
+        let range = self.selection.range();
+        (!range.is_empty())
+            .then(|| self.doc.extract(range).ok())
+            .flatten()
+    }
+
+    /// Pastes formatted paragraphs over the selection as one undo step. The first pasted
+    /// paragraph joins the paragraph at the caret and takes on its style; further paragraphs
+    /// keep their own.
+    pub fn paste_fragment(&mut self, fragment: &Fragment) {
+        let range = self.selection.range();
+        let target = &self.doc.paragraphs[range.start.block];
+        let mut parts = fragment.paragraphs().to_vec();
+        let image = parts[0].image.take();
+        parts[0].style = target.style;
+        parts[0].format = target.format;
+        parts[0].image = target.image.clone().or(image);
+        if parts.len() > 1 {
+            // The text after the caret stays in a paragraph like the one it was in.
+            let last = parts.len() - 1;
+            if parts[last].is_empty() && parts[last].image.is_none() {
+                parts[last] = target.continuation();
+            }
+        }
+        let Some(with) = Fragment::new(parts) else {
+            return;
+        };
+        if self.doc.validate_fragment(&with).is_err() {
+            return;
+        }
+        self.commit(Edit::Replace { range, with }, "Paste", None, |a| {
+            Selection::caret(a.range.end)
+        });
+    }
+
     /// Removes the selected text and returns it.
     pub fn cut(&mut self) -> String {
         let text = self.selected_text();

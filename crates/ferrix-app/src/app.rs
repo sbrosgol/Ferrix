@@ -314,6 +314,8 @@ pub struct App {
     open_notice: Option<String>,
     /// The find and replace bar, while open.
     pub(crate) find: Option<FindState>,
+    /// Formatted copy and paste for written documents.
+    clipboard: crate::clipboard::RichClipboard,
 }
 
 #[derive(Debug, Clone)]
@@ -451,6 +453,7 @@ impl App {
             page_setup: None,
             open_notice: None,
             find: None,
+            clipboard: crate::clipboard::RichClipboard::default(),
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -1608,9 +1611,28 @@ impl App {
                 }
             }
             WriteAction::Drag { page, x, y } => e.drag(page, x, y),
-            WriteAction::Key(KeyCommand::Paste) => {
-                return iced::clipboard::read()
-                    .map(|text| Message::Write(WriteAction::Pasted(text)));
+            WriteAction::Key(KeyCommand::Paste) => match self.clipboard.paste() {
+                Some(crate::clipboard::Pasted::Formatted(fragment)) => e.paste_fragment(&fragment),
+                Some(crate::clipboard::Pasted::Text(text)) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(KeyCommand::PastePlain) => match self.clipboard.paste_plain() {
+                Some(text) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(command @ (KeyCommand::Copy | KeyCommand::Cut)) => {
+                let fragment = e.copy_fragment();
+                if let Some(text) = w.key(command)
+                    && !fragment.is_some_and(|f| self.clipboard.copy(f))
+                {
+                    task = iced::clipboard::write(text);
+                }
             }
             WriteAction::Key(command) => {
                 if let Some(text) = w.key(command) {

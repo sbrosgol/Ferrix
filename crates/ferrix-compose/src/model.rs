@@ -622,6 +622,10 @@ impl TryFrom<SerializedImage> for ImageData {
     }
 }
 
+pub(crate) fn encode_base64(bytes: &[u8]) -> String {
+    base64::encode(bytes)
+}
+
 /// Standard base64 (RFC 4648) with padding.
 mod base64 {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

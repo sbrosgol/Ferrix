@@ -169,7 +169,7 @@ impl Writer {
                 let text = e.cut();
                 return (!text.is_empty()).then_some(text);
             }
-            KeyCommand::Paste => {}
+            KeyCommand::Paste | KeyCommand::PastePlain => {}
         }
         None
     }
@@ -204,6 +204,8 @@ pub enum KeyCommand {
     Copy,
     Cut,
     Paste,
+    /// Paste without formatting (⇧⌘V).
+    PastePlain,
     Toggle(Toggle),
 }
 
@@ -258,6 +260,7 @@ pub(crate) fn key_command(
             Some('a') => Some(KeyCommand::SelectAll),
             Some('c') => Some(KeyCommand::Copy),
             Some('x') => Some(KeyCommand::Cut),
+            Some('v') if modifiers.shift() => Some(KeyCommand::PastePlain),
             Some('v') if !modifiers.alt() => Some(KeyCommand::Paste),
             Some('b') => Some(KeyCommand::Toggle(Toggle::Bold)),
             Some('i') => Some(KeyCommand::Toggle(Toggle::Italic)),

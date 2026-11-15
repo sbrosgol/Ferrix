@@ -1,6 +1,7 @@
 //! Ferrix desktop application (iced, ADR-0002).
 
 mod app;
+mod clipboard;
 mod document;
 mod icon;
 #[cfg(windows)]
