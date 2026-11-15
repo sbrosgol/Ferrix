@@ -11,6 +11,7 @@ const STROKE_WIDTH: &str = "1.75";
 pub(crate) enum Icon {
     PanelLeft,
     FolderOpen,
+    Printer,
     ChevronLeft,
     ChevronRight,
     ZoomIn,
@@ -44,6 +45,7 @@ macro_rules! icons {
 icons! {
     PanelLeft => "panel-left",
     FolderOpen => "folder-open",
+    Printer => "printer",
     ChevronLeft => "chevron-left",
     ChevronRight => "chevron-right",
     ZoomIn => "zoom-in",

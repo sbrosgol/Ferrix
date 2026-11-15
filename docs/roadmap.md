@@ -42,7 +42,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 - Page organizer: reorder, rotate, delete, insert blank/from file, extract, merge, split.
 - AcroForm fill (text, checkbox, radio, combo, list), tab order, flatten.
 - Visual signature (draw/type/image), reusable.
-- Printing via OS dialogs (render-to-printer path per platform).
+- ~~Printing via OS dialogs~~ — delivered early in `ferrix-print` (ADR-0006); remaining: print
+  the unsaved in-memory state once editing lands.
 - Sandboxing of engine hosts on all platforms; packaging + signing; Flathub, winget, Homebrew.
 - Localization infrastructure + 3 initial languages.
 

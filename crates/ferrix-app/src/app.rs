@@ -14,6 +14,7 @@ use std::{
 
 use ferrix_engine::{DocInfo, DocSource, EngineError, PdfEngine, RenderFlags, TileRequest};
 use ferrix_engine_pdfium::PdfiumEngine;
+use ferrix_print::{PrintJob, PrintOutcome};
 use ferrix_types::{DocId, PageIndex, PixelRect, Rotation, Size};
 use iced::{
     Alignment, Element, Event, Font, Length, Subscription, Task, Theme, event, font, keyboard,
@@ -191,6 +192,8 @@ pub enum Message {
     Resized(iced::Size),
     DragWindow,
     DismissStatus,
+    Print,
+    Printed(Result<PrintOutcome, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -409,6 +412,9 @@ impl App {
                 }
             }
             Message::DismissStatus => self.status = None,
+            Message::Print => return self.print(),
+            Message::Printed(Ok(_)) => {}
+            Message::Printed(Err(e)) => self.status = Some(format!("Couldn’t print: {e}")),
         }
         Task::none()
     }
@@ -486,6 +492,12 @@ impl App {
                 Icon::FolderOpen,
                 "Open… (⌘O)",
                 Some(Message::OpenDialog),
+                false
+            ),
+            icon_button(
+                Icon::Printer,
+                "Print… (⌘P)",
+                has_doc.then_some(Message::Print),
                 false
             ),
             Space::new().width(6),
@@ -899,6 +911,73 @@ impl App {
         )
     }
 
+    /// Prints the document as saved on disk through the platform's print system (ADR-0006).
+    fn print(&mut self) -> Task<Message> {
+        let (Some(doc), Some(window)) = (
+            self.doc.as_ref().filter(|d| d.info.page_count > 0),
+            self.window,
+        ) else {
+            return Task::none();
+        };
+        let job = PrintJob {
+            title: doc_name(doc),
+            path: doc.path.clone(),
+            page_count: doc.info.page_count,
+        };
+        self.status = None;
+        self.platform_print(window, job)
+    }
+
+    /// macOS: a print sheet on our window, opened on the main thread.
+    #[cfg(target_os = "macos")]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        window::run(window, move |w| {
+            ferrix_print::print_with_sheet(w, &job).map_err(|e| e.to_string())
+        })
+        .map(Message::Printed)
+    }
+
+    /// Linux/BSD: the desktop portal's print dialog.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
+            let job = job.clone();
+            Task::perform(
+                async move {
+                    ferrix_print::print_with_portal(parent, &job)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                Message::Printed,
+            )
+        })
+    }
+
+    /// Windows: the common print dialog, with pages rendered by our engine on a spool thread.
+    #[cfg(windows)]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        let (Ok(engine), Some(doc)) = (self.engine.clone(), &self.doc) else {
+            return Task::none();
+        };
+        let doc = doc.info.id;
+        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
+            let (job, engine) = (job.clone(), engine.clone());
+            Task::perform(
+                async move {
+                    let (tx, rx) = iced::futures::channel::oneshot::channel();
+                    std::thread::spawn(move || {
+                        let mut pages = EnginePages { engine, doc };
+                        let result = ferrix_print::print_with_dialog(parent, &job, &mut pages);
+                        let _ = tx.send(result.map_err(|e| e.to_string()));
+                    });
+                    rx.await
+                        .unwrap_or_else(|_| Err("printing stopped unexpectedly".into()))
+                },
+                Message::Printed,
+            )
+        })
+    }
+
     /// Closes the current document on the engine thread, without waiting for it.
     fn close_document(&mut self) -> Task<Message> {
         self.page_image = None;
@@ -967,6 +1046,53 @@ impl App {
             },
             move |result| Message::Thumbnail(id, page, result),
         )
+    }
+}
+
+/// Page images for raster printing, rendered synchronously on the print thread.
+#[cfg(windows)]
+struct EnginePages {
+    engine: Worker,
+    doc: DocId,
+}
+
+#[cfg(windows)]
+impl ferrix_print::PageSource for EnginePages {
+    fn page_size(&mut self, page: u32) -> Result<(f32, f32), String> {
+        let doc = self.doc;
+        let info = iced::futures::executor::block_on(
+            self.engine.call(move |e| e.page_info(doc, PageIndex(page))),
+        );
+        flatten(info).map(|info| (info.size.width, info.size.height))
+    }
+
+    fn render(
+        &mut self,
+        page: u32,
+        scale: f32,
+        rotate: bool,
+    ) -> Result<ferrix_print::Bitmap, String> {
+        let doc = self.doc;
+        let tile = iced::futures::executor::block_on(self.engine.call(move |e| {
+            let size = e.page_info(doc, PageIndex(page))?.size;
+            let (mut width, mut height) = size.to_pixels(scale);
+            if rotate {
+                std::mem::swap(&mut width, &mut height);
+            }
+            e.render_tile(&TileRequest {
+                doc,
+                page: PageIndex(page),
+                scale,
+                rotation: if rotate { Rotation::R90 } else { Rotation::R0 },
+                region: PixelRect::new(0, 0, width, height),
+                flags: RenderFlags::default(),
+            })
+        }));
+        flatten(tile).map(|tile| ferrix_print::Bitmap {
+            width: tile.region.width,
+            height: tile.region.height,
+            rgba: tile.pixels,
+        })
     }
 }
 
@@ -1143,6 +1269,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         Key::Named(Named::End) => Some(Message::Last),
         Key::Character(c) if modifiers.command() => match c {
             "o" => Some(Message::OpenDialog),
+            "p" => Some(Message::Print),
             "=" | "+" => Some(Message::ZoomIn),
             "-" => Some(Message::ZoomOut),
             "0" => Some(Message::ZoomPicked(ZoomChoice::Percent(100))),

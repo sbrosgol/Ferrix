@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [lib]
@@ -20,6 +21,7 @@ name = "screenshot"
 [dependencies]
 ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
+ferrix-print.workspace = true
 ferrix-types.workspace = true
 iced.workspace = true
 rfd.workspace = true

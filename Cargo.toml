@@ -8,12 +8,14 @@ version = "0.0.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/sbrosgol/Ferrix"
 publish = false
 
 [workspace.dependencies]
 ferrix-types = { path = "crates/ferrix-types" }
 ferrix-engine = { path = "crates/ferrix-engine" }
 ferrix-engine-pdfium = { path = "crates/ferrix-engine-pdfium" }
+ferrix-print = { path = "crates/ferrix-print" }
 
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }

@@ -17,7 +17,8 @@ Any editor with rust-analyzer works; RustRover opens the workspace from the root
 
 - **Layering:** `ferrix-types` → `ferrix-engine` → backends → core → app. Dependencies point down
   only; nothing above `ferrix-engine` may use PDFium types.
-- **No `unsafe`** in first-party crates. FFI belongs in reviewed backend crates only.
+- **No `unsafe`** in first-party crates, except reviewed FFI modules (engine backends,
+  `ferrix-print`), each `unsafe` block with a `// SAFETY:` comment.
 - **Untrusted input:** every PDF is hostile. Validate sizes and indices; never `unwrap` on data
   derived from a document.
 - **Tests:** new engine behavior needs a test in `crates/ferrix-engine-pdfium/tests/`, using
