@@ -32,6 +32,16 @@ pub(crate) enum Icon {
     Delete,
     InsertPages,
     New,
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    AlignJustify,
+    PageSetup,
+    ClearFormatting,
 }
 
 macro_rules! icons {
@@ -76,6 +86,16 @@ icons! {
     Delete => "trash-2",
     InsertPages => "file-plus",
     New => "file-new",
+    Bold => "bold",
+    Italic => "italic",
+    Underline => "underline",
+    Strikethrough => "strikethrough",
+    AlignLeft => "text-align-start",
+    AlignCenter => "text-align-center",
+    AlignRight => "text-align-end",
+    AlignJustify => "text-align-justify",
+    PageSetup => "file-cog",
+    ClearFormatting => "remove-formatting",
 }
 
 fn load(source: &str) -> svg::Handle {

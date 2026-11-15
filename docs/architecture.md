@@ -27,7 +27,8 @@ ADRs in [`docs/adr/`](adr/); the delivery plan is in [`roadmap.md`](roadmap.md).
 ### Non-goals (for 1.0)
 - PDF JavaScript execution (forms work without it; scripts are ignored, see §9).
 - Cloud sync, accounts, telemetry by default.
-- Being a PDF *authoring* tool (layout from scratch) — we edit existing documents.
+- A full office suite. Ferrix writes letters, reports and forms ([ADR-0008](adr/0008-writing-documents.md)),
+  but not tracked changes, footnotes, mail merge or `.docx` editing.
 - Mobile / web targets (the core stays portable so this remains possible later).
 
 ### Quality attributes (prioritized)
@@ -115,6 +116,7 @@ ferrix/
 │  ├─ ferrix-store/           # settings.json + SQLite state.db (ADR-0005)
 │  ├─ ferrix-print/           # native print dialogs per platform (ADR-0006)
 │  ├─ ferrix-convert/         # images + office documents → PDF via Word/LibreOffice (ADR-0007)
+│  ├─ ferrix-compose/         # documents written from scratch: model, edits, layout, export (ADR-0008)
 │  ├─ ferrix-app/             # bin: desktop UI
 │  └─ ferrix-cli/             # bin: headless ops (render, merge, split, annotate, diff)
 ├─ xtask/                     # cargo xtask: fetch-pdfium, corpus, bundle, release

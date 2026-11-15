@@ -4,6 +4,8 @@
 //! cargo run -p ferrix-app --example screenshot -- out.png [document] [--dark] [--new]
 //! ```
 //!
+//! `--write` starts a written document and types formatted text into it; `--fit-page` and
+//! `--zoom-in` change the zoom afterwards.
 //! `--new` opens the New Document dialog, `--rotate` rotates the current page and `--recover`
 //! accepts the crash-recovery offer, each partway through the run, before capturing. `SHOT_SECS` sets how long the app
 //! runs first (default 3), `SHOT_SIZE=WxH` the window size in logical pixels.
@@ -39,6 +41,18 @@ fn main() {
     }
     if flag(&mut args, "--recover") {
         script.push(Message::Recovery(ferrix_app::Recovery::Recover));
+    }
+    if flag(&mut args, "--write") {
+        script.extend(writing_script());
+    }
+    if flag(&mut args, "--fit-page") {
+        script.push(Message::FitPage);
+    }
+    if flag(&mut args, "--fit-width") {
+        script.push(Message::FitWidth);
+    }
+    if flag(&mut args, "--zoom-in") {
+        script.extend([Message::ZoomIn, Message::ZoomIn, Message::ZoomIn]);
     }
     let output = PathBuf::from(
         args.first()
@@ -85,6 +99,53 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Creates a document and types a short formatted letter into it.
+fn writing_script() -> Vec<Message> {
+    use ferrix_app::{KeyCommand as K, WriteAction as A};
+    use ferrix_compose::{Align, Motion, Toggle};
+    let key = |k| Message::Write(A::Key(k));
+    let typed = |t: &str| key(K::Insert(t.into()));
+    let mut s = vec![
+        Message::NewDialog,
+        Message::CreateWriting,
+        Message::Write(A::Style(ferrix_app::writer_style(1))),
+        typed("Project Update"),
+        key(K::Enter),
+        typed("Dear team,"),
+        key(K::Enter),
+        typed("This document was written in "),
+        key(K::Toggle(Toggle::Bold)),
+        typed("Ferrix"),
+        key(K::Toggle(Toggle::Bold)),
+        typed(" and saved as an ordinary PDF that stays "),
+        key(K::Toggle(Toggle::Italic)),
+        typed("editable"),
+        key(K::Toggle(Toggle::Italic)),
+        typed(
+            ". Text wraps at the margins, paragraphs reflow as you type, and every change can be undone.",
+        ),
+        key(K::Enter),
+        Message::Write(A::Style(ferrix_app::writer_style(3))),
+        typed("Next steps"),
+        key(K::Enter),
+        Message::Write(A::Align(Align::Justify)),
+        typed(
+            "Review the draft, then share the PDF. Anyone can read it; anyone with Ferrix can keep editing it. ",
+        ),
+        typed(
+            "Selections, word-by-word movement and the formatting bar all work from the keyboard.",
+        ),
+    ];
+    // Select the last word to show the selection.
+    for _ in 0..9 {
+        s.push(key(K::Move {
+            motion: Motion::Left,
+            extend: true,
+        }));
+    }
+    s
 }
 
 /// Viewport in logical pixels, overridable with `SHOT_SIZE=WxH`.

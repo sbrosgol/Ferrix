@@ -35,6 +35,10 @@ enum Record {
     },
     Source(SavedOrigin),
     Pages(PageList),
+    /// A written document (ADR-0008) as it was when journaling started...
+    Written(ferrix_compose::Document),
+    /// ...and each edit applied to it since, undo and redo included.
+    WriteEdit(ferrix_compose::Edit),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +54,8 @@ enum SavedOrigin {
         suggested: Option<PathBuf>,
         blob: String,
     },
+    /// A written document that was never saved; its content is in the journal itself.
+    NewDocument { name: String },
 }
 
 fn recovery_dir() -> Option<PathBuf> {
@@ -161,6 +167,82 @@ impl Journal {
     }
 }
 
+/// The journal of a document being written: a snapshot, then every edit.
+#[derive(Debug)]
+pub(crate) struct WriterJournal {
+    writer: JournalWriter,
+}
+
+impl WriterJournal {
+    /// Starts journaling a written document saved at `path` (or never saved).
+    pub(crate) fn start(
+        name: &str,
+        path: Option<&Path>,
+        doc: &ferrix_compose::Document,
+    ) -> io::Result<Self> {
+        let dir = recovery_dir().ok_or_else(|| io::Error::other("no app data directory"))?;
+        Self::start_in(&dir, name, path, doc)
+    }
+
+    fn start_in(
+        dir: &Path,
+        name: &str,
+        path: Option<&Path>,
+        doc: &ferrix_compose::Document,
+    ) -> io::Result<Self> {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        std::fs::create_dir_all(dir)?;
+        let started = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let id = format!(
+            "{started}-{}-w{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let writer = JournalWriter::create(&dir.join(format!("{id}.{EXTENSION}")))?;
+        let mut journal = Self { writer };
+        let base = match path {
+            Some(path) => {
+                let stamp = FileStamp::of(path).ok();
+                SavedOrigin::File {
+                    path: path.to_path_buf(),
+                    len: stamp.map_or(0, |s| s.len),
+                    modified_ns: stamp.and_then(|s| s.modified).and_then(nanos),
+                }
+            }
+            None => SavedOrigin::NewDocument {
+                name: name.to_owned(),
+            },
+        };
+        journal.write(&Record::Header {
+            version: FORMAT_VERSION,
+            base,
+            started,
+        })?;
+        journal.write(&Record::Written(doc.clone()))?;
+        Ok(journal)
+    }
+
+    pub(crate) fn record(&mut self, edits: &[ferrix_compose::Edit]) -> io::Result<()> {
+        for edit in edits {
+            self.write(&Record::WriteEdit(edit.clone()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn discard(self) {
+        if let Err(e) = self.writer.discard() {
+            tracing::warn!("could not delete recovery journal: {e}");
+        }
+    }
+
+    fn write(&mut self, record: &Record) -> io::Result<()> {
+        let payload = serde_json::to_vec(record).map_err(io::Error::other)?;
+        self.writer.append(&payload)
+    }
+}
+
 /// Unsaved work left behind by a session that ended unexpectedly.
 #[derive(Debug, Clone)]
 pub struct Recoverable {
@@ -170,6 +252,8 @@ pub struct Recoverable {
     pub(crate) base_changed: bool,
     pub(crate) sources: Vec<Origin>,
     pub(crate) pages: PageList,
+    /// For a written document: its content with every journaled edit replayed.
+    pub(crate) written: Option<ferrix_compose::Document>,
     pub(crate) started: SystemTime,
     blobs: Vec<PathBuf>,
 }
@@ -222,6 +306,8 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
     let mut header = None;
     let mut sources = Vec::new();
     let mut pages = None;
+    let mut written: Option<ferrix_compose::Document> = None;
+    let mut replay_failed = false;
     for payload in journal::read(path)? {
         match serde_json::from_slice::<Record>(&payload).map_err(io::Error::other)? {
             Record::Header {
@@ -236,7 +322,17 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
             }
             Record::Source(origin) => sources.push(origin),
             Record::Pages(list) => pages = Some(list),
+            Record::Written(doc) => written = Some(doc),
+            Record::WriteEdit(edit) => {
+                // Stop at an edit that no longer applies: everything before it is recovered.
+                if let Some(doc) = written.as_mut().filter(|_| !replay_failed) {
+                    replay_failed = doc.apply(&edit).is_err();
+                }
+            }
         }
+    }
+    if written.is_some() {
+        pages = Some(PageList::identity(0));
     }
     let (Some((base, started)), Some(pages)) = (header, pages) else {
         return Ok(None);
@@ -265,6 +361,7 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
                 blobs.push(blob);
                 (Origin::untitled(name, suggested, bytes), false)
             }
+            SavedOrigin::NewDocument { name } => (Origin::untitled(name, None, Vec::new()), false),
         })
     };
     let (base, mut base_changed) = restore(base)?;
@@ -280,6 +377,7 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
         base_changed,
         sources: restored,
         pages,
+        written,
         started: UNIX_EPOCH + std::time::Duration::from_secs(started),
         blobs,
     }))
@@ -404,6 +502,33 @@ mod tests {
 
         let found = scan_in(&dir.join("recovery"));
         assert!(found[0].base_changed);
+    }
+
+    #[test]
+    fn a_crashed_writing_session_replays_its_edits() {
+        use ferrix_compose::{Editor, Fonts};
+
+        let dir = scratch("writing");
+        let mut editor = Editor::new(ferrix_compose::Document::new(), Fonts::bundled());
+        editor.type_text("Dear team,");
+        let mut journal =
+            WriterJournal::start_in(&dir.join("recovery"), "Letter.pdf", None, editor.document())
+                .expect("start");
+        editor.take_applied();
+        editor.enter();
+        editor.type_text("Second paragraph");
+        editor.undo();
+        editor.type_text("Typed again");
+        journal.record(&editor.take_applied()).expect("record");
+        drop(journal); // the process dies without discarding
+
+        let found = scan_in(&dir.join("recovery"));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name(), "Letter.pdf");
+        assert!(!found[0].base_changed);
+        assert_eq!(found[0].written.as_ref(), Some(editor.document()));
+        found[0].discard();
+        assert!(scan_in(&dir.join("recovery")).is_empty());
     }
 
     #[test]
