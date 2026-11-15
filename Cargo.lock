@@ -1366,6 +1366,8 @@ dependencies = [
  "iced_test",
  "image",
  "rfd",
+ "serde",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1427,6 +1429,9 @@ dependencies = [
 [[package]]
 name = "ferrix-io"
 version = "0.0.1"
+dependencies = [
+ "flate2",
+]
 
 [[package]]
 name = "ferrix-pdf"

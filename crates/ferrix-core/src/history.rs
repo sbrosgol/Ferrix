@@ -31,6 +31,14 @@ impl History {
         Self::default()
     }
 
+    /// A history whose current state was never saved, e.g. edits recovered after a crash.
+    pub fn unsaved() -> Self {
+        Self {
+            saved_at: None,
+            ..Self::default()
+        }
+    }
+
     /// Applies `edit` and records it under `label` (e.g. "Delete 2 pages").
     pub fn perform(
         &mut self,
@@ -126,6 +134,13 @@ mod tests {
         assert!(!history.is_dirty());
         assert_eq!(history.redo(&mut pages).as_deref(), Some("Rotate"));
         assert!(history.is_dirty());
+    }
+
+    #[test]
+    fn recovered_state_stays_dirty_until_saved() {
+        let history = History::unsaved();
+        assert!(history.is_dirty());
+        assert_eq!(history.undo_label(), None);
     }
 
     #[test]

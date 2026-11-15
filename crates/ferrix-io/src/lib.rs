@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod journal;
+
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -66,8 +68,29 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()
 }
 
-/// Makes the rename itself durable. Not possible (or needed) on every platform.
-fn sync_parent_dir(path: &Path) {
+/// The per-user directory for Ferrix's own data (recovery journals, later settings and state).
+///
+/// `FERRIX_DATA_DIR` overrides it, e.g. for tests.
+pub fn app_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("FERRIX_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support/Ferrix"))
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Ferrix"))
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|h| h.join(".local/state")))
+            .map(|d| d.join("ferrix"))
+    }
+}
+
+/// Makes a newly created or renamed file's directory entry durable. Not possible (or needed)
+/// on every platform.
+pub(crate) fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
         && let Ok(dir) = fs::File::open(dir)

@@ -6,6 +6,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Vulnerabilities always fail. "Unmaintained" notices fail only for crates we depend on
+# directly; transitive ones (inside iced, rfd, zbus…) are tracked upstream.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
@@ -19,6 +22,7 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "ISC",
+    "NCSA",
     "Zlib",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",

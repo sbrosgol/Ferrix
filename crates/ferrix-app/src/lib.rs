@@ -5,6 +5,7 @@ mod document;
 mod icon;
 #[cfg(windows)]
 mod print;
+mod recovery;
 mod render;
 pub mod theme;
 mod view;
@@ -12,10 +13,11 @@ mod worker;
 
 use std::path::PathBuf;
 
-pub use app::{App, Message};
+pub use app::{App, Message, Recovery};
 pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
+pub use recovery::Recoverable;
 use worker::EngineWorker;
 
 /// Builds the application, optionally opening `initial` on start.
