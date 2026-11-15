@@ -43,4 +43,21 @@ existing digital signatures or corrupt files. Engines are slow to re-render afte
 - Known limits: undo history resets after a save; deleted pages' objects remain in the file
   until a future full rewrite ("Optimize"); bookmarks and form fields pointing at deleted pages
   are left dangling; form fields on inserted pages are not merged into the AcroForm.
-- Not yet: the crash-recovery journal (next step).
+
+## Implementation notes (crash recovery, 2026-11-15)
+- While a document has unsaved changes, its session writes a journal
+  (`<app data>/recovery/*.journal`; `~/Library/Application Support/Ferrix` on macOS,
+  `%LOCALAPPDATA%\Ferrix` on Windows, `$XDG_STATE_HOME/ferrix` on Linux).
+- Records are **page-list snapshots**, not individual commands: page lists are small, and a
+  snapshot cannot diverge on replay. The undo history is not recovered — the recovered state
+  opens as one unsaved change.
+- Format (`ferrix-io::journal`): magic header, then `len | crc32 | JSON payload` frames, each
+  `fsync`ed before the edit completes. Reading stops at the first torn or corrupt frame.
+- Each live session holds an exclusive OS lock on its journal (`File::try_lock`, hence MSRV
+  1.89+). On launch, journals nobody holds are offered back: Recover, Later, or Discard.
+- In-memory documents (new or converted) are stored as blob files beside the journal.
+- If the original file changed after the crash, recovery is refused rather than applying
+  page edits to different content.
+- Clean close, save, discard and quit delete the journal and its blobs.
+- Privacy: the journal holds file paths and, for unsaved new/converted documents, their
+  content, in the user's own app-data directory only.

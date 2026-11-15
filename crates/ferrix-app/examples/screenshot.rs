@@ -4,7 +4,8 @@
 //! cargo run -p ferrix-app --example screenshot -- out.png [document] [--dark] [--new]
 //! ```
 //!
-//! `--new` opens the New Document dialog before capturing. `SHOT_SECS` sets how long the app
+//! `--new` opens the New Document dialog, `--rotate` rotates the current page and `--recover`
+//! accepts the crash-recovery offer, each partway through the run, before capturing. `SHOT_SECS` sets how long the app
 //! runs first (default 3), `SHOT_SIZE=WxH` the window size in logical pixels.
 
 #![allow(clippy::unwrap_used)]
@@ -29,7 +30,16 @@ fn main() {
         found
     };
     let dark = flag(&mut args, "--dark");
-    let new_dialog = flag(&mut args, "--new");
+    let mut script: Vec<Message> = Vec::new();
+    if flag(&mut args, "--new") {
+        script.push(Message::NewDialog);
+    }
+    if flag(&mut args, "--rotate") {
+        script.push(Message::Rotate(ferrix_types::Rotation::R90));
+    }
+    if flag(&mut args, "--recover") {
+        script.push(Message::Recovery(ferrix_app::Recovery::Recover));
+    }
     let output = PathBuf::from(
         args.first()
             .expect("usage: screenshot <out.png> [doc] [--dark] [--new]"),
@@ -48,14 +58,18 @@ fn main() {
     let (sender, mut receiver) = mpsc::channel(100);
     let mut emulator = Emulator::new(sender, &app, Mode::Immediate, size().into());
     let start = Instant::now();
-    let mut sent = !new_dialog;
+    // Scripted messages go out in the middle half of the run, after loading settles.
+    let steps = script.len() as u32;
+    let mut script = script.into_iter().enumerate().peekable();
     while start.elapsed() < duration {
         if let Ok(Event::Action(action)) = receiver.try_recv() {
             emulator.perform(&app, action);
         }
-        if !sent && start.elapsed() > duration / 2 {
-            emulator.update(&app, Message::NewDialog);
-            sent = true;
+        if let Some((i, _)) = script.peek()
+            && start.elapsed() > duration / 2 + duration * (*i as u32) / (4 * steps)
+            && let Some((_, message)) = script.next()
+        {
+            emulator.update(&app, message);
         }
         std::thread::sleep(Duration::from_millis(1));
     }

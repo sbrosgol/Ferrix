@@ -11,11 +11,12 @@ use iced::{
 
 use crate::{
     app::{
-        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS, THUMB_WIDTH,
-        ZOOM_CHOICES, Zoom, ZoomChoice, page_scroll_id, sidebar_scroll_id,
+        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS, Recovery,
+        THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, page_scroll_id, sidebar_scroll_id,
     },
     document::{Document, MAX_THUMBNAILS},
     icon::Icon,
+    recovery::{Recoverable, describe},
     render::PageImage,
     theme::{self, Tokens},
 };
@@ -67,10 +68,15 @@ impl App {
             horizontal_divider(),
             self.status_bar(),
         ];
-        match (&self.confirm, &self.doc, &self.new_form) {
-            (Some(_), Some(doc), _) => stack![window, save_changes_dialog(doc)].into(),
-            (_, _, Some(form)) => stack![window, self.new_document_dialog(form)].into(),
-            _ => window.into(),
+        if let (Some(_), Some(doc)) = (&self.confirm, &self.doc) {
+            return stack![window, save_changes_dialog(doc)].into();
+        }
+        if let Some(found) = self.recoveries.first() {
+            return stack![window, self.recovery_dialog(found)].into();
+        }
+        match &self.new_form {
+            Some(form) => stack![window, self.new_document_dialog(form)].into(),
+            None => window.into(),
         }
     }
 
@@ -541,6 +547,84 @@ impl App {
 }
 
 impl App {
+    /// Offers back unsaved work from a session that ended unexpectedly.
+    fn recovery_dialog<'a>(&'a self, found: &'a Recoverable) -> Element<'a, Message> {
+        let busy = self.busy.is_some();
+        let mut body = column![
+            text("Recover unsaved changes?").size(16).font(SEMIBOLD),
+            muted(
+                format!(
+                    "Ferrix closed unexpectedly while “{}” had unsaved changes.",
+                    found.name()
+                ),
+                13.0
+            ),
+            muted(describe(found), 12.0),
+        ]
+        .spacing(6);
+        if found.base_changed {
+            body = body.push(
+                row![
+                    svg(Icon::Alert.handle())
+                        .width(14)
+                        .height(14)
+                        .style(theme::icon_colored(|t| t.danger)),
+                    text(
+                        "The original file has changed since then, so these edits can’t be \
+                         applied to it."
+                    )
+                    .size(12)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme::tokens(theme).danger),
+                    }),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+        if self.recoveries.len() > 1 {
+            body = body.push(muted(
+                format!(
+                    "{} more documents to review after this one.",
+                    self.recoveries.len() - 1
+                ),
+                12.0,
+            ));
+        }
+        let card = column![
+            body,
+            Space::new().height(8),
+            row![
+                button(text("Discard").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary)
+                    .on_press_maybe((!busy).then_some(Message::Recovery(Recovery::Discard))),
+                Space::new().width(Length::Fill),
+                button(text("Later").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary)
+                    .on_press_maybe((!busy).then_some(Message::Recovery(Recovery::Later))),
+                button(text("Recover").size(13).font(SEMIBOLD))
+                    .padding([6, 18])
+                    .style(theme::primary)
+                    .on_press_maybe(
+                        (!busy && !found.base_changed)
+                            .then_some(Message::Recovery(Recovery::Recover)),
+                    ),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6)
+        .padding(20)
+        .width(460);
+        opaque(
+            container(container(card).style(theme::card))
+                .center(Length::Fill)
+                .style(theme::backdrop),
+        )
+    }
+
     /// New Document: blank pages, or a conversion of other files.
     fn new_document_dialog<'a>(&'a self, form: &'a NewForm) -> Element<'a, Message> {
         let field_label = |label: &'a str| muted(label, 12.0);

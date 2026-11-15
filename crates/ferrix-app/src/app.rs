@@ -28,7 +28,8 @@ use iced::{
 use ferrix_convert::kind_of;
 
 use crate::{
-    document::{Click, Document, Origin, Thumbnail, file_name, pages_label},
+    document::{Click, Document, Origin, Thumbnail, file_name, pages_fit, pages_label},
+    recovery::{Journal, Recoverable},
     render::{LOGICAL_PX_PER_POINT, PageRef, Rendered, render_page},
     worker::{EngineWorker, blocking, flatten},
 };
@@ -112,7 +113,17 @@ pub(crate) enum Proceed {
     OpenDialog,
     Open(PathBuf),
     NewDialog,
+    Recover,
     Quit,
+}
+
+/// The answer in the crash-recovery dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovery {
+    Recover,
+    /// Keep the recovery data for a later launch.
+    Later,
+    Discard,
 }
 
 /// Why a file is being converted to PDF.
@@ -227,6 +238,10 @@ pub struct App {
     pub(crate) converter: Option<Arc<Converter>>,
     /// The New Document dialog, while open.
     pub(crate) new_form: Option<NewForm>,
+    /// Crash-recovery journal of the current document while it has unsaved changes.
+    journal: Option<Journal>,
+    /// Unsaved work from crashed sessions, offered one at a time.
+    pub(crate) recoveries: Vec<Recoverable>,
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +302,9 @@ pub enum Message {
     CreateFromFiles,
     NewPicked(Vec<PathBuf>),
     CloseNewDialog,
+    RecoveryFound(Vec<Recoverable>),
+    Recovery(Recovery),
+    Recovered(Box<Recoverable>, Result<Vec<DocInfo>, String>),
 }
 
 pub(crate) fn page_scroll_id() -> iced::widget::Id {
@@ -325,6 +343,8 @@ impl App {
             modifiers: keyboard::Modifiers::default(),
             converter: None,
             new_form: None,
+            journal: None,
+            recoveries: Vec::new(),
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -336,6 +356,9 @@ impl App {
                     Message::ConverterReady(Arc::new(found.unwrap_or_default()))
                 },
             ),
+            Task::perform(blocking(|| Ok(crate::recovery::scan())), |found| {
+                Message::RecoveryFound(found.unwrap_or_default())
+            }),
         ]);
         (app, boot.chain(open))
     }
@@ -370,6 +393,7 @@ impl App {
             && self.busy.is_none()
             && self.confirm.is_none()
             && self.new_form.is_none()
+            && self.recoveries.is_empty()
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
@@ -721,6 +745,24 @@ impl App {
                 return self.convert(Purpose::Open, paths);
             }
             Message::CloseNewDialog => self.new_form = None,
+            Message::RecoveryFound(found) => self.recoveries = found,
+            Message::Recovery(choice) => {
+                if self.busy.is_some() || self.recoveries.is_empty() {
+                    return Task::none();
+                }
+                match choice {
+                    Recovery::Recover => return self.guard(Proceed::Recover),
+                    Recovery::Later => {
+                        self.recoveries.remove(0);
+                    }
+                    Recovery::Discard => self.recoveries.remove(0).discard(),
+                }
+            }
+            Message::Recovered(found, Ok(infos)) => return self.recovered(*found, infos),
+            Message::Recovered(found, Err(e)) => {
+                self.busy = None;
+                self.error = Some(format!("Couldn’t recover “{}”: {e}", found.name()));
+            }
         }
         Task::none()
     }
@@ -781,7 +823,14 @@ impl App {
                 self.new_form = Some(NewForm::default());
                 Task::none()
             }
-            Proceed::Quit => iced::exit(),
+            Proceed::Recover => self.start_recovery(),
+            Proceed::Quit => {
+                // Leaving with nothing unsaved (or by choice): no recovery needed.
+                if let Some(journal) = self.journal.take() {
+                    journal.discard();
+                }
+                iced::exit()
+            }
         }
     }
 
@@ -865,13 +914,124 @@ impl App {
             self.notice = None;
         }
         self.doc = Some(doc);
+        self.sync_journal();
         self.sync_page_input();
         Task::batch([close, self.render(), self.next_thumbnail()])
+    }
+
+    /// Opens the documents behind the first recoverable session.
+    fn start_recovery(&mut self) -> Task<Message> {
+        let (Some(found), Ok(engine)) = (self.recoveries.first().cloned(), self.engine.clone())
+        else {
+            return Task::none();
+        };
+        if found.base_changed {
+            return Task::none();
+        }
+        self.busy = Some("Recovering…");
+        Task::perform(
+            async move {
+                let mut infos = Vec::new();
+                for origin in std::iter::once(&found.base).chain(&found.sources) {
+                    let source = match origin {
+                        Origin::File(path) => DocSource::Path(path.clone()),
+                        Origin::Untitled { bytes, .. } => DocSource::Bytes(bytes.as_ref().clone()),
+                    };
+                    match flatten(engine.call(move |e| e.open(source, None)).await) {
+                        Ok(info) => infos.push(info),
+                        Err(e) => {
+                            let ids: Vec<DocId> = infos.iter().map(|i: &DocInfo| i.id).collect();
+                            let _ = engine
+                                .call(move |e| ids.into_iter().for_each(|id| e.close(id)))
+                                .await;
+                            return (found, Err(e));
+                        }
+                    }
+                }
+                (found, Ok(infos))
+            },
+            |(found, result)| Message::Recovered(Box::new(found), result),
+        )
+    }
+
+    fn recovered(&mut self, found: Recoverable, infos: Vec<DocInfo>) -> Task<Message> {
+        self.busy = None;
+        let counts: Vec<u32> = infos.iter().map(|i| i.page_count).collect();
+        if !pages_fit(&found.pages, &counts) {
+            self.error = Some(format!(
+                "Couldn’t recover “{}”: its pages no longer match the files",
+                found.name()
+            ));
+            if let Ok(engine) = self.engine.clone() {
+                let ids: Vec<DocId> = infos.iter().map(|i| i.id).collect();
+                return Task::future(async move {
+                    engine
+                        .call(move |e| ids.into_iter().for_each(|id| e.close(id)))
+                        .await
+                })
+                .discard();
+            }
+            return Task::none();
+        }
+        let close = self.close_document();
+        let mut infos = infos.into_iter();
+        let Some(base_info) = infos.next() else {
+            return close;
+        };
+        let sources = found
+            .sources
+            .iter()
+            .cloned()
+            .zip(infos)
+            .map(|(origin, info)| crate::document::Source {
+                origin,
+                doc: info.id,
+            })
+            .collect();
+        let name = found.name();
+        self.doc = Some(Document::recovered(
+            found.base.clone(),
+            base_info,
+            sources,
+            found.pages.clone(),
+        ));
+        // The new session's journal now holds the work; the crashed one can go.
+        self.sync_journal();
+        if self.journal.is_some() {
+            found.discard();
+        }
+        self.recoveries.retain(|r| r.journal != found.journal);
+        self.notice = Some(format!("Recovered unsaved changes to “{name}”"));
+        self.sync_page_input();
+        Task::batch([close, self.render(), self.next_thumbnail()])
+    }
+
+    /// Keeps the recovery journal in step with the document: started on the first unsaved
+    /// change, appended to on every change, deleted once nothing is unsaved.
+    fn sync_journal(&mut self) {
+        let dirty = self.doc.as_ref().filter(|d| d.is_dirty());
+        let result = match (dirty, &mut self.journal) {
+            (None, _) => {
+                if let Some(journal) = self.journal.take() {
+                    journal.discard();
+                }
+                Ok(())
+            }
+            (Some(doc), Some(journal)) => journal.record(doc),
+            (Some(doc), None) => Journal::start(doc).map(|journal| self.journal = Some(journal)),
+        };
+        if let Err(e) = result {
+            tracing::warn!("recovery journal: {e}");
+            self.error = Some(format!("Couldn’t save recovery data: {e}"));
+        }
     }
 
     /// Closes the current document and its inserted sources on the engine thread.
     fn close_document(&mut self) -> Task<Message> {
         self.page_image = None;
+        if let Some(journal) = self.journal.take() {
+            journal.discard();
+        }
         let (Some(doc), Ok(engine)) = (self.doc.take(), self.engine.clone()) else {
             return Task::none();
         };
@@ -911,6 +1071,7 @@ impl App {
     }
 
     fn after_edit(&mut self) -> Task<Message> {
+        self.sync_journal();
         self.sync_page_input();
         Task::batch([self.render(), self.next_thumbnail()])
     }

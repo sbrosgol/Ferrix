@@ -29,7 +29,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 1-hour soak; screen reader can operate all chrome.
 
 ## M2 — Annotate & save (weeks 13–20) → `0.2`
-- ~~Command stack, undo/redo~~ (done: `ferrix-core`); autosave journal + crash recovery.
+- ~~Command stack, undo/redo~~ (done: `ferrix-core`); ~~autosave journal + crash recovery~~
+  (done: `ferrix-io::journal`, see ADR-0003 notes).
 - ~~Page organizer: reorder, rotate, delete, insert from file~~ — delivered early (see ADR-0003
   notes); remaining: drag-and-drop reordering, extract/split, blank pages.
 - Highlight / underline / strikeout / squiggly, sticky notes, free text, ink (pressure), shapes, stamps.

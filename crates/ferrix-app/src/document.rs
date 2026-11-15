@@ -138,6 +138,24 @@ impl Document {
         doc
     }
 
+    /// A document restored from a crash-recovery journal; its page list is unsaved work.
+    /// `sources` are the inserted documents, already open in the engine.
+    pub(crate) fn recovered(
+        origin: Origin,
+        info: DocInfo,
+        sources: Vec<Source>,
+        pages: PageList,
+    ) -> Self {
+        let mut doc = Self::new(origin, info);
+        doc.sources.extend(sources);
+        doc.pages = pages;
+        doc.history = History::unsaved();
+        if let Some(key) = doc.key_at(0) {
+            doc.select_only(key);
+        }
+        doc
+    }
+
     pub(crate) fn name(&self) -> String {
         self.info
             .metadata
@@ -300,6 +318,16 @@ impl Document {
     pub(crate) fn engine_docs(&self) -> Vec<DocId> {
         self.sources.iter().map(|s| s.doc).collect()
     }
+}
+
+/// True if every page refers to an existing page of its source (`page_counts[source]`).
+pub(crate) fn pages_fit(pages: &PageList, page_counts: &[u32]) -> bool {
+    !pages.is_empty()
+        && pages.entries().iter().all(|e| {
+            page_counts
+                .get(e.source.0 as usize)
+                .is_some_and(|&count| e.page.0 < count)
+        })
 }
 
 pub(crate) fn file_name(path: &Path) -> String {
