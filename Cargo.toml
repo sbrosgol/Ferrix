@@ -13,6 +13,7 @@ publish = false
 
 [workspace.dependencies]
 ferrix-types = { path = "crates/ferrix-types" }
+ferrix-convert = { path = "crates/ferrix-convert" }
 ferrix-core = { path = "crates/ferrix-core" }
 ferrix-engine = { path = "crates/ferrix-engine" }
 ferrix-engine-pdfium = { path = "crates/ferrix-engine-pdfium" }

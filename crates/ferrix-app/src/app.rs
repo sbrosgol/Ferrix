@@ -9,11 +9,12 @@ use std::{
     },
 };
 
+use ferrix_convert::{Converter, Kind};
 use ferrix_core::{Edit, PageKey};
 use ferrix_engine::{DocInfo, DocSource, PdfEngine};
 use ferrix_engine_pdfium::PdfiumEngine;
 use ferrix_io::FileStamp;
-use ferrix_pdf::{LayoutPage, Source as PdfSource};
+use ferrix_pdf::{LayoutPage, PaperSize, Source as PdfSource};
 use ferrix_print::{PrintJob, PrintOutcome};
 use ferrix_types::{DocId, Rotation, Size};
 use iced::{
@@ -24,8 +25,10 @@ use iced::{
     window,
 };
 
+use ferrix_convert::kind_of;
+
 use crate::{
-    document::{Click, Document, Thumbnail, file_name, pages_label},
+    document::{Click, Document, Origin, Thumbnail, file_name, pages_label},
     render::{LOGICAL_PX_PER_POINT, PageRef, Rendered, render_page},
     worker::{EngineWorker, blocking, flatten},
 };
@@ -108,8 +111,85 @@ impl fmt::Display for ZoomChoice {
 pub(crate) enum Proceed {
     OpenDialog,
     Open(PathBuf),
+    NewDialog,
     Quit,
 }
+
+/// Why a file is being converted to PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Open,
+    Insert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paper {
+    Letter,
+    A4,
+    Legal,
+    A5,
+}
+
+pub(crate) const PAPERS: [Paper; 4] = [Paper::Letter, Paper::A4, Paper::Legal, Paper::A5];
+
+impl Paper {
+    fn size(self) -> PaperSize {
+        match self {
+            Self::Letter => PaperSize::LETTER,
+            Self::A4 => PaperSize::A4,
+            Self::Legal => PaperSize::LEGAL,
+            Self::A5 => PaperSize::A5,
+        }
+    }
+}
+
+impl fmt::Display for Paper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Letter => "Letter",
+            Self::A4 => "A4",
+            Self::Legal => "Legal",
+            Self::A5 => "A5",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    Portrait,
+    Landscape,
+}
+
+pub(crate) const ORIENTATIONS: [Orientation; 2] = [Orientation::Portrait, Orientation::Landscape];
+
+impl fmt::Display for Orientation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Portrait => "Portrait",
+            Self::Landscape => "Landscape",
+        })
+    }
+}
+
+/// The New Document dialog's choices.
+#[derive(Debug, Clone)]
+pub(crate) struct NewForm {
+    pub(crate) paper: Paper,
+    pub(crate) orientation: Orientation,
+    pub(crate) pages: String,
+}
+
+impl Default for NewForm {
+    fn default() -> Self {
+        Self {
+            paper: Paper::Letter,
+            orientation: Orientation::Portrait,
+            pages: "1".into(),
+        }
+    }
+}
+
+const MAX_NEW_PAGES: u32 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
@@ -143,6 +223,10 @@ pub struct App {
     /// Page to return to when a document is reopened after saving.
     reopen_at: Option<usize>,
     modifiers: keyboard::Modifiers,
+    /// Installed conversion tools, detected in the background at startup.
+    pub(crate) converter: Option<Arc<Converter>>,
+    /// The New Document dialog, while open.
+    pub(crate) new_form: Option<NewForm>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +234,7 @@ pub enum Message {
     OpenDialog,
     Open(PathBuf),
     DialogClosed,
-    Opened(PathBuf, Result<DocInfo, String>),
+    Opened(Origin, Result<DocInfo, String>),
     GoTo(usize),
     Next,
     Previous,
@@ -183,7 +267,7 @@ pub enum Message {
     Move { earlier: bool },
     InsertDialog,
     Insert(PathBuf),
-    Inserted(PathBuf, Result<DocInfo, String>),
+    Inserted(Origin, Result<DocInfo, String>),
     Undo,
     Redo,
     Save,
@@ -193,6 +277,16 @@ pub enum Message {
     CloseRequested,
     Confirmed(Choice),
     Escape,
+    ConverterReady(Arc<Converter>),
+    Converted(Purpose, PathBuf, Result<Vec<u8>, String>),
+    NewDialog,
+    NewPaper(Paper),
+    NewOrientation(Orientation),
+    NewPages(String),
+    CreateBlank,
+    CreateFromFiles,
+    NewPicked(Vec<PathBuf>),
+    CloseNewDialog,
 }
 
 pub(crate) fn page_scroll_id() -> iced::widget::Id {
@@ -229,11 +323,19 @@ impl App {
             after_save: None,
             reopen_at: None,
             modifiers: keyboard::Modifiers::default(),
+            converter: None,
+            new_form: None,
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
             window::oldest().map(Message::WindowOpened),
             system::theme().map(Message::SystemTheme),
+            Task::perform(
+                blocking(|| Ok(Converter::detect())),
+                |found: Result<Converter, String>| {
+                    Message::ConverterReady(Arc::new(found.unwrap_or_default()))
+                },
+            ),
         ]);
         (app, boot.chain(open))
     }
@@ -264,7 +366,10 @@ impl App {
 
     /// Whether page-editing actions are available right now.
     pub(crate) fn can_edit(&self) -> bool {
-        self.doc.is_some() && self.busy.is_none() && self.confirm.is_none()
+        self.doc.is_some()
+            && self.busy.is_none()
+            && self.confirm.is_none()
+            && self.new_form.is_none()
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
@@ -272,10 +377,10 @@ impl App {
             Message::OpenDialog => return self.guard(Proceed::OpenDialog),
             Message::Open(path) => return self.guard(Proceed::Open(path)),
             Message::DialogClosed => {}
-            Message::Opened(path, Ok(info)) => return self.opened(path, info),
-            Message::Opened(path, Err(e)) => {
+            Message::Opened(origin, Ok(info)) => return self.opened(origin, info),
+            Message::Opened(origin, Err(e)) => {
                 self.reopen_at = None;
-                self.error = Some(format!("Couldn’t open “{}”: {e}", file_name(&path)));
+                self.error = Some(format!("Couldn’t open “{}”: {e}", origin.file_name()));
             }
             Message::GoTo(index) => return self.go_to(index),
             Message::Next => return self.step_page(1),
@@ -443,34 +548,21 @@ impl App {
                 if !self.can_edit() {
                     return Task::none();
                 }
-                return Task::perform(
-                    rfd::AsyncFileDialog::new()
-                        .set_title("Insert Pages From")
-                        .add_filter("PDF documents", &["pdf"])
-                        .pick_file(),
-                    |file| {
-                        file.map_or(Message::DialogClosed, |f| {
-                            Message::Insert(f.path().to_path_buf())
-                        })
-                    },
-                );
+                return Task::perform(self.file_dialog("Insert Pages From").pick_file(), |file| {
+                    file.map_or(Message::DialogClosed, |f| {
+                        Message::Insert(f.path().to_path_buf())
+                    })
+                });
             }
             Message::Insert(path) => {
-                let Ok(engine) = self.engine.clone() else {
-                    return Task::none();
-                };
-                return Task::perform(
-                    async move {
-                        let source = DocSource::Path(path.clone());
-                        let result = flatten(engine.call(move |e| e.open(source, None)).await);
-                        (path, result)
-                    },
-                    |(path, result)| Message::Inserted(path, result),
-                );
+                if kind_of(&path) == Some(Kind::Pdf) {
+                    return self.load(Origin::File(path), Message::Inserted);
+                }
+                return self.convert(Purpose::Insert, vec![path]);
             }
-            Message::Inserted(path, Ok(info)) => return self.inserted(path, info),
-            Message::Inserted(path, Err(e)) => {
-                self.error = Some(format!("Couldn’t insert “{}”: {e}", file_name(&path)));
+            Message::Inserted(origin, Ok(info)) => return self.inserted(origin, info),
+            Message::Inserted(origin, Err(e)) => {
+                self.error = Some(format!("Couldn’t insert “{}”: {e}", origin.file_name()));
             }
             Message::Undo => {
                 if self.can_edit()
@@ -494,7 +586,10 @@ impl App {
                 if let Some(doc) = &self.doc
                     && doc.is_dirty()
                 {
-                    let path = doc.path.clone();
+                    // Documents that were never saved need a location first.
+                    let Some(path) = doc.origin.path().map(PathBuf::from) else {
+                        return self.update(Message::SaveAs);
+                    };
                     return self.save_to(path);
                 }
             }
@@ -505,8 +600,8 @@ impl App {
                 let mut dialog = rfd::AsyncFileDialog::new()
                     .set_title("Save As")
                     .add_filter("PDF documents", &["pdf"])
-                    .set_file_name(file_name(&doc.path));
-                if let Some(dir) = doc.path.parent() {
+                    .set_file_name(doc.origin.file_name());
+                if let Some(dir) = doc.origin.save_location().and_then(|p| p.parent()) {
                     dialog = dialog.set_directory(dir);
                 }
                 return Task::perform(dialog.save_file(), |file| {
@@ -523,7 +618,7 @@ impl App {
                 }
                 // Reload what is now on disk; the edit history starts over from it.
                 self.reopen_at = self.doc.as_ref().map(|d| d.current);
-                return self.open(path);
+                return self.load(Origin::File(path), Message::Opened);
             }
             Message::Saved(Err(e)) => {
                 self.busy = None;
@@ -544,7 +639,88 @@ impl App {
                     Choice::Cancel => {}
                 }
             }
-            Message::Escape => self.confirm = None,
+            Message::Escape => {
+                self.confirm = None;
+                self.new_form = None;
+            }
+            Message::ConverterReady(converter) => self.converter = Some(converter),
+            Message::Converted(purpose, source, Ok(bytes)) => {
+                self.busy = None;
+                let stem = source
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled".into());
+                let name = format!("{stem}.pdf");
+                let origin =
+                    Origin::untitled(name.clone(), Some(source.with_file_name(name)), bytes);
+                return match purpose {
+                    Purpose::Open => self.load(origin, Message::Opened),
+                    Purpose::Insert => self.load(origin, Message::Inserted),
+                };
+            }
+            Message::Converted(_, source, Err(e)) => {
+                self.busy = None;
+                self.error = Some(format!("Couldn’t convert “{}”: {e}", file_name(&source)));
+            }
+            Message::NewDialog => return self.guard(Proceed::NewDialog),
+            Message::NewPaper(paper) => {
+                if let Some(form) = &mut self.new_form {
+                    form.paper = paper;
+                }
+            }
+            Message::NewOrientation(orientation) => {
+                if let Some(form) = &mut self.new_form {
+                    form.orientation = orientation;
+                }
+            }
+            Message::NewPages(value) => {
+                if let Some(form) = &mut self.new_form {
+                    form.pages = value.chars().filter(char::is_ascii_digit).take(4).collect();
+                }
+            }
+            Message::CreateBlank => {
+                let Some(form) = self.new_form.take() else {
+                    return Task::none();
+                };
+                let pages = form
+                    .pages
+                    .parse::<u32>()
+                    .unwrap_or(1)
+                    .clamp(1, MAX_NEW_PAGES);
+                let size = match form.orientation {
+                    Orientation::Portrait => form.paper.size(),
+                    Orientation::Landscape => form.paper.size().landscape(),
+                };
+                match ferrix_pdf::blank_document(pages, size) {
+                    Ok(bytes) => {
+                        let origin = Origin::untitled("Untitled.pdf".into(), None, bytes);
+                        return self.load(origin, Message::Opened);
+                    }
+                    Err(e) => self.error = Some(format!("Couldn’t create the document: {e}")),
+                }
+            }
+            Message::CreateFromFiles => {
+                return Task::perform(self.file_dialog("Create PDF From").pick_files(), |files| {
+                    Message::NewPicked(
+                        files
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|f| f.path().to_path_buf())
+                            .collect(),
+                    )
+                });
+            }
+            Message::NewPicked(paths) if paths.is_empty() => {}
+            Message::NewPicked(paths) => {
+                self.new_form = None;
+                if let [path] = paths.as_slice()
+                    && kind_of(path) == Some(Kind::Pdf)
+                {
+                    return self.load(Origin::File(path.clone()), Message::Opened);
+                }
+                return self.convert(Purpose::Open, paths);
+            }
+            Message::CloseNewDialog => self.new_form = None,
         }
         Task::none()
     }
@@ -588,44 +764,97 @@ impl App {
 
     fn proceed(&mut self, next: Proceed) -> Task<Message> {
         match next {
-            Proceed::OpenDialog => Task::perform(
-                rfd::AsyncFileDialog::new()
-                    .add_filter("PDF documents", &["pdf"])
-                    .pick_file(),
-                |file| {
-                    file.map_or(Message::DialogClosed, |f| {
-                        Message::Open(f.path().to_path_buf())
-                    })
-                },
-            ),
+            Proceed::OpenDialog => Task::perform(self.file_dialog("Open").pick_file(), |file| {
+                file.map_or(Message::DialogClosed, |f| {
+                    Message::Open(f.path().to_path_buf())
+                })
+            }),
             // Unsaved changes were already dealt with, so open directly.
-            Proceed::Open(path) => self.open(path),
+            Proceed::Open(path) => {
+                if kind_of(&path) == Some(Kind::Pdf) {
+                    self.load(Origin::File(path), Message::Opened)
+                } else {
+                    self.convert(Purpose::Open, vec![path])
+                }
+            }
+            Proceed::NewDialog => {
+                self.new_form = Some(NewForm::default());
+                Task::none()
+            }
             Proceed::Quit => iced::exit(),
         }
     }
 
-    fn open(&mut self, path: PathBuf) -> Task<Message> {
+    /// A file dialog offering every format that can be opened right now.
+    fn file_dialog(&self, title: &str) -> rfd::AsyncFileDialog {
+        let supported = self
+            .converter
+            .as_ref()
+            .map_or_else(|| vec!["pdf"], |c| c.extensions());
+        rfd::AsyncFileDialog::new()
+            .set_title(title)
+            .add_filter("All supported files", &supported)
+            .add_filter("PDF documents", &["pdf"])
+            .add_filter("Images", ferrix_convert::IMAGE_EXTENSIONS)
+    }
+
+    /// Opens `origin` in the engine, reporting the result through `done`.
+    fn load(
+        &mut self,
+        origin: Origin,
+        done: fn(Origin, Result<DocInfo, String>) -> Message,
+    ) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
         self.error = None;
         Task::perform(
             async move {
-                let source = DocSource::Path(path.clone());
+                let source = match &origin {
+                    Origin::File(path) => DocSource::Path(path.clone()),
+                    Origin::Untitled { bytes, .. } => DocSource::Bytes(bytes.as_ref().clone()),
+                };
                 let result = flatten(engine.call(move |e| e.open(source, None)).await);
-                (path, result)
+                (origin, result)
             },
-            |(path, result)| Message::Opened(path, result),
+            move |(origin, result)| done(origin, result),
         )
     }
 
-    fn opened(&mut self, path: PathBuf, info: DocInfo) -> Task<Message> {
+    /// Converts files to one PDF in the background: images become pages, an office
+    /// document is converted by Word or LibreOffice.
+    fn convert(&mut self, purpose: Purpose, paths: Vec<PathBuf>) -> Task<Message> {
+        let Some(first) = paths.first().cloned() else {
+            return Task::none();
+        };
+        let converter = self.converter.clone().unwrap_or_default();
+        let all_images = paths.iter().all(|p| kind_of(p) == Some(Kind::Image));
+        if !all_images && paths.len() > 1 {
+            self.error = Some("Choose one document, or several images, to convert".into());
+            return Task::none();
+        }
+        self.busy = Some("Converting…");
+        self.error = None;
+        Task::perform(
+            blocking(move || {
+                if all_images {
+                    ferrix_convert::images_to_pdf(&paths)
+                } else {
+                    converter.convert(&paths[0])
+                }
+                .map_err(|e| e.to_string())
+            }),
+            move |result| Message::Converted(purpose, first.clone(), result),
+        )
+    }
+
+    fn opened(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
         let close = self.close_document();
         if info.page_count == 0 {
             self.error = Some("This document has no pages".into());
             return close;
         }
-        let mut doc = Document::new(path, info);
+        let mut doc = Document::new(origin, info);
         if let Some(at) = self.reopen_at.take() {
             let at = at.min(doc.len() - 1);
             doc.current = at;
@@ -686,13 +915,15 @@ impl App {
         Task::batch([self.render(), self.next_thumbnail()])
     }
 
-    fn inserted(&mut self, path: PathBuf, info: DocInfo) -> Task<Message> {
+    fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
         let Some(doc) = self.editable() else {
             return Task::none();
         };
         let source = ferrix_core::SourceId(doc.sources.len() as u32);
-        doc.sources
-            .push(crate::document::Source { path, doc: info.id });
+        doc.sources.push(crate::document::Source {
+            origin,
+            doc: info.id,
+        });
         let entries = doc
             .pages
             .new_entries(source, (0..info.page_count).map(ferrix_types::PageIndex));
@@ -739,9 +970,9 @@ impl App {
         }
         Some(Export {
             engine,
-            base: doc.path.clone(),
+            base: doc.origin.clone(),
             stamp: doc.stamp,
-            imports: doc.import_paths(),
+            imports: doc.imports(),
             layout: doc.layout(),
         })
     }
@@ -753,8 +984,10 @@ impl App {
         let Some(doc) = &self.doc else {
             return Task::none();
         };
-        if !doc.is_dirty() {
-            let path = doc.path.clone();
+        if !doc.is_dirty()
+            && let Some(path) = doc.origin.path()
+        {
+            let path = path.to_path_buf();
             return self.print_file(path);
         }
         let Some(export) = self.export_job() else {
@@ -763,7 +996,7 @@ impl App {
         let temp = std::env::temp_dir().join(format!(
             "ferrix-print-{}-{}",
             std::process::id(),
-            file_name(&doc.path)
+            doc.origin.file_name()
         ));
         self.busy = Some("Preparing to print…");
         Task::perform(
@@ -990,9 +1223,9 @@ fn render_thumbnail(
 #[derive(Debug)]
 struct Export {
     engine: Worker,
-    base: PathBuf,
+    base: Origin,
     stamp: Option<FileStamp>,
-    imports: Vec<PathBuf>,
+    imports: Vec<Origin>,
     layout: Vec<LayoutPage>,
 }
 
@@ -1008,17 +1241,20 @@ impl Export {
             layout,
         } = self;
         let bytes = blocking(move || {
-            if stamp.is_some() && FileStamp::of(&base).ok() != stamp {
+            if let Some(path) = base.path()
+                && stamp.is_some()
+                && FileStamp::of(path).ok() != stamp
+            {
                 return Err(format!(
                     "“{}” was changed by another app after it was opened",
-                    file_name(&base)
+                    base.file_name()
                 ));
             }
-            let read = |path: &PathBuf| {
-                std::fs::read(path).map_err(|e| format!("{}: {e}", file_name(path)))
-            };
-            let base_bytes = read(&base)?;
-            let import_bytes = imports.iter().map(read).collect::<Result<Vec<_>, _>>()?;
+            let base_bytes = base.read()?;
+            let import_bytes = imports
+                .iter()
+                .map(Origin::read)
+                .collect::<Result<Vec<_>, _>>()?;
             let sources: Vec<PdfSource<'_>> =
                 import_bytes.iter().map(|b| PdfSource::new(b)).collect();
             ferrix_pdf::write_page_layout(PdfSource::new(&base_bytes), &sources, &layout)
@@ -1062,6 +1298,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
             let shift = modifiers.shift();
             match c.to_ascii_lowercase().as_str() {
                 "o" => Some(Message::OpenDialog),
+                "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
                 "s" if shift => Some(Message::SaveAs),
                 "s" => Some(Message::Save),
@@ -1187,16 +1424,16 @@ mod tests {
             worker.call(move |e| e.open(source, None)),
         ))
         .expect("opens");
-        Document::new(path, info)
+        Document::new(Origin::File(path), info)
     }
 
     fn export(worker: &Worker, doc: &Document) -> Result<Vec<u8>, String> {
         iced::futures::executor::block_on(
             Export {
                 engine: worker.clone(),
-                base: doc.path.clone(),
+                base: doc.origin.clone(),
                 stamp: doc.stamp,
-                imports: doc.import_paths(),
+                imports: doc.imports(),
                 layout: doc.layout(),
             }
             .run(),
@@ -1248,7 +1485,8 @@ mod tests {
     fn export_refuses_a_file_changed_by_another_app() {
         let Some(worker) = worker() else { return };
         let doc = open_fixture(&worker, "changed.pdf", 2);
-        std::fs::write(&doc.path, fixture(3)).expect("external change");
+        let path = doc.origin.path().expect("file-backed");
+        std::fs::write(path, fixture(3)).expect("external change");
         let error = export(&worker, &doc).expect_err("must refuse");
         assert!(error.contains("changed by another app"), "{error}");
     }

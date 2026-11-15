@@ -51,6 +51,9 @@ demo. Exit criteria are the definition of done, not the feature list.
 
 **Exit:** signed installers on all platforms; public beta.
 
+## Delivered ahead of plan
+- New blank documents; images, Word, Excel, PowerPoint and OpenDocument files to PDF (ADR-0007).
+
 ## M4 — Pro features (weeks 29–40) → `1.0`
 - True redaction (search & redact patterns; purge content; full save).
 - OCR (`ocrs`) for scanned documents → searchable/selectable text layer.

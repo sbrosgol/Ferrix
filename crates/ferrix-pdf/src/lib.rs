@@ -6,9 +6,24 @@
 
 #![forbid(unsafe_code)]
 
+mod create;
 mod layout;
 
+pub use create::{ImageData, ImagePage, PaperSize, blank_document, image_document};
 pub use layout::{LayoutPage, write_page_layout};
+
+/// No single stream may inflate beyond this while parsing (defends against decompression bombs).
+const MAX_STREAM_BYTES: usize = 256 * 1024 * 1024;
+
+/// Parses untrusted PDF bytes with resource limits.
+fn parse(bytes: &[u8], password: Option<&str>) -> Result<lopdf::Document, PdfError> {
+    let options = lopdf::LoadOptions {
+        password: password.map(str::to_owned),
+        max_decompressed_size: Some(MAX_STREAM_BYTES),
+        ..lopdf::LoadOptions::default()
+    };
+    Ok(lopdf::Document::load_mem_with_options(bytes, options)?)
+}
 
 /// A PDF to read pages from.
 #[derive(Debug, Clone, Copy)]

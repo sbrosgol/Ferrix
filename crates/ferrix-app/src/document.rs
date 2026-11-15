@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use ferrix_core::{Edit, EditError, History, PageEntry, PageKey, PageList};
@@ -16,10 +17,65 @@ use crate::render::{PageImage, PageRef};
 /// Thumbnails beyond this are not rendered until the virtualized sidebar lands in M1.
 pub(crate) const MAX_THUMBNAILS: usize = 500;
 
+/// Where a document's bytes come from.
+#[derive(Debug, Clone)]
+pub enum Origin {
+    File(PathBuf),
+    /// Created or converted in memory and not saved yet.
+    Untitled {
+        name: String,
+        /// Where Save As proposes to put it, e.g. beside the converted file.
+        suggested: Option<PathBuf>,
+        bytes: Arc<Vec<u8>>,
+    },
+}
+
+impl Origin {
+    pub(crate) fn untitled(name: String, suggested: Option<PathBuf>, bytes: Vec<u8>) -> Self {
+        Self::Untitled {
+            name,
+            suggested,
+            bytes: Arc::new(bytes),
+        }
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Untitled { .. } => None,
+        }
+    }
+
+    pub(crate) fn file_name(&self) -> String {
+        match self {
+            Self::File(path) => file_name(path),
+            Self::Untitled { name, .. } => name.clone(),
+        }
+    }
+
+    /// The location Save As starts from.
+    pub(crate) fn save_location(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Untitled { suggested, .. } => suggested.as_deref(),
+        }
+    }
+
+    /// Reads the bytes. Blocking for files.
+    pub(crate) fn read(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::File(path) => {
+                std::fs::read(path).map_err(|e| format!("{}: {e}", file_name(path)))
+            }
+            Self::Untitled { bytes, .. } => Ok(bytes.as_ref().clone()),
+        }
+    }
+}
+
 /// A PDF whose pages appear in the document. Index 0 is the document itself.
 #[derive(Debug)]
 pub(crate) struct Source {
-    pub(crate) path: PathBuf,
+    pub(crate) origin: Origin,
     pub(crate) doc: DocId,
 }
 
@@ -39,7 +95,7 @@ pub(crate) enum Click {
 
 #[derive(Debug)]
 pub(crate) struct Document {
-    pub(crate) path: PathBuf,
+    pub(crate) origin: Origin,
     /// File size and mtime when opened, to detect changes made by other apps.
     pub(crate) stamp: Option<FileStamp>,
     pub(crate) info: DocInfo,
@@ -57,15 +113,15 @@ pub(crate) struct Document {
 }
 
 impl Document {
-    pub(crate) fn new(path: PathBuf, info: DocInfo) -> Self {
+    pub(crate) fn new(origin: Origin, info: DocInfo) -> Self {
         let pages = PageList::identity(info.page_count);
         let mut doc = Self {
-            stamp: FileStamp::of(&path).ok(),
+            stamp: origin.path().and_then(|p| FileStamp::of(p).ok()),
             sources: vec![Source {
-                path: path.clone(),
+                origin: origin.clone(),
                 doc: info.id,
             }],
-            path,
+            origin,
             info,
             pages,
             history: History::new(),
@@ -87,15 +143,20 @@ impl Document {
             .metadata
             .title
             .clone()
-            .unwrap_or_else(|| file_name(&self.path))
+            .unwrap_or_else(|| self.origin.file_name())
     }
 
     pub(crate) fn len(&self) -> usize {
         self.pages.len()
     }
 
+    /// Unsaved edits, or a document that was never saved at all.
     pub(crate) fn is_dirty(&self) -> bool {
-        self.history.is_dirty()
+        self.history.is_dirty() || self.is_untitled()
+    }
+
+    pub(crate) fn is_untitled(&self) -> bool {
+        self.origin.path().is_none()
     }
 
     pub(crate) fn key_at(&self, index: usize) -> Option<PageKey> {
@@ -227,12 +288,12 @@ impl Document {
             .collect()
     }
 
-    /// Paths of inserted documents, in source order (matching [`Document::layout`]).
-    pub(crate) fn import_paths(&self) -> Vec<PathBuf> {
+    /// Inserted documents, in source order (matching [`Document::layout`]).
+    pub(crate) fn imports(&self) -> Vec<Origin> {
         self.sources
             .iter()
             .skip(1)
-            .map(|s| s.path.clone())
+            .map(|s| s.origin.clone())
             .collect()
     }
 
@@ -265,7 +326,7 @@ mod tests {
 
     fn document(pages: u32) -> Document {
         Document::new(
-            PathBuf::from("/tmp/ferrix-test.pdf"),
+            Origin::File(PathBuf::from("/tmp/ferrix-test.pdf")),
             DocInfo {
                 id: DocId(1),
                 page_count: pages,

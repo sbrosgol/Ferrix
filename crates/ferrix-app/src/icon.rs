@@ -31,6 +31,7 @@ pub(crate) enum Icon {
     MoveDown,
     Delete,
     InsertPages,
+    New,
 }
 
 macro_rules! icons {
@@ -74,6 +75,7 @@ icons! {
     MoveDown => "arrow-down",
     Delete => "trash-2",
     InsertPages => "file-plus",
+    New => "file-new",
 }
 
 fn load(source: &str) -> svg::Handle {

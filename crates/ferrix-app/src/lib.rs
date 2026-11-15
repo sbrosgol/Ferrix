@@ -13,6 +13,7 @@ mod worker;
 use std::path::PathBuf;
 
 pub use app::{App, Message};
+pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
 use worker::EngineWorker;

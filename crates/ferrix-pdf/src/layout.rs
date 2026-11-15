@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashSet};
 use ferrix_types::Rotation;
 use lopdf::{Dictionary, Document, IncrementalDocument, Object, ObjectId};
 
-use crate::{PdfError, Source};
+use crate::{PdfError, Source, parse};
 
 /// Page attributes a page may inherit from its ancestors in the page tree (ISO 32000 §7.7.3.4).
 const INHERITABLE: [&[u8]; 4] = [b"Resources", b"MediaBox", b"CropBox", b"Rotate"];
@@ -122,8 +122,8 @@ pub fn write_page_layout(
         .map_err(|e| PdfError::Write(e.to_string()))?;
 
     // Never hand back a file we can't read ourselves.
-    let check = Document::load_mem(&out)
-        .map_err(|e| PdfError::Write(format!("output is unreadable: {e}")))?;
+    let check =
+        parse(&out, None).map_err(|e| PdfError::Write(format!("output is unreadable: {e}")))?;
     let written = check.get_pages().len();
     if written != layout.len() {
         return Err(PdfError::Write(format!(
@@ -135,7 +135,7 @@ pub fn write_page_layout(
 }
 
 fn load(source: Source<'_>) -> Result<Document, PdfError> {
-    let mut doc = Document::load_mem(source.bytes)?;
+    let mut doc = parse(source.bytes, source.password)?;
     if doc.is_encrypted() {
         doc.decrypt(source.password.unwrap_or(""))
             .map_err(|_| PdfError::Encrypted)?;

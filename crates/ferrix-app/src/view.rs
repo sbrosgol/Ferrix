@@ -11,8 +11,8 @@ use iced::{
 
 use crate::{
     app::{
-        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice,
-        page_scroll_id, sidebar_scroll_id,
+        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS, THUMB_WIDTH,
+        ZOOM_CHOICES, Zoom, ZoomChoice, page_scroll_id, sidebar_scroll_id,
     },
     document::{Document, MAX_THUMBNAILS},
     icon::Icon,
@@ -67,8 +67,9 @@ impl App {
             horizontal_divider(),
             self.status_bar(),
         ];
-        match (&self.confirm, &self.doc) {
-            (Some(_), Some(doc)) => stack![window, save_changes_dialog(doc)].into(),
+        match (&self.confirm, &self.doc, &self.new_form) {
+            (Some(_), Some(doc), _) => stack![window, save_changes_dialog(doc)].into(),
+            (_, _, Some(form)) => stack![window, self.new_document_dialog(form)].into(),
             _ => window.into(),
         }
     }
@@ -106,6 +107,12 @@ impl App {
                 "Toggle sidebar (⌘\\)",
                 has_doc.then_some(Message::ToggleSidebar),
                 self.sidebar && has_doc,
+            ),
+            icon_button(
+                Icon::New,
+                "New document… (⌘N)",
+                Some(Message::NewDialog),
+                false
             ),
             icon_button(
                 Icon::FolderOpen,
@@ -299,7 +306,7 @@ impl App {
             ),
             icon_button(
                 Icon::InsertPages,
-                "Insert pages from file…",
+                "Insert pages from a PDF, document or image…",
                 enabled(true, Message::InsertDialog),
                 false,
             ),
@@ -407,7 +414,8 @@ impl App {
             (
                 Icon::FileText,
                 "No document open",
-                "Open a PDF to start reading, or drop a file anywhere in this window.",
+                "Open a PDF, Word document or image, drop one anywhere in this window, \
+                 or start a new document.",
             )
         };
         let badge = container(
@@ -429,7 +437,7 @@ impl App {
                     .width(16)
                     .height(16)
                     .style(theme::icon_colored(|t| t.on_accent)),
-                text("Open PDF…").size(14).font(SEMIBOLD),
+                text("Open…").size(14).font(SEMIBOLD),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -437,6 +445,20 @@ impl App {
         .padding([9, 18])
         .style(theme::primary)
         .on_press_maybe((!failed).then_some(Message::OpenDialog));
+        let new = button(
+            row![
+                svg(Icon::New.handle())
+                    .width(16)
+                    .height(16)
+                    .style(theme::icon_colored(|t| t.text)),
+                text("New Document…").size(14),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([9, 18])
+        .style(theme::secondary)
+        .on_press_maybe((!failed).then_some(Message::NewDialog));
 
         let shortcut_hint = row![
             kbd(if cfg!(target_os = "macos") {
@@ -454,7 +476,7 @@ impl App {
             text(heading).size(20).font(SEMIBOLD),
             container(muted(body, 14.0).align_x(Alignment::Center)).max_width(380),
             Space::new().height(6),
-            open,
+            row![open, new].spacing(10),
             shortcut_hint,
         ]
         .spacing(10)
@@ -515,6 +537,120 @@ impl App {
         .center_y(STATUS_HEIGHT)
         .style(theme::chrome)
         .into()
+    }
+}
+
+impl App {
+    /// New Document: blank pages, or a conversion of other files.
+    fn new_document_dialog<'a>(&'a self, form: &'a NewForm) -> Element<'a, Message> {
+        let field_label = |label: &'a str| muted(label, 12.0);
+        let blank = column![
+            text("Blank document").size(13).font(SEMIBOLD),
+            row![
+                column![
+                    field_label("Paper size"),
+                    pick_list(PAPERS, Some(form.paper), Message::NewPaper)
+                        .text_size(13)
+                        .padding([5, 8])
+                        .width(110)
+                        .style(theme::select)
+                        .menu_style(theme::select_menu),
+                ]
+                .spacing(4),
+                column![
+                    field_label("Orientation"),
+                    pick_list(
+                        ORIENTATIONS,
+                        Some(form.orientation),
+                        Message::NewOrientation
+                    )
+                    .text_size(13)
+                    .padding([5, 8])
+                    .width(120)
+                    .style(theme::select)
+                    .menu_style(theme::select_menu),
+                ]
+                .spacing(4),
+                column![
+                    field_label("Pages"),
+                    text_input("1", &form.pages)
+                        .on_input(Message::NewPages)
+                        .on_submit(Message::CreateBlank)
+                        .size(13)
+                        .padding([5, 8])
+                        .width(64)
+                        .style(theme::input),
+                ]
+                .spacing(4),
+                Space::new().width(Length::Fill),
+                button(text("Create").size(13).font(SEMIBOLD))
+                    .padding([6, 16])
+                    .style(theme::primary)
+                    .on_press(Message::CreateBlank),
+            ]
+            .spacing(12)
+            .align_y(Alignment::End),
+        ]
+        .spacing(10);
+
+        let tools = self
+            .converter
+            .as_ref()
+            .map(|c| c.tools())
+            .unwrap_or_default();
+        let tools_note = if tools.is_empty() {
+            "Images convert directly. To convert Word, Excel or PowerPoint files, install \
+             LibreOffice (libreoffice.org)."
+                .to_owned()
+        } else {
+            format!(
+                "Office documents are converted with {}.",
+                tools.join(" or ")
+            )
+        };
+        let convert = column![
+            text("From other files").size(13).font(SEMIBOLD),
+            row![
+                muted(
+                    "Turn a Word document, spreadsheet or presentation into a PDF, or \
+                     combine images into one PDF.",
+                    12.0
+                )
+                .width(Length::Fill),
+                button(text("Choose Files…").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary)
+                    .on_press(Message::CreateFromFiles),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            muted(tools_note, 11.0),
+        ]
+        .spacing(8);
+
+        let card = column![
+            row![
+                text("New Document").size(16).font(SEMIBOLD),
+                Space::new().width(Length::Fill),
+                button(text("Cancel").size(13))
+                    .padding([6, 14])
+                    .style(theme::secondary)
+                    .on_press(Message::CloseNewDialog),
+            ]
+            .align_y(Alignment::Center),
+            horizontal_divider(),
+            blank,
+            horizontal_divider(),
+            convert,
+        ]
+        .spacing(14)
+        .padding(20)
+        .width(540);
+        opaque(
+            container(container(card).style(theme::card))
+                .center(Length::Fill)
+                .style(theme::backdrop),
+        )
     }
 }
 

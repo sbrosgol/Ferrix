@@ -1354,6 +1354,7 @@ dependencies = [
 name = "ferrix-app"
 version = "0.0.1"
 dependencies = [
+ "ferrix-convert",
  "ferrix-core",
  "ferrix-engine",
  "ferrix-engine-pdfium",
@@ -1383,6 +1384,16 @@ dependencies = [
  "image",
  "serde_json",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ferrix-convert"
+version = "0.0.1"
+dependencies = [
+ "ferrix-pdf",
+ "image",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
