@@ -1,5 +1,6 @@
 //! Fonts available to documents (ADR-0008 §6).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cosmic_text::{FontSystem, fontdb};
@@ -88,6 +89,24 @@ impl Fonts {
         &mut self.system
     }
 
+    /// The fonts a layout uses, ready to embed; can be sent to another thread.
+    pub fn for_embedding(&self, layout: &crate::layout::Layout) -> EmbedFonts {
+        let mut map = HashMap::new();
+        for glyph in layout
+            .pages
+            .iter()
+            .flat_map(|p| &p.lines)
+            .flat_map(|l| &l.glyphs)
+        {
+            if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(glyph.font)
+                && let Some(face) = self.face_data(glyph.font)
+            {
+                slot.insert(face);
+            }
+        }
+        EmbedFonts(map)
+    }
+
     /// The bytes and collection index of a face, for embedding.
     pub(crate) fn face_data(&self, id: fontdb::ID) -> Option<(krilla::Data, u32)> {
         let db = self.system.db();
@@ -98,5 +117,23 @@ impl Fonts {
             _ => db.with_face_data(id, |bytes, _| krilla::Data::from(bytes.to_vec()))?,
         };
         Some((data, index))
+    }
+}
+
+/// Font data for the faces a layout uses.
+#[derive(Clone, Default)]
+pub struct EmbedFonts(HashMap<fontdb::ID, (krilla::Data, u32)>);
+
+impl EmbedFonts {
+    pub(crate) fn get(&self, id: fontdb::ID) -> Option<&(krilla::Data, u32)> {
+        self.0.get(&id)
+    }
+}
+
+impl std::fmt::Debug for EmbedFonts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbedFonts")
+            .field("faces", &self.0.len())
+            .finish()
     }
 }

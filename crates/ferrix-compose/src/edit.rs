@@ -35,6 +35,22 @@ impl Fragment {
             .join("\n")
     }
 
+    /// The same text with every run's format replaced.
+    pub(crate) fn map_formats(&self, f: impl Fn(&CharFormat) -> CharFormat) -> Self {
+        Self(
+            self.0
+                .iter()
+                .map(|p| {
+                    let mut out = p.empty_like();
+                    for run in &p.runs {
+                        out.push(&run.text, f(&run.format));
+                    }
+                    out
+                })
+                .collect(),
+        )
+    }
+
     /// Where the fragment ends once inserted at `start`.
     fn end_from(&self, start: Position) -> Position {
         let last = self.0.len() - 1;
@@ -227,16 +243,18 @@ impl Document {
     }
 
     /// Changes the character format of the text in `range`.
+    /// The callback also gets the style of the paragraph the text is in.
     pub fn format_text(
         &self,
         range: TextRange,
-        change: impl Fn(&mut CharFormat),
+        change: impl Fn(&mut CharFormat, ParagraphStyle),
     ) -> Result<Edit, EditError> {
         let mut fragment = self.extract(range)?;
         for paragraph in &mut fragment.0 {
+            let style = paragraph.style;
             let runs = std::mem::take(&mut paragraph.runs);
             for mut run in runs {
-                change(&mut run.format);
+                change(&mut run.format, style);
                 paragraph.push(&run.text, run.format);
             }
         }
@@ -373,7 +391,7 @@ mod tests {
         let mut d = doc(&["Hello world"]);
         let original = d.clone();
         let edit = d
-            .format_text(TextRange::between(at(0, 6), at(0, 11)), |f| {
+            .format_text(TextRange::between(at(0, 6), at(0, 11)), |f, _| {
                 f.italic = Some(true);
             })
             .unwrap();
@@ -472,7 +490,7 @@ mod tests {
                 let edit = match next(5) {
                     0 => d.insert_text(range, WORDS[next(WORDS.len())]),
                     1 => d.delete(range),
-                    2 => d.format_text(range, |f| f.bold = Some(!f.bold.unwrap_or(false))),
+                    2 => d.format_text(range, |f, _| f.bold = Some(!f.bold.unwrap_or(false))),
                     3 => d.format_paragraphs(range, |s, _| *s = ParagraphStyle::Heading2),
                     _ => d.split_paragraph(range),
                 }

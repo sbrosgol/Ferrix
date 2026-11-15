@@ -139,3 +139,16 @@ fn an_empty_document_exports_one_page() {
     assert_eq!(digest.pages, 1);
     assert_eq!(open_pdf(&bytes).unwrap(), Opened::Editable(doc));
 }
+
+#[test]
+fn export_jobs_run_on_another_thread() {
+    let doc = sample();
+    let mut fonts = Fonts::bundled();
+    let layout = Layout::new(&doc, &mut fonts);
+    let job = ferrix_compose::ExportJob::new(&doc, &layout, &fonts);
+    let bytes = std::thread::spawn(move || job.run())
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes, export_pdf(&doc, &layout, &fonts).unwrap());
+}

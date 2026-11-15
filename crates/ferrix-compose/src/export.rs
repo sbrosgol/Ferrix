@@ -14,7 +14,7 @@ use krilla::surface::Surface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
 use serde::{Deserialize, Serialize};
 
-use crate::fonts::Fonts;
+use crate::fonts::{EmbedFonts, Fonts};
 use crate::layout::{Layout, Line};
 use crate::model::{Color, Document, ModelError};
 
@@ -44,6 +44,36 @@ pub enum ExportError {
 /// The pages are written twice: first to fingerprint their content, then with the source and that
 /// fingerprint embedded. The second pass is checked to produce the same pages.
 pub fn export_pdf(doc: &Document, layout: &Layout, fonts: &Fonts) -> Result<Vec<u8>, ExportError> {
+    export_with(doc, layout, &fonts.for_embedding(layout))
+}
+
+/// Everything needed to write a PDF, detached from the editor so it can run on another thread.
+#[derive(Debug, Clone)]
+pub struct ExportJob {
+    pub document: Document,
+    pub layout: Layout,
+    pub fonts: EmbedFonts,
+}
+
+impl ExportJob {
+    pub fn new(doc: &Document, layout: &Layout, fonts: &Fonts) -> Self {
+        Self {
+            document: doc.clone(),
+            layout: layout.clone(),
+            fonts: fonts.for_embedding(layout),
+        }
+    }
+
+    pub fn run(&self) -> Result<Vec<u8>, ExportError> {
+        export_with(&self.document, &self.layout, &self.fonts)
+    }
+}
+
+fn export_with(
+    doc: &Document,
+    layout: &Layout,
+    fonts: &EmbedFonts,
+) -> Result<Vec<u8>, ExportError> {
     let plain = write(doc, layout, fonts, None)?;
     let digest = ferrix_pdf::content_digest(Source::new(&plain))
         .map_err(|e| ExportError::Verify(e.to_string()))?;
@@ -69,7 +99,7 @@ pub fn export_pdf(doc: &Document, layout: &Layout, fonts: &Fonts) -> Result<Vec<
 fn write(
     doc: &Document,
     layout: &Layout,
-    fonts: &Fonts,
+    fonts: &EmbedFonts,
     source: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, ExportError> {
     let mut pdf = krilla::Document::new();
@@ -132,7 +162,7 @@ fn draw_line(
     surface: &mut Surface<'_>,
     line: &Line,
     text: &str,
-    fonts: &Fonts,
+    fonts: &EmbedFonts,
     cache: &mut HashMap<cosmic_text::fontdb::ID, Font>,
 ) -> Result<(), ExportError> {
     let glyphs = &line.glyphs;
@@ -158,7 +188,8 @@ fn draw_line(
             Some(font) => font.clone(),
             None => {
                 let (data, index) = fonts
-                    .face_data(first.font)
+                    .get(first.font)
+                    .cloned()
                     .ok_or(ExportError::MissingFont)?;
                 let font = Font::new(data, index).ok_or(ExportError::MissingFont)?;
                 cache.insert(first.font, font.clone());

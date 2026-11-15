@@ -43,6 +43,7 @@ pub struct Line {
     /// Left edge and width of the box the line is aligned in.
     pub left: f32,
     pub width: f32,
+    pub align: Align,
     pub rtl: bool,
     /// In visual order.
     pub glyphs: Vec<PlacedGlyph>,
@@ -63,6 +64,9 @@ pub struct PlacedGlyph {
     /// The paragraph text this glyph shows (byte offsets).
     pub range: Range<usize>,
     pub color: Color,
+    /// Right-to-left text: the glyph's logical start is its right edge.
+    pub rtl: bool,
+    pub weight: fontdb::Weight,
 }
 
 /// An underline or strikethrough bar.
@@ -107,7 +111,41 @@ pub(crate) fn resolve(
     }
 }
 
+/// Paragraphs already broken into lines, keyed by everything that affects their layout.
+#[derive(Default)]
+pub struct LayoutCache {
+    entries: std::collections::HashMap<u64, ParagraphLines>,
+}
+
+impl std::fmt::Debug for LayoutCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayoutCache")
+            .field("paragraphs", &self.entries.len())
+            .finish()
+    }
+}
+
+fn cache_key(doc: &Document, paragraph: &Paragraph) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_vec(paragraph)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    serde_json::to_vec(&doc.font)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    for value in [
+        doc.page.width,
+        doc.page.margins.left,
+        doc.page.margins.right,
+    ] {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// A paragraph broken into lines, before it is placed on a page.
+#[derive(Clone)]
 struct ParagraphLines {
     space_before: f32,
     space_after: f32,
@@ -118,12 +156,35 @@ struct ParagraphLines {
 impl Layout {
     /// Lays out the whole document.
     pub fn new(doc: &Document, fonts: &mut Fonts) -> Self {
+        Self::cached(doc, fonts, &mut LayoutCache::default())
+    }
+
+    /// Lays out the document, reusing paragraphs that have not changed since the last call with
+    /// the same cache.
+    pub fn cached(doc: &Document, fonts: &mut Fonts, cache: &mut LayoutCache) -> Self {
+        let mut used = std::collections::HashMap::with_capacity(doc.paragraphs.len());
         let paragraphs: Vec<ParagraphLines> = doc
             .paragraphs
             .iter()
             .enumerate()
-            .map(|(block, p)| break_lines(doc, block, p, fonts))
+            .map(|(block, p)| {
+                let key = cache_key(doc, p);
+                let mut lines = match cache
+                    .entries
+                    .remove(&key)
+                    .or_else(|| used.get(&key).cloned())
+                {
+                    Some(lines) => lines,
+                    None => break_lines(doc, block, p, fonts),
+                };
+                for line in &mut lines.lines {
+                    line.block = block;
+                }
+                used.insert(key, lines.clone());
+                lines
+            })
             .collect();
+        cache.entries = used;
         paginate(doc.page, paragraphs)
     }
 
@@ -149,6 +210,7 @@ fn break_lines(
 ) -> ParagraphLines {
     let style = paragraph.style.defaults();
     let format = paragraph.format;
+    let format_align = format.align.unwrap_or_default();
     let spacing = format.line_spacing.unwrap_or(1.0).clamp(0.5, 5.0);
     let indent = format
         .indent
@@ -234,6 +296,8 @@ fn break_lines(
                 advance: g.w,
                 range: g.start..g.end,
                 color: format.color,
+                rtl: g.level.is_rtl(),
+                weight: g.font_weight,
             });
             if format.underline || format.strikethrough {
                 let metrics = system
@@ -291,6 +355,7 @@ fn break_lines(
             baseline: run.line_y,
             left,
             width,
+            align: format_align,
             rtl: run.rtl,
             glyphs,
             decorations,
@@ -306,6 +371,7 @@ fn break_lines(
             baseline: first.size * 0.8 + (height - first.size * LINE_HEIGHT) / 2.0,
             left,
             width,
+            align: format_align,
             rtl: false,
             glyphs: Vec::new(),
             decorations: Vec::new(),
