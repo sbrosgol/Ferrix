@@ -77,6 +77,22 @@ enum Command {
         #[arg(short, long)]
         output: PathBuf,
     },
+    /// Write a document (Ferrix JSON source) as a PDF with the source embedded.
+    Compose {
+        /// Document source (`.json`), or a PDF written by Ferrix.
+        input: PathBuf,
+        /// Output PDF.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Also use fonts installed on this computer (layout then depends on the machine).
+        #[arg(long)]
+        system_fonts: bool,
+    },
+    /// Print the document source embedded in a PDF written by Ferrix.
+    Source {
+        /// PDF file.
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -95,8 +111,19 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    // These work without PDFium.
+    match cli.command {
+        Command::Compose {
+            input,
+            output,
+            system_fonts,
+        } => return compose(&input, &output, system_fonts),
+        Command::Source { file } => return source(&file),
+        _ => {}
+    }
     let mut engine = PdfiumEngine::new()?;
     match cli.command {
+        Command::Compose { .. } | Command::Source { .. } => unreachable!("handled above"),
         Command::Info { doc, json } => info(&mut engine, &doc, json),
         Command::Render {
             doc,
@@ -344,6 +371,51 @@ fn parse_pages(spec: &str, count: u32) -> Result<Vec<PageIndex>> {
         bail!("no pages selected");
     }
     Ok(pages)
+}
+
+/// Reads a document from JSON, or from the source embedded in a Ferrix PDF.
+fn read_document(path: &Path) -> Result<ferrix_compose::Document> {
+    let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.starts_with(b"%PDF") {
+        return match ferrix_compose::open_pdf(&bytes)? {
+            ferrix_compose::Opened::Editable(doc) => Ok(doc),
+            ferrix_compose::Opened::Changed(_) => {
+                bail!(
+                    "{} was changed by another application since Ferrix wrote it",
+                    path.display()
+                )
+            }
+            ferrix_compose::Opened::Plain => bail!("{} was not written by Ferrix", path.display()),
+        };
+    }
+    Ok(ferrix_compose::Document::from_json(&bytes)?)
+}
+
+fn compose(input: &Path, output: &Path, system_fonts: bool) -> Result<()> {
+    let doc = read_document(input)?;
+    let mut fonts = if system_fonts {
+        ferrix_compose::Fonts::with_system_fonts()
+    } else {
+        ferrix_compose::Fonts::bundled()
+    };
+    let layout = ferrix_compose::Layout::new(&doc, &mut fonts);
+    let pdf = ferrix_compose::export_pdf(&doc, &layout, &fonts)?;
+    ferrix_io::write_atomic(output, &pdf)
+        .with_context(|| format!("cannot write {}", output.display()))?;
+    eprintln!(
+        "{} paragraphs, {} pages → {} ({} bytes)",
+        doc.paragraphs.len(),
+        layout.pages.len(),
+        output.display(),
+        pdf.len()
+    );
+    Ok(())
+}
+
+fn source(file: &Path) -> Result<()> {
+    let doc = read_document(file)?;
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(())
 }
 
 #[cfg(test)]

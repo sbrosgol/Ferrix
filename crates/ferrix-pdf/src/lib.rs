@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 mod create;
+mod inspect;
 mod layout;
 
 pub use create::{ImageData, ImagePage, PaperSize, blank_document, image_document};
+pub use inspect::{ContentDigest, content_digest, embedded_file};
 pub use layout::{LayoutPage, write_page_layout};
 
 /// No single stream may inflate beyond this while parsing (defends against decompression bombs).

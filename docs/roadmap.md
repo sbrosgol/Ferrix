@@ -55,6 +55,22 @@ demo. Exit criteria are the definition of done, not the feature list.
 ## Delivered ahead of plan
 - New blank documents; images, Word, Excel, PowerPoint and OpenDocument files to PDF (ADR-0007).
 
+## Writing documents (ADR-0008)
+Runs alongside M1–M3; phases are independent of the viewer milestones.
+1. ~~Model, edits with undo, layout and pagination, PDF export with embedded source,
+   `ferrix compose` / `ferrix source` CLI~~ (done: `ferrix-compose`).
+2. ~~Editor view in `ferrix-app`: caret, selection, typing with input methods, clipboard,
+   undo/redo, formatting toolbar, page setup, save/reopen, crash recovery~~ (done; see ADR-0008
+   phase 2 notes).
+3. ~~Lists, images, page breaks, headers and footers with page numbers, find and replace~~
+   (done; see ADR-0008 phase 3 notes).
+4. ~~Tables, pasting formatted text, tagged PDF, PDF/A~~ (done; see ADR-0008 phase 4 notes).
+   Spell check is deferred pending a licensing decision (native checkers vs. MPL-2.0
+   `spellbook`).
+
+**Exit (phase 2):** a two-page letter can be written, formatted, saved, reopened and edited
+again, entirely with the keyboard; the saved PDF passes `qpdf --check`.
+
 ## M4 — Pro features (weeks 29–40) → `1.0`
 - True redaction (search & redact patterns; purge content; full save).
 - OCR (`ocrs`) for scanned documents → searchable/selectable text layer.

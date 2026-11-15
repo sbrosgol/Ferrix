@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 ferrix-types.workspace = true
 lopdf.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -27,11 +27,14 @@ use iced::{
 
 use ferrix_convert::kind_of;
 
+use ferrix_compose::{Editor, Fonts, Opened, PageSetup};
+
 use crate::{
     document::{Click, Document, Origin, Thumbnail, file_name, pages_fit, pages_label},
-    recovery::{Journal, Recoverable},
+    recovery::{Journal, Recoverable, WriterJournal},
     render::{LOGICAL_PX_PER_POINT, PageRef, Rendered, render_page},
     worker::{EngineWorker, blocking, flatten},
+    writer::{Action as WriteAction, KeyCommand, MarginChoice, Writer},
 };
 
 const ZOOM_STEPS: [f32; 15] = [
@@ -202,6 +205,64 @@ impl Default for NewForm {
 
 const MAX_NEW_PAGES: u32 = 1000;
 
+/// The Page Setup dialog of a written document.
+#[derive(Debug, Clone)]
+pub(crate) struct PageSetupForm {
+    pub(crate) paper: Paper,
+    pub(crate) orientation: Orientation,
+    pub(crate) margins: MarginChoice,
+    pub(crate) title: String,
+    pub(crate) header: String,
+    pub(crate) footer: String,
+    /// Leave header and footer off the first page.
+    pub(crate) skip_first: bool,
+    /// Save as PDF/A-3b.
+    pub(crate) archival: bool,
+}
+
+/// The find and replace bar of a written document.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FindState {
+    pub(crate) query: String,
+    pub(crate) replacement: String,
+    pub(crate) match_case: bool,
+    /// Typing goes to the bar's fields rather than the document.
+    pub(crate) focused: bool,
+}
+
+pub(crate) fn find_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("find")
+}
+
+/// Fonts loaded on a background thread, handed over once.
+#[derive(Clone)]
+pub struct FontsSlot(Arc<std::sync::Mutex<Option<Fonts>>>);
+
+impl FontsSlot {
+    fn new(fonts: Option<Fonts>) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(fonts)))
+    }
+
+    fn take(&self) -> Option<Fonts> {
+        self.0.lock().ok().and_then(|mut f| f.take())
+    }
+}
+
+impl fmt::Debug for FontsSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FontsSlot")
+    }
+}
+
+/// What a PDF turned out to be when checked for a Ferrix document source.
+#[derive(Debug, Clone)]
+pub enum Checked {
+    Writable(Box<ferrix_compose::Document>),
+    /// Written by Ferrix, but changed by another app since.
+    Changed,
+    Plain,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
     Save,
@@ -242,6 +303,19 @@ pub struct App {
     journal: Option<Journal>,
     /// Unsaved work from crashed sessions, offered one at a time.
     pub(crate) recoveries: Vec<Recoverable>,
+    /// The document being written, when one is open (instead of `doc`).
+    pub(crate) writer: Option<Writer>,
+    /// Fonts for writing: loaded in the background at startup, reused between documents.
+    fonts: Option<Fonts>,
+    writer_journal: Option<WriterJournal>,
+    /// The Page Setup dialog, while open.
+    pub(crate) page_setup: Option<PageSetupForm>,
+    /// Shown once the document being opened is open.
+    open_notice: Option<String>,
+    /// The find and replace bar, while open.
+    pub(crate) find: Option<FindState>,
+    /// Formatted copy and paste for written documents.
+    clipboard: crate::clipboard::RichClipboard,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +379,30 @@ pub enum Message {
     RecoveryFound(Vec<Recoverable>),
     Recovery(Recovery),
     Recovered(Box<Recoverable>, Result<Vec<DocInfo>, String>),
+    Write(WriteAction),
+    FontsReady(FontsSlot),
+    CreateWriting,
+    WritingChecked(PathBuf, Result<Checked, String>),
+    WriterSaved(Result<PathBuf, String>),
+    PageSetupDialog,
+    PageSetupPaper(Paper),
+    PageSetupOrientation(Orientation),
+    PageSetupMargins(MarginChoice),
+    PageSetupTitle(String),
+    PageSetupHeader(String),
+    PageSetupFooter(String),
+    PageSetupSkipFirst(bool),
+    PageSetupArchival(bool),
+    ApplyPageSetup,
+    FindOpen,
+    FindQuery(String),
+    FindReplacement(String),
+    FindCase(bool),
+    FindNext,
+    FindPrevious,
+    ReplaceOne,
+    ReplaceAll,
+    FindClose,
 }
 
 pub(crate) fn page_scroll_id() -> iced::widget::Id {
@@ -313,6 +411,10 @@ pub(crate) fn page_scroll_id() -> iced::widget::Id {
 
 pub(crate) fn sidebar_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("sidebar")
+}
+
+pub(crate) fn writer_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("writer")
 }
 
 impl App {
@@ -345,6 +447,13 @@ impl App {
             new_form: None,
             journal: None,
             recoveries: Vec::new(),
+            writer: None,
+            fonts: None,
+            writer_journal: None,
+            page_setup: None,
+            open_notice: None,
+            find: None,
+            clipboard: crate::clipboard::RichClipboard::default(),
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -359,11 +468,22 @@ impl App {
             Task::perform(blocking(|| Ok(crate::recovery::scan())), |found| {
                 Message::RecoveryFound(found.unwrap_or_default())
             }),
+            Task::perform(blocking(|| Ok(Fonts::with_system_fonts())), |fonts| {
+                Message::FontsReady(FontsSlot::new(fonts.ok()))
+            }),
         ]);
         (app, boot.chain(open))
     }
 
     pub(crate) fn title(&self) -> String {
+        if let Some(w) = &self.writer {
+            let edited = if w.editor.is_dirty() {
+                " — Edited"
+            } else {
+                ""
+            };
+            return format!("{}{edited} — Ferrix", w.name);
+        }
         match &self.doc {
             Some(doc) if doc.is_dirty() => format!("{} — Edited — Ferrix", doc.name()),
             Some(doc) => format!("{} — Ferrix", doc.name()),
@@ -389,8 +509,9 @@ impl App {
 
     /// Whether page-editing actions are available right now.
     pub(crate) fn can_edit(&self) -> bool {
-        self.doc.is_some()
+        (self.doc.is_some() || self.writer.is_some())
             && self.busy.is_none()
+            && self.page_setup.is_none()
             && self.confirm.is_none()
             && self.new_form.is_none()
             && self.recoveries.is_empty()
@@ -588,6 +709,22 @@ impl App {
             Message::Inserted(origin, Err(e)) => {
                 self.error = Some(format!("Couldn’t insert “{}”: {e}", origin.file_name()));
             }
+            Message::Undo if self.writer.is_some() => {
+                if self.can_edit()
+                    && let Some(w) = &mut self.writer
+                    && w.editor.undo()
+                {
+                    return self.after_write(true);
+                }
+            }
+            Message::Redo if self.writer.is_some() => {
+                if self.can_edit()
+                    && let Some(w) = &mut self.writer
+                    && w.editor.redo()
+                {
+                    return self.after_write(true);
+                }
+            }
             Message::Undo => {
                 if self.can_edit()
                     && let Some(doc) = &mut self.doc
@@ -606,6 +743,22 @@ impl App {
                     return self.after_edit();
                 }
             }
+            Message::Save if self.writer.is_some() => {
+                let Some(w) = self.writer.as_ref().filter(|_| self.busy.is_none()) else {
+                    return Task::none();
+                };
+                return match w.path.clone() {
+                    Some(path) if w.editor.is_dirty() => self.save_writer(path),
+                    Some(_) => {
+                        // Nothing to save; still carry on with what was waiting for a save.
+                        match self.after_save.take() {
+                            Some(next) => self.proceed(next),
+                            None => Task::none(),
+                        }
+                    }
+                    None => self.update(Message::SaveAs),
+                };
+            }
             Message::Save => {
                 if let Some(doc) = &self.doc
                     && doc.is_dirty()
@@ -616,6 +769,21 @@ impl App {
                     };
                     return self.save_to(path);
                 }
+            }
+            Message::SaveAs if self.writer.is_some() => {
+                let Some(w) = self.writer.as_ref().filter(|_| self.busy.is_none()) else {
+                    return Task::none();
+                };
+                let mut dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Save As")
+                    .add_filter("PDF documents", &["pdf"])
+                    .set_file_name(&w.name);
+                if let Some(dir) = w.path.as_deref().and_then(|p| p.parent()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                return Task::perform(dialog.save_file(), |file| {
+                    Message::SaveAsPicked(file.map(|f| f.path().to_path_buf()))
+                });
             }
             Message::SaveAs => {
                 let Some(doc) = self.doc.as_ref().filter(|_| self.busy.is_none()) else {
@@ -631,6 +799,9 @@ impl App {
                 return Task::perform(dialog.save_file(), |file| {
                     Message::SaveAsPicked(file.map(|f| f.path().to_path_buf()))
                 });
+            }
+            Message::SaveAsPicked(Some(path)) if self.writer.is_some() => {
+                return self.save_writer(path);
             }
             Message::SaveAsPicked(Some(path)) => return self.save_to(path),
             Message::SaveAsPicked(None) => self.after_save = None,
@@ -664,8 +835,12 @@ impl App {
                 }
             }
             Message::Escape => {
+                if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
+                    self.find = None;
+                }
                 self.confirm = None;
                 self.new_form = None;
+                self.page_setup = None;
             }
             Message::ConverterReady(converter) => self.converter = Some(converter),
             Message::Converted(purpose, source, Ok(bytes)) => {
@@ -763,6 +938,234 @@ impl App {
                 self.busy = None;
                 self.error = Some(format!("Couldn’t recover “{}”: {e}", found.name()));
             }
+            Message::Write(action) => return self.write(action),
+            Message::FontsReady(slot) => {
+                if self.fonts.is_none() {
+                    self.fonts = slot.take();
+                }
+            }
+            Message::CreateWriting => {
+                let Some(form) = self.new_form.take() else {
+                    return Task::none();
+                };
+                let size = match form.orientation {
+                    Orientation::Portrait => form.paper.size(),
+                    Orientation::Landscape => form.paper.size().landscape(),
+                };
+                let doc =
+                    ferrix_compose::Document::with_page(PageSetup::new((size.width, size.height)));
+                let editor = Editor::new(doc, self.take_fonts());
+                return self.open_writer(Writer::new(editor, None, None));
+            }
+            Message::WritingChecked(path, result) => {
+                return match result {
+                    Ok(Checked::Writable(doc)) => {
+                        let stamp = FileStamp::of(&path).ok();
+                        let editor = Editor::new(*doc, self.take_fonts());
+                        self.open_writer(Writer::new(editor, Some(path), stamp))
+                    }
+                    Ok(Checked::Changed) => {
+                        self.open_notice = Some(format!(
+                            "“{}” was changed by another app after Ferrix wrote it, so it opens as \
+                             an ordinary PDF",
+                            file_name(&path)
+                        ));
+                        self.load(Origin::File(path), Message::Opened)
+                    }
+                    Ok(Checked::Plain) | Err(_) => self.load(Origin::File(path), Message::Opened),
+                };
+            }
+            Message::WriterSaved(Ok(path)) => {
+                self.busy = None;
+                if let Some(w) = &mut self.writer {
+                    w.stamp = FileStamp::of(&path).ok();
+                    w.name = file_name(&path);
+                    w.path = Some(path.clone());
+                    w.editor.mark_saved();
+                }
+                self.sync_writer_journal();
+                self.notice = Some(format!("Saved “{}”", file_name(&path)));
+                if let Some(next) = self.after_save.take() {
+                    return self.proceed(next);
+                }
+            }
+            Message::WriterSaved(Err(e)) => {
+                self.busy = None;
+                self.after_save = None;
+                self.error = Some(format!("Couldn’t save: {e}"));
+            }
+            Message::PageSetupDialog => {
+                if let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) {
+                    let doc = w.editor.document();
+                    let page = doc.page;
+                    let landscape = page.width > page.height;
+                    let (short, long) = (page.width.min(page.height), page.width.max(page.height));
+                    let paper = PAPERS
+                        .into_iter()
+                        .find(|p| {
+                            let s = p.size();
+                            (s.width - short).abs() < 1.0 && (s.height - long).abs() < 1.0
+                        })
+                        .unwrap_or(Paper::A4);
+                    self.page_setup = Some(PageSetupForm {
+                        paper,
+                        orientation: if landscape {
+                            Orientation::Landscape
+                        } else {
+                            Orientation::Portrait
+                        },
+                        margins: MarginChoice::nearest(page.margins.left),
+                        title: doc.title.clone().unwrap_or_default(),
+                        header: doc
+                            .header
+                            .as_ref()
+                            .map(|t| t.text.clone())
+                            .unwrap_or_default(),
+                        footer: doc
+                            .footer
+                            .as_ref()
+                            .map(|t| t.text.clone())
+                            .unwrap_or_default(),
+                        skip_first: doc.header.iter().chain(&doc.footer).any(|t| t.skip_first),
+                        archival: doc.archival,
+                    });
+                }
+            }
+            Message::PageSetupPaper(paper) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.paper = paper;
+                }
+            }
+            Message::PageSetupOrientation(orientation) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.orientation = orientation;
+                }
+            }
+            Message::PageSetupMargins(margins) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.margins = margins;
+                }
+            }
+            Message::PageSetupTitle(title) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.title = title.chars().take(200).collect();
+                }
+            }
+            Message::PageSetupHeader(text) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.header = text.chars().take(200).collect();
+                }
+            }
+            Message::PageSetupFooter(text) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.footer = text.chars().take(200).collect();
+                }
+            }
+            Message::PageSetupSkipFirst(skip) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.skip_first = skip;
+                }
+            }
+            Message::PageSetupArchival(on) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.archival = on;
+                }
+            }
+            Message::FindOpen => {
+                let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) else {
+                    return Task::none();
+                };
+                // Start from the selected text, if it is a short single line.
+                let selected = w.editor.selected_text();
+                let mut find = self.find.take().unwrap_or_default();
+                if !selected.is_empty() && selected.len() <= 200 && !selected.contains('\n') {
+                    find.query = selected;
+                }
+                find.focused = true;
+                self.find = Some(find);
+                return Task::batch([
+                    operation::focus(find_input_id()),
+                    operation::select_all(find_input_id()),
+                ]);
+            }
+            Message::FindQuery(query) => {
+                if let Some(find) = &mut self.find {
+                    find.query = query.chars().take(200).collect();
+                    find.focused = true;
+                }
+            }
+            Message::FindReplacement(text) => {
+                if let Some(find) = &mut self.find {
+                    find.replacement = text.chars().take(200).collect();
+                    find.focused = true;
+                }
+            }
+            Message::FindCase(on) => {
+                if let Some(find) = &mut self.find {
+                    find.match_case = on;
+                }
+            }
+            Message::FindNext
+            | Message::FindPrevious
+            | Message::ReplaceOne
+            | Message::ReplaceAll => {
+                let (Some(find), true) = (self.find.clone(), self.can_edit()) else {
+                    return Task::none();
+                };
+                let Some(w) = &mut self.writer else {
+                    return Task::none();
+                };
+                let e = &mut w.editor;
+                let found = match message {
+                    Message::FindPrevious => e.find_next(&find.query, find.match_case, true),
+                    Message::ReplaceOne => {
+                        e.replace(&find.query, &find.replacement, find.match_case)
+                    }
+                    Message::ReplaceAll => {
+                        let count = e.replace_all(&find.query, &find.replacement, find.match_case);
+                        self.notice = Some(match count {
+                            0 => "Nothing to replace".to_owned(),
+                            1 => "Replaced 1 match".to_owned(),
+                            n => format!("Replaced {n} matches"),
+                        });
+                        true
+                    }
+                    _ => e.find_next(&find.query, find.match_case, false),
+                };
+                if !found && !find.query.is_empty() {
+                    self.notice = Some(format!("“{}” not found", find.query));
+                }
+                return self.after_write(true);
+            }
+            Message::FindClose => self.find = None,
+            Message::ApplyPageSetup => {
+                let (Some(form), Some(w)) = (self.page_setup.take(), self.writer.as_mut()) else {
+                    return Task::none();
+                };
+                let size = match form.orientation {
+                    Orientation::Portrait => form.paper.size(),
+                    Orientation::Landscape => form.paper.size().landscape(),
+                };
+                let mut settings = w.editor.document().settings();
+                settings.page = PageSetup::new((size.width, size.height));
+                settings.page.margins = ferrix_compose::Margins::uniform(form.margins.points());
+                let title = form.title.trim();
+                settings.title = (!title.is_empty()).then(|| title.to_owned());
+                let page_text = |text: &str| {
+                    let text = text.trim();
+                    (!text.is_empty()).then(|| ferrix_compose::PageText {
+                        skip_first: form.skip_first,
+                        ..ferrix_compose::PageText::new(text)
+                    })
+                };
+                settings.header = page_text(&form.header);
+                settings.footer = page_text(&form.footer);
+                settings.archival = form.archival;
+                if settings != w.editor.document().settings() {
+                    w.editor.set_settings(settings);
+                    return Task::batch([self.after_write(false), self.render()]);
+                }
+            }
         }
         Task::none()
     }
@@ -797,7 +1200,9 @@ impl App {
         if self.busy.is_some() {
             return Task::none();
         }
-        if self.doc.as_ref().is_some_and(Document::is_dirty) {
+        if self.doc.as_ref().is_some_and(Document::is_dirty)
+            || self.writer.as_ref().is_some_and(|w| w.editor.is_dirty())
+        {
             self.confirm = Some(next);
             return Task::none();
         }
@@ -814,7 +1219,7 @@ impl App {
             // Unsaved changes were already dealt with, so open directly.
             Proceed::Open(path) => {
                 if kind_of(&path) == Some(Kind::Pdf) {
-                    self.load(Origin::File(path), Message::Opened)
+                    self.check_writing(path)
                 } else {
                     self.convert(Purpose::Open, vec![path])
                 }
@@ -827,6 +1232,9 @@ impl App {
             Proceed::Quit => {
                 // Leaving with nothing unsaved (or by choice): no recovery needed.
                 if let Some(journal) = self.journal.take() {
+                    journal.discard();
+                }
+                if let Some(journal) = self.writer_journal.take() {
                     journal.discard();
                 }
                 iced::exit()
@@ -911,7 +1319,7 @@ impl App {
                 doc.select_only(key);
             }
         } else {
-            self.notice = None;
+            self.notice = self.open_notice.take();
         }
         self.doc = Some(doc);
         self.sync_journal();
@@ -921,6 +1329,25 @@ impl App {
 
     /// Opens the documents behind the first recoverable session.
     fn start_recovery(&mut self) -> Task<Message> {
+        if let Some(found) = self.recoveries.first().cloned()
+            && let Some(doc) = found.written.clone()
+        {
+            if found.base_changed {
+                return Task::none();
+            }
+            let path = found.base.path().map(PathBuf::from);
+            let stamp = path.as_deref().and_then(|p| FileStamp::of(p).ok());
+            let editor = Editor::unsaved(doc, self.take_fonts());
+            let mut writer = Writer::new(editor, path, stamp);
+            writer.name = found.name();
+            let task = self.open_writer(writer);
+            if self.writer_journal.is_some() {
+                found.discard();
+            }
+            self.recoveries.retain(|r| r.journal != found.journal);
+            self.notice = Some(format!("Recovered unsaved changes to “{}”", found.name()));
+            return task;
+        }
         let (Some(found), Ok(engine)) = (self.recoveries.first().cloned(), self.engine.clone())
         else {
             return Task::none();
@@ -1032,6 +1459,14 @@ impl App {
         if let Some(journal) = self.journal.take() {
             journal.discard();
         }
+        if let Some(journal) = self.writer_journal.take() {
+            journal.discard();
+        }
+        self.page_setup = None;
+        self.find = None;
+        if let Some(writer) = self.writer.take() {
+            self.fonts = Some(writer.editor.into_fonts());
+        }
         let (Some(doc), Ok(engine)) = (self.doc.take(), self.engine.clone()) else {
             return Task::none();
         };
@@ -1100,6 +1535,262 @@ impl App {
         Task::batch([task, self.go_to(at)])
     }
 
+    // ── Writing ───────────────────────────────────────────────────────────────
+
+    /// Fonts for a new writer: those loaded at startup, or loaded now if they aren't ready yet.
+    fn take_fonts(&mut self) -> Fonts {
+        self.fonts.take().unwrap_or_else(Fonts::with_system_fonts)
+    }
+
+    /// Replaces whatever is open with a written document.
+    fn open_writer(&mut self, writer: Writer) -> Task<Message> {
+        let close = self.close_document();
+        self.error = None;
+        self.writer = Some(writer);
+        self.sync_writer_journal();
+        self.refresh_writer();
+        Task::batch([
+            close,
+            operation::snap_to(writer_scroll_id(), scrollable::RelativeOffset::START),
+        ])
+    }
+
+    /// Opens a PDF, for writing if Ferrix wrote it and nothing has changed it since.
+    fn check_writing(&mut self, path: PathBuf) -> Task<Message> {
+        let file = path.clone();
+        Task::perform(
+            blocking(move || {
+                let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+                // Cheap test before parsing: the source's file name is stored uncompressed.
+                let name = ferrix_compose::SOURCE_NAME.as_bytes();
+                if !bytes.windows(name.len()).any(|w| w == name) {
+                    return Ok(Checked::Plain);
+                }
+                Ok(match ferrix_compose::open_pdf(&bytes) {
+                    Ok(Opened::Editable(doc)) => Checked::Writable(Box::new(doc)),
+                    Ok(Opened::Changed(_)) => Checked::Changed,
+                    Ok(Opened::Plain) | Err(_) => Checked::Plain,
+                })
+            }),
+            move |result| Message::WritingChecked(path.clone(), result),
+        )
+    }
+
+    fn write(&mut self, action: WriteAction) -> Task<Message> {
+        let scale_factor = self.scale_factor;
+        if let WriteAction::Scrolled(offset, height) = action {
+            if let Some(w) = &mut self.writer {
+                w.viewport = (offset, height);
+                w.refresh(scale_factor);
+            }
+            return Task::none();
+        }
+        if !self.can_edit() {
+            return Task::none();
+        }
+        let Some(w) = &mut self.writer else {
+            return Task::none();
+        };
+        let before = w.editor.revision();
+        let mut task = Task::none();
+        let mut follow = true;
+        let e = &mut w.editor;
+        match action {
+            WriteAction::Scrolled(..) => {}
+            WriteAction::Press {
+                page,
+                x,
+                y,
+                clicks,
+                extend,
+            } => {
+                w.press(page, x, y, clicks, extend);
+                follow = false;
+                if let Some(find) = &mut self.find {
+                    find.focused = false;
+                }
+            }
+            WriteAction::Drag { page, x, y } => e.drag(page, x, y),
+            WriteAction::Key(KeyCommand::Paste) => match self.clipboard.paste() {
+                Some(crate::clipboard::Pasted::Formatted(fragment)) => e.paste_fragment(&fragment),
+                Some(crate::clipboard::Pasted::Text(text)) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(KeyCommand::PastePlain) => match self.clipboard.paste_plain() {
+                Some(text) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(command @ (KeyCommand::Copy | KeyCommand::Cut)) => {
+                let fragment = e.copy_fragment();
+                if let Some(text) = w.key(command)
+                    && !fragment.is_some_and(|f| self.clipboard.copy(f))
+                {
+                    task = iced::clipboard::write(text);
+                }
+            }
+            WriteAction::Key(command) => {
+                if let Some(text) = w.key(command) {
+                    task = iced::clipboard::write(text);
+                }
+            }
+            WriteAction::Pasted(Some(text)) => e.paste(&text),
+            WriteAction::Pasted(None) => {}
+            WriteAction::Style(choice) => e.set_style(choice.0),
+            WriteAction::Family(family) => e.set_family(&family),
+            WriteAction::Size(size) => e.set_size(size.0),
+            WriteAction::Toggle(toggle) => e.toggle(toggle),
+            WriteAction::Color(choice) => e.set_color(choice.color),
+            WriteAction::Align(align) => e.set_align(align),
+            WriteAction::Spacing(spacing) => e.set_line_spacing(spacing.0),
+            WriteAction::ClearFormatting => e.clear_formatting(),
+            WriteAction::List(kind) => e.toggle_list(kind),
+            WriteAction::PageBreak => e.page_break(),
+            WriteAction::InsertImage => {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Insert Picture")
+                    .add_filter("Pictures", &["png", "jpg", "jpeg"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        let path = file.path().to_path_buf();
+                        Some(
+                            blocking(move || {
+                                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                                ferrix_compose::ImageData::from_bytes(bytes)
+                                    .map(Box::new)
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await,
+                        )
+                    },
+                    |result| match result {
+                        Some(result) => Message::Write(WriteAction::ImageLoaded(result)),
+                        None => Message::DialogClosed,
+                    },
+                );
+            }
+            WriteAction::ImageLoaded(Ok(data)) => e.insert_image(*data),
+            WriteAction::Table(crate::writer::TableChoice::Insert(rows, cols)) => {
+                e.insert_table(rows, cols);
+            }
+            WriteAction::Table(crate::writer::TableChoice::Op(op)) => e.table_op(op),
+            WriteAction::ImageLoaded(Err(error)) => {
+                self.error = Some(format!("Couldn’t insert the picture: {error}"));
+                return Task::none();
+            }
+        }
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|w| w.editor.revision() != before)
+        {
+            self.notice = None;
+            return Task::batch([task, self.after_write(follow)]);
+        }
+        task
+    }
+
+    /// After the document or selection changed: journal, redraw, and keep the caret in view.
+    fn after_write(&mut self, follow: bool) -> Task<Message> {
+        self.sync_writer_journal();
+        let scale_factor = self.scale_factor;
+        let Some(w) = &mut self.writer else {
+            return Task::none();
+        };
+        w.refresh(scale_factor);
+        if follow && let Some(y) = w.scroll_for_caret() {
+            w.viewport.0 = y;
+            w.refresh(scale_factor);
+            return operation::scroll_to(
+                writer_scroll_id(),
+                scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(y),
+                },
+            );
+        }
+        Task::none()
+    }
+
+    /// Applies the zoom to the writer and redraws its pages.
+    fn refresh_writer(&mut self) {
+        let canvas = crate::view::canvas_size(self.window_size, false);
+        let (zoom, scale_factor) = (self.zoom, self.scale_factor);
+        let Some(w) = &mut self.writer else {
+            return;
+        };
+        let page = w.page_setup();
+        let factor = zoom.resolve(
+            Size {
+                width: page.width,
+                height: page.height,
+            },
+            canvas,
+        );
+        w.zoom = factor * LOGICAL_PX_PER_POINT;
+        w.refresh(scale_factor);
+    }
+
+    /// Keeps the writer's recovery journal in step: started on the first unsaved change, one
+    /// record per edit, deleted once nothing is unsaved.
+    fn sync_writer_journal(&mut self) {
+        let Some(w) = &mut self.writer else {
+            if let Some(journal) = self.writer_journal.take() {
+                journal.discard();
+            }
+            return;
+        };
+        let edits = w.editor.take_applied();
+        if !w.editor.is_dirty() {
+            if let Some(journal) = self.writer_journal.take() {
+                journal.discard();
+            }
+            return;
+        }
+        let result = match &mut self.writer_journal {
+            Some(journal) => journal.record(&edits),
+            None => WriterJournal::start(&w.name, w.path.as_deref(), w.editor.document())
+                .map(|journal| self.writer_journal = Some(journal)),
+        };
+        if let Err(e) = result {
+            tracing::warn!("recovery journal: {e}");
+            self.error = Some(format!("Couldn’t save recovery data: {e}"));
+        }
+    }
+
+    fn save_writer(&mut self, target: PathBuf) -> Task<Message> {
+        let Some(w) = self.writer.as_ref().filter(|_| self.busy.is_none()) else {
+            return Task::none();
+        };
+        let job = w.editor.export_job();
+        let (opened, stamp) = (w.path.clone(), w.stamp);
+        self.busy = Some("Saving…");
+        self.error = None;
+        Task::perform(
+            blocking(move || {
+                if opened.as_ref() == Some(&target)
+                    && stamp.is_some()
+                    && FileStamp::of(&target).ok() != stamp
+                {
+                    return Err(format!(
+                        "“{}” was changed by another app after it was opened; use Save As",
+                        file_name(&target)
+                    ));
+                }
+                let bytes = job.run().map_err(|e| e.to_string())?;
+                ferrix_io::write_atomic(&target, &bytes).map_err(|e| e.to_string())?;
+                Ok(target)
+            }),
+            Message::WriterSaved,
+        )
+    }
+
     // ── Saving ────────────────────────────────────────────────────────────────
 
     fn save_to(&mut self, target: PathBuf) -> Task<Message> {
@@ -1142,6 +1833,23 @@ impl App {
 
     /// Prints the document as shown: unsaved edits are exported to a temporary file first.
     fn print(&mut self) -> Task<Message> {
+        if let Some(w) = self.writer.as_ref().filter(|_| self.busy.is_none()) {
+            let job = w.editor.export_job();
+            let temp = std::env::temp_dir().join(format!(
+                "ferrix-print-{}-{}",
+                std::process::id(),
+                w.name
+            ));
+            self.busy = Some("Preparing to print…");
+            return Task::perform(
+                blocking(move || {
+                    let bytes = job.run().map_err(|e| e.to_string())?;
+                    std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+                    Ok(temp)
+                }),
+                Message::PrintReady,
+            );
+        }
         let Some(doc) = &self.doc else {
             return Task::none();
         };
@@ -1173,13 +1881,18 @@ impl App {
     }
 
     fn print_file(&mut self, path: PathBuf) -> Task<Message> {
-        let (Some(doc), Some(window)) = (&self.doc, self.window) else {
+        let Some(window) = self.window else {
             return Task::none();
         };
+        let (title, page_count) = match (&self.writer, &self.doc) {
+            (Some(w), _) => (w.name.clone(), w.page_count() as u32),
+            (None, Some(doc)) => (doc.name(), doc.len() as u32),
+            (None, None) => return Task::none(),
+        };
         let job = PrintJob {
-            title: doc.name(),
+            title,
             path,
-            page_count: doc.len() as u32,
+            page_count,
         };
         self.error = None;
         self.platform_print(window, job)
@@ -1241,7 +1954,7 @@ impl App {
     }
 
     fn set_zoom(&mut self, zoom: Zoom) -> Task<Message> {
-        if self.doc.is_none() {
+        if self.doc.is_none() && self.writer.is_none() {
             return Task::none();
         }
         self.zoom = zoom;
@@ -1249,7 +1962,11 @@ impl App {
     }
 
     fn step_zoom(&mut self, up: bool) -> Task<Message> {
-        let Some((_, current)) = self.doc.as_ref().and_then(|d| d.shown) else {
+        let shown = match &self.writer {
+            Some(w) => Some(w.zoom / LOGICAL_PX_PER_POINT),
+            None => self.doc.as_ref().and_then(|d| d.shown).map(|(_, z)| z),
+        };
+        let Some(current) = shown else {
             return Task::none();
         };
         let next = if up {
@@ -1314,6 +2031,10 @@ impl App {
 
     /// Requests the current page at the current zoom and display scale.
     fn render(&mut self) -> Task<Message> {
+        if self.writer.is_some() {
+            self.refresh_writer();
+            return Task::none();
+        }
         let (Ok(engine), Some(page)) = (
             self.engine.clone(),
             self.doc.as_ref().and_then(Document::current_page),
@@ -1461,6 +2182,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "o" => Some(Message::OpenDialog),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
+                "f" => Some(Message::FindOpen),
                 "s" if shift => Some(Message::SaveAs),
                 "s" => Some(Message::Save),
                 "z" if shift => Some(Message::Redo),

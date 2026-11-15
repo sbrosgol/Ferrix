@@ -9,16 +9,25 @@ use iced::{
     },
 };
 
+use ferrix_compose::{Align, ListKind, Toggle};
+
 use crate::{
     app::{
-        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS, Recovery,
-        THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, page_scroll_id, sidebar_scroll_id,
+        App, Choice, FindState, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS,
+        PageSetupForm, Recovery, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, find_input_id,
+        page_scroll_id, sidebar_scroll_id, writer_scroll_id,
     },
     document::{Document, MAX_THUMBNAILS},
     icon::Icon,
     recovery::{Recoverable, describe},
+    render::LOGICAL_PX_PER_POINT,
     render::PageImage,
     theme::{self, Tokens},
+    writer::{
+        Action, COLORS, MARGINS, SIZES, SPACINGS, STYLES, SizeChoice, SpacingChoice, StyleChoice,
+        Writer, color_choice,
+    },
+    writer_canvas::Canvas,
 };
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
@@ -46,6 +55,7 @@ pub(crate) fn canvas_size(window: iced::Size, sidebar: bool) -> iced::Size {
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         let main: Element<'_, Message> = match (&self.doc, &self.page_image) {
+            _ if self.writer.is_some() => self.writer_view(),
             (None, _) => self.empty_state(),
             (Some(_), Some(page)) => self.page_view(page),
             (Some(_), None) => container(muted("Loading…", 13.0))
@@ -61,15 +71,32 @@ impl App {
             _ => main,
         };
 
-        let window = column![
-            self.toolbar(),
-            horizontal_divider(),
-            container(body).height(Length::Fill),
-            horizontal_divider(),
-            self.status_bar(),
-        ];
-        if let (Some(_), Some(doc)) = (&self.confirm, &self.doc) {
-            return stack![window, save_changes_dialog(doc)].into();
+        let mut window = column![self.toolbar(), horizontal_divider()];
+        if let Some(writer) = &self.writer {
+            window = window
+                .push(self.format_bar(writer))
+                .push(horizontal_divider());
+            if let Some(find) = &self.find {
+                window = window
+                    .push(self.find_bar(writer, find))
+                    .push(horizontal_divider());
+            }
+        }
+        let window = window
+            .push(container(body).height(Length::Fill))
+            .extend([horizontal_divider(), self.status_bar()]);
+        if self.confirm.is_some() {
+            let name = match (&self.writer, &self.doc) {
+                (Some(w), _) => Some(w.name.clone()),
+                (None, Some(doc)) => Some(doc.name()),
+                (None, None) => None,
+            };
+            if let Some(name) = name {
+                return stack![window, save_changes_dialog(name)].into();
+            }
+        }
+        if let Some(form) = &self.page_setup {
+            return stack![window, page_setup_dialog(form)].into();
         }
         if let Some(found) = self.recoveries.first() {
             return stack![window, self.recovery_dialog(found)].into();
@@ -82,14 +109,31 @@ impl App {
 
     fn toolbar(&self) -> Element<'_, Message> {
         let doc = self.doc.as_ref();
+        let writer = self.writer.as_ref();
         let has_doc = doc.is_some();
+        let open = has_doc || writer.is_some();
         let (page, count) = doc.map_or((0, 0), |d| (d.current, d.len()));
         let editable = self.can_edit();
-        let dirty = doc.is_some_and(Document::is_dirty);
+        let dirty =
+            doc.is_some_and(Document::is_dirty) || writer.is_some_and(|w| w.editor.is_dirty());
+        let can_save = dirty || writer.is_some_and(|w| w.path.is_none());
+        let name = writer
+            .map(|w| w.name.clone())
+            .or_else(|| doc.map(Document::name));
+        let (undo_label, redo_label) = match writer {
+            Some(w) => (
+                w.editor.undo_label().map(str::to_owned),
+                w.editor.redo_label().map(str::to_owned),
+            ),
+            None => (
+                doc.and_then(|d| d.history.undo_label()).map(str::to_owned),
+                doc.and_then(|d| d.history.redo_label()).map(str::to_owned),
+            ),
+        };
 
-        let title: Element<'_, Message> = match doc {
-            Some(doc) => row![
-                text(doc.name())
+        let title: Element<'_, Message> = match name {
+            Some(name) => row![
+                text(name)
                     .size(13)
                     .font(SEMIBOLD)
                     .wrapping(text::Wrapping::None),
@@ -100,11 +144,11 @@ impl App {
             .into(),
             None => text("Ferrix").size(13).font(SEMIBOLD).into(),
         };
-        let undo_tip = doc
-            .and_then(|d| d.history.undo_label())
+        let undo_tip = undo_label
+            .as_deref()
             .map_or_else(|| "Undo (⌘Z)".to_owned(), |l| format!("Undo {l} (⌘Z)"));
-        let redo_tip = doc
-            .and_then(|d| d.history.redo_label())
+        let redo_tip = redo_label
+            .as_deref()
             .map_or_else(|| "Redo (⇧⌘Z)".to_owned(), |l| format!("Redo {l} (⇧⌘Z)"));
         let left = row![
             Space::new().width(TRAFFIC_LIGHTS),
@@ -129,28 +173,26 @@ impl App {
             icon_button(
                 Icon::Save,
                 "Save (⌘S)",
-                (dirty && editable).then_some(Message::Save),
+                (can_save && editable).then_some(Message::Save),
                 false,
             ),
             icon_button(
                 Icon::Printer,
                 "Print… (⌘P)",
-                (has_doc && self.busy.is_none()).then_some(Message::Print),
+                (open && self.busy.is_none()).then_some(Message::Print),
                 false,
             ),
             toolbar_separator(),
             icon_button(
                 Icon::Undo,
                 undo_tip,
-                (editable && doc.is_some_and(|d| d.history.undo_label().is_some()))
-                    .then_some(Message::Undo),
+                (editable && undo_label.is_some()).then_some(Message::Undo),
                 false,
             ),
             icon_button(
                 Icon::Redo,
                 redo_tip,
-                (editable && doc.is_some_and(|d| d.history.redo_label().is_some()))
-                    .then_some(Message::Redo),
+                (editable && redo_label.is_some()).then_some(Message::Redo),
                 false,
             ),
             Space::new().width(8),
@@ -167,33 +209,42 @@ impl App {
             .padding([4, 6])
             .align_x(Alignment::Center)
             .style(theme::input);
-        let center = row![
-            icon_button(
-                Icon::ChevronLeft,
-                "Previous page",
-                (has_doc && page > 0).then_some(Message::Previous),
-                false,
-            ),
-            page_field,
-            muted(
-                if has_doc {
-                    format!("of {count}")
-                } else {
-                    "of –".into()
-                },
-                13.0
-            ),
-            icon_button(
-                Icon::ChevronRight,
-                "Next page",
-                (has_doc && page + 1 < count).then_some(Message::Next),
-                false,
-            ),
-        ]
+        // A written document's page number is in the status bar; the toolbar keeps its room for
+        // the title.
+        let center = if writer.is_some() {
+            row![]
+        } else {
+            row![
+                icon_button(
+                    Icon::ChevronLeft,
+                    "Previous page",
+                    (has_doc && page > 0).then_some(Message::Previous),
+                    false,
+                ),
+                page_field,
+                muted(
+                    if has_doc {
+                        format!("of {count}")
+                    } else {
+                        "of –".into()
+                    },
+                    13.0
+                ),
+                icon_button(
+                    Icon::ChevronRight,
+                    "Next page",
+                    (has_doc && page + 1 < count).then_some(Message::Next),
+                    false,
+                ),
+            ]
+        }
         .spacing(6)
         .align_y(Alignment::Center);
 
-        let zoom = doc.and_then(|d| d.shown).map(|(_, z)| z);
+        let zoom = match writer {
+            Some(w) => Some(w.zoom / LOGICAL_PX_PER_POINT),
+            None => doc.and_then(|d| d.shown).map(|(_, z)| z),
+        };
         let zoom_label = zoom.map(|z| ZoomChoice::Percent((z * 100.0).round() as u16));
         let theme_icon = if self.is_dark() {
             Icon::Sun
@@ -226,14 +277,14 @@ impl App {
             icon_button(
                 Icon::FitWidth,
                 "Fit width (⌘2)",
-                has_doc.then_some(Message::FitWidth),
-                has_doc && self.zoom == Zoom::FitWidth,
+                open.then_some(Message::FitWidth),
+                open && self.zoom == Zoom::FitWidth,
             ),
             icon_button(
                 Icon::FitPage,
                 "Fit page (⌘1)",
-                has_doc.then_some(Message::FitPage),
-                has_doc && self.zoom == Zoom::FitPage,
+                open.then_some(Message::FitPage),
+                open && self.zoom == Zoom::FitPage,
             ),
             toolbar_separator(),
             icon_button(
@@ -514,6 +565,13 @@ impl App {
             )
         } else if let Some(notice) = &self.notice {
             dismissible(muted(notice, 12.0).into())
+        } else if let Some(w) = &self.writer {
+            let words = w.editor.word_count();
+            muted(
+                format!("{words} word{}", if words == 1 { "" } else { "s" }),
+                12.0,
+            )
+            .into()
         } else if let Some(doc) = &self.doc {
             let count = doc.len();
             let mut parts = vec![format!("{count} page{}", if count == 1 { "" } else { "s" })];
@@ -530,9 +588,10 @@ impl App {
         } else {
             muted("Ready", 12.0).into()
         };
-        let right = match &self.doc {
-            Some(doc) => format!("Page {} of {}", doc.current + 1, doc.len()),
-            None => String::new(),
+        let right = match (&self.writer, &self.doc) {
+            (Some(w), _) => format!("Page {} of {}", w.current_page() + 1, w.page_count()),
+            (None, Some(doc)) => format!("Page {} of {}", doc.current + 1, doc.len()),
+            (None, None) => String::new(),
         };
         container(
             row![container(left).width(Length::Fill), muted(right, 12.0)]
@@ -628,8 +687,26 @@ impl App {
     /// New Document: blank pages, or a conversion of other files.
     fn new_document_dialog<'a>(&'a self, form: &'a NewForm) -> Element<'a, Message> {
         let field_label = |label: &'a str| muted(label, 12.0);
+        let write = column![
+            text("Write a document").size(13).font(SEMIBOLD),
+            row![
+                muted(
+                    "A letter, report or form you type and format here, saved as a PDF you can \
+                     keep editing in Ferrix. Uses the paper size and orientation below.",
+                    12.0
+                )
+                .width(Length::Fill),
+                button(text("Start Writing").size(13).font(SEMIBOLD))
+                    .padding([6, 16])
+                    .style(theme::primary)
+                    .on_press(Message::CreateWriting),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
         let blank = column![
-            text("Blank document").size(13).font(SEMIBOLD),
+            text("Blank pages").size(13).font(SEMIBOLD),
             row![
                 column![
                     field_label("Paper size"),
@@ -667,9 +744,9 @@ impl App {
                 ]
                 .spacing(4),
                 Space::new().width(Length::Fill),
-                button(text("Create").size(13).font(SEMIBOLD))
+                button(text("Create").size(13))
                     .padding([6, 16])
-                    .style(theme::primary)
+                    .style(theme::secondary)
                     .on_press(Message::CreateBlank),
             ]
             .spacing(12)
@@ -723,6 +800,8 @@ impl App {
             ]
             .align_y(Alignment::Center),
             horizontal_divider(),
+            write,
+            horizontal_divider(),
             blank,
             horizontal_divider(),
             convert,
@@ -738,10 +817,424 @@ impl App {
     }
 }
 
-/// "Save changes?" before closing or replacing an edited document.
-fn save_changes_dialog(doc: &Document) -> Element<'_, Message> {
+impl App {
+    /// The pages of the document being written, with caret and selection.
+    fn writer_view(&self) -> Element<'_, Message> {
+        let Some(w) = &self.writer else {
+            return Space::new().into();
+        };
+        let page = w.page_size();
+        let available = self.window_size.width - SCROLLBAR_ALLOWANCE;
+        let wide = page.width + 2.0 * crate::writer::PAGE_GAP > available;
+        let images = w.images();
+        let sheets = column(images.iter().map(|image| {
+            let content: Element<'_, Message> = match image {
+                Some(image) => tiles(image),
+                None => Space::new().width(page.width).height(page.height).into(),
+            };
+            container(content)
+                .width(page.width)
+                .height(page.height)
+                .style(theme::page)
+                .into()
+        }))
+        .spacing(crate::writer::PAGE_GAP)
+        .padding(crate::writer::PAGE_GAP)
+        .align_x(Alignment::Center)
+        .width(if wide {
+            Length::Fixed(page.width + 2.0 * crate::writer::PAGE_GAP)
+        } else {
+            Length::Fill
+        });
+        let matches = self
+            .find
+            .as_ref()
+            .map(|f| {
+                w.editor
+                    .find_all(&f.query, f.match_case)
+                    .into_iter()
+                    .flat_map(|range| w.editor.range_rects(range))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let canvas = Canvas::new(page, images.len(), w.zoom, Message::Write)
+            .selection(w.editor.selection_rects())
+            .caret(w.editor.caret_rect())
+            .matches(matches)
+            .focused(self.can_edit() && !self.find.as_ref().is_some_and(|f| f.focused))
+            .wide(wide);
+        let direction = if wide {
+            scrollable::Direction::Both {
+                vertical: thin_scrollbar(),
+                horizontal: thin_scrollbar(),
+            }
+        } else {
+            scrollable::Direction::Vertical(thin_scrollbar())
+        };
+        container(
+            scrollable(stack![sheets, canvas])
+                .direction(direction)
+                .id(writer_scroll_id())
+                .on_scroll(|viewport| {
+                    Message::Write(Action::Scrolled(
+                        viewport.absolute_offset().y,
+                        viewport.bounds().height,
+                    ))
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::scrollbar),
+        )
+        .style(theme::canvas)
+        .into()
+    }
+
+    /// Paragraph and character formatting for the writer.
+    fn format_bar<'a>(&'a self, w: &'a Writer) -> Element<'a, Message> {
+        let format = w.editor.caret_format();
+        let on = self.can_edit();
+        let act = move |action: Action| on.then_some(Message::Write(action));
+        let families = w.editor.fonts().families();
+        let size_choice = SizeChoice(format.size);
+        let spacing = SPACINGS
+            .iter()
+            .copied()
+            .find(|s| (s.0 - format.line_spacing).abs() < 0.01)
+            .unwrap_or(SpacingChoice(format.line_spacing));
+
+        let style = pick_list(STYLES, Some(StyleChoice(format.style)), |c| {
+            Message::Write(Action::Style(c))
+        })
+        .text_size(13)
+        .padding([4, 8])
+        .width(120)
+        .style(theme::select)
+        .menu_style(theme::select_menu);
+        let family = pick_list(families, Some(format.family.clone()), |f| {
+            Message::Write(Action::Family(f))
+        })
+        .text_size(13)
+        .padding([4, 8])
+        .width(170)
+        .style(theme::select)
+        .menu_style(theme::select_menu);
+        let size = pick_list(SIZES, Some(size_choice), |c| {
+            Message::Write(Action::Size(c))
+        })
+        .text_size(13)
+        .padding([4, 8])
+        .width(64)
+        .style(theme::select)
+        .menu_style(theme::select_menu);
+        let color = pick_list(COLORS, Some(color_choice(format.color)), |c| {
+            Message::Write(Action::Color(c))
+        })
+        .text_size(13)
+        .padding([4, 8])
+        .width(104)
+        .style(theme::select)
+        .menu_style(theme::select_menu);
+        let line_spacing = pick_list(SPACINGS, Some(spacing), |c| {
+            Message::Write(Action::Spacing(c))
+        })
+        .text_size(13)
+        .padding([4, 8])
+        .width(84)
+        .style(theme::select)
+        .menu_style(theme::select_menu);
+
+        let toggle = |icon, tip, t, active| icon_button(icon, tip, act(Action::Toggle(t)), active);
+        let align =
+            |icon, tip, a: Align| icon_button(icon, tip, act(Action::Align(a)), format.align == a);
+        let bar = row![
+            style,
+            family,
+            size,
+            toolbar_separator(),
+            toggle(Icon::Bold, "Bold (⌘B)", Toggle::Bold, format.bold),
+            toggle(Icon::Italic, "Italic (⌘I)", Toggle::Italic, format.italic),
+            toggle(
+                Icon::Underline,
+                "Underline (⌘U)",
+                Toggle::Underline,
+                format.underline
+            ),
+            toggle(
+                Icon::Strikethrough,
+                "Strikethrough",
+                Toggle::Strikethrough,
+                format.strikethrough
+            ),
+            color,
+            toolbar_separator(),
+            align(Icon::AlignLeft, "Align left", Align::Left),
+            align(Icon::AlignCenter, "Centre", Align::Center),
+            align(Icon::AlignRight, "Align right", Align::Right),
+            align(Icon::AlignJustify, "Justify", Align::Justify),
+            line_spacing,
+            toolbar_separator(),
+            icon_button(
+                Icon::BulletList,
+                "Bulleted list",
+                act(Action::List(ListKind::Bullet)),
+                format.list == Some(ListKind::Bullet),
+            ),
+            icon_button(
+                Icon::NumberedList,
+                "Numbered list",
+                act(Action::List(ListKind::Numbered)),
+                format.list == Some(ListKind::Numbered),
+            ),
+            icon_button(
+                Icon::Picture,
+                "Insert picture…",
+                act(Action::InsertImage),
+                false
+            ),
+            icon_button(
+                Icon::PageBreak,
+                "Page break (⌘↩)",
+                act(Action::PageBreak),
+                false
+            ),
+            pick_list(
+                if w.editor.in_table() {
+                    &crate::writer::TABLE_EDITS[..]
+                } else {
+                    &crate::writer::TABLE_INSERTS[..]
+                },
+                None::<crate::writer::TableChoice>,
+                |c| Message::Write(Action::Table(c)),
+            )
+            .placeholder("Table")
+            .text_size(13)
+            .padding([4, 8])
+            .width(84)
+            .style(theme::select)
+            .menu_style(theme::select_menu),
+            toolbar_separator(),
+            icon_button(
+                Icon::ClearFormatting,
+                "Clear formatting",
+                act(Action::ClearFormatting),
+                false
+            ),
+            icon_button(
+                Icon::PageSetup,
+                "Page setup…",
+                on.then_some(Message::PageSetupDialog),
+                false
+            ),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
+        container(scrollable(bar).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new().width(0).scroller_width(0),
+        )))
+        .height(42)
+        .padding([0, 10])
+        .center_y(42)
+        .width(Length::Fill)
+        .style(theme::chrome)
+        .into()
+    }
+}
+
+impl App {
+    /// Find and replace, under the formatting bar.
+    fn find_bar<'a>(&'a self, w: &'a Writer, find: &'a FindState) -> Element<'a, Message> {
+        let count = w.editor.find_all(&find.query, find.match_case).len();
+        let any = count > 0;
+        let status = if find.query.is_empty() {
+            String::new()
+        } else {
+            match count {
+                0 => "No matches".to_owned(),
+                1 => "1 match".to_owned(),
+                n => format!("{n} matches"),
+            }
+        };
+        let bar = row![
+            svg(Icon::Search.handle())
+                .width(16)
+                .height(16)
+                .style(theme::icon_colored(|t| t.text_muted)),
+            text_input("Find", &find.query)
+                .id(find_input_id())
+                .on_input(Message::FindQuery)
+                .on_submit(Message::FindNext)
+                .size(13)
+                .padding([4, 8])
+                .width(220)
+                .style(theme::input),
+            icon_button(
+                Icon::MatchCase,
+                "Match case",
+                Some(Message::FindCase(!find.match_case)),
+                find.match_case,
+            ),
+            icon_button(
+                Icon::MoveUp,
+                "Previous match",
+                any.then_some(Message::FindPrevious),
+                false
+            ),
+            icon_button(
+                Icon::MoveDown,
+                "Next match (↩)",
+                any.then_some(Message::FindNext),
+                false
+            ),
+            muted(status, 12.0).width(90),
+            text_input("Replace with", &find.replacement)
+                .on_input(Message::FindReplacement)
+                .on_submit(Message::ReplaceOne)
+                .size(13)
+                .padding([4, 8])
+                .width(200)
+                .style(theme::input),
+            button(text("Replace").size(13))
+                .padding([4, 12])
+                .style(theme::secondary)
+                .on_press_maybe(any.then_some(Message::ReplaceOne)),
+            button(text("Replace All").size(13))
+                .padding([4, 12])
+                .style(theme::secondary)
+                .on_press_maybe(any.then_some(Message::ReplaceAll)),
+            Space::new().width(Length::Fill),
+            icon_button(Icon::Close, "Close (Esc)", Some(Message::FindClose), false),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        container(bar)
+            .height(40)
+            .padding([0, 10])
+            .center_y(40)
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into()
+    }
+}
+
+/// Paper, orientation, margins and title of a written document.
+fn page_setup_dialog(form: &PageSetupForm) -> Element<'_, Message> {
+    let label = |l: &'static str| muted(l, 12.0);
+    let fields = row![
+        column![
+            label("Paper size"),
+            pick_list(PAPERS, Some(form.paper), Message::PageSetupPaper)
+                .text_size(13)
+                .padding([5, 8])
+                .width(110)
+                .style(theme::select)
+                .menu_style(theme::select_menu),
+        ]
+        .spacing(4),
+        column![
+            label("Orientation"),
+            pick_list(
+                ORIENTATIONS,
+                Some(form.orientation),
+                Message::PageSetupOrientation
+            )
+            .text_size(13)
+            .padding([5, 8])
+            .width(120)
+            .style(theme::select)
+            .menu_style(theme::select_menu),
+        ]
+        .spacing(4),
+        column![
+            label("Margins"),
+            pick_list(MARGINS, Some(form.margins), Message::PageSetupMargins)
+                .text_size(13)
+                .padding([5, 8])
+                .width(140)
+                .style(theme::select)
+                .menu_style(theme::select_menu),
+        ]
+        .spacing(4),
+    ]
+    .spacing(12);
+    let title = column![
+        label("Document title (shown by PDF readers)"),
+        text_input("Untitled", &form.title)
+            .on_input(Message::PageSetupTitle)
+            .on_submit(Message::ApplyPageSetup)
+            .size(13)
+            .padding([5, 8])
+            .style(theme::input),
+    ]
+    .spacing(4);
+    let page_text = column![
+        label("Header and footer: {page} and {pages} become page numbers"),
+        row![
+            text_input("Header", &form.header)
+                .on_input(Message::PageSetupHeader)
+                .size(13)
+                .padding([5, 8])
+                .style(theme::input),
+            text_input("Footer, e.g. Page {page} of {pages}", &form.footer)
+                .on_input(Message::PageSetupFooter)
+                .size(13)
+                .padding([5, 8])
+                .style(theme::input),
+        ]
+        .spacing(8),
+        iced::widget::checkbox(form.skip_first)
+            .label("Not on the first page")
+            .on_toggle(Message::PageSetupSkipFirst)
+            .text_size(13)
+            .size(16),
+    ]
+    .spacing(6);
+    let archival = column![
+        iced::widget::checkbox(form.archival)
+            .label("Save as PDF/A-3 for long-term archiving")
+            .on_toggle(Message::PageSetupArchival)
+            .text_size(13)
+            .size(16),
+        muted(
+            "For records that must stay readable for decades. The file is dated and checked \
+             against the standard when saved.",
+            11.0
+        ),
+    ]
+    .spacing(4);
     let card = column![
-        text(format!("Save changes to “{}”?", doc.name()))
+        text("Page Setup").size(16).font(SEMIBOLD),
+        fields,
+        title,
+        page_text,
+        archival,
+        Space::new().height(4),
+        row![
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(13))
+                .padding([6, 14])
+                .style(theme::secondary)
+                .on_press(Message::Escape),
+            button(text("Apply").size(13).font(SEMIBOLD))
+                .padding([6, 18])
+                .style(theme::primary)
+                .on_press(Message::ApplyPageSetup),
+        ]
+        .spacing(8),
+    ]
+    .spacing(14)
+    .padding(20)
+    .width(540);
+    opaque(
+        container(container(card).style(theme::card))
+            .center(Length::Fill)
+            .style(theme::backdrop),
+    )
+}
+
+/// "Save changes?" before closing or replacing an edited document.
+fn save_changes_dialog<'a>(name: String) -> Element<'a, Message> {
+    let card = column![
+        text(format!("Save changes to “{name}”?"))
             .size(15)
             .font(SEMIBOLD),
         muted("Your changes will be lost if you don’t save them.", 13.0),
