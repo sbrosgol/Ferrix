@@ -147,6 +147,26 @@ fn write(
     for page in &layout.pages {
         let mut page_out = pdf.start_page_with(settings.clone());
         let mut surface = page_out.surface();
+        if !page.rules.is_empty() {
+            // Table borders are drawing, not content.
+            surface.start_tagged(ContentTag::Artifact(Artifact::new(
+                ArtifactType::Layout,
+                None,
+            )));
+            for rule in &page.rules {
+                let Some(rect) = Rect::from_xywh(rule.x, rule.top, rule.width, rule.thickness)
+                else {
+                    continue;
+                };
+                let mut path = PathBuilder::new();
+                path.push_rect(rect);
+                if let Some(path) = path.finish() {
+                    surface.set_fill(Some(fill(rule.color)));
+                    surface.draw_path(&path);
+                }
+            }
+            surface.end_tagged();
+        }
         for line in &page.lines {
             let text = texts.get(line.block).map_or("", String::as_str);
             draw_line(&mut surface, line, text, fonts, &mut cache, Some(&mut tags))?;
@@ -289,6 +309,7 @@ impl Tags {
     fn tree(self, doc: &Document) -> TagTree {
         let mut tree = TagTree::new();
         let mut list: Option<(ListKind, TagGroup)> = None;
+        let mut table: Option<TableTags> = None;
         let Self {
             text,
             markers,
@@ -331,6 +352,29 @@ impl Tags {
                 group
             });
 
+            // Table cells: Table > TR > TD, holding the cell's paragraphs.
+            if let Some(cell) = paragraph.cell {
+                if let Some((_, group)) = list.take() {
+                    tree.push(group);
+                }
+                if table.as_ref().is_some_and(|t| t.id != cell.table)
+                    && let Some(done) = table.take()
+                {
+                    tree.push(done.finish());
+                }
+                let t = table.get_or_insert_with(|| TableTags::new(cell.table));
+                t.cell(cell.row, cell.col);
+                if let Some(figure) = figure {
+                    t.push(figure);
+                }
+                if let Some(content) = content {
+                    t.push(content);
+                }
+                continue;
+            }
+            if let Some(done) = table.take() {
+                tree.push(done.finish());
+            }
             match paragraph.format.list {
                 Some(item) => {
                     if list.as_ref().is_some_and(|(kind, _)| *kind != item.kind)
@@ -379,7 +423,68 @@ impl Tags {
         if let Some((_, group)) = list {
             tree.push(group);
         }
+        if let Some(done) = table {
+            tree.push(done.finish());
+        }
         tree
+    }
+}
+
+/// A table's structure elements while it is being built.
+struct TableTags {
+    id: u32,
+    table: TagGroup,
+    row: Option<(u32, TagGroup)>,
+    cell: Option<((u32, u32), TagGroup)>,
+}
+
+impl TableTags {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            table: TagGroup::new(Tag::Table),
+            row: None,
+            cell: None,
+        }
+    }
+
+    /// Moves to cell (`row`, `col`), closing the previous cell and row as needed.
+    fn cell(&mut self, row: u32, col: u32) {
+        if self.cell.as_ref().is_some_and(|(at, _)| *at == (row, col)) {
+            return;
+        }
+        self.close_cell();
+        if self.row.as_ref().is_some_and(|(r, _)| *r != row) {
+            self.close_row();
+        }
+        if self.row.is_none() {
+            self.row = Some((row, TagGroup::new(Tag::TR)));
+        }
+        self.cell = Some(((row, col), TagGroup::new(Tag::TD)));
+    }
+
+    fn push(&mut self, child: TagGroup) {
+        if let Some((_, cell)) = &mut self.cell {
+            cell.push(child);
+        }
+    }
+
+    fn close_cell(&mut self) {
+        if let (Some((_, cell)), Some((_, row))) = (self.cell.take(), self.row.as_mut()) {
+            row.push(cell);
+        }
+    }
+
+    fn close_row(&mut self) {
+        self.close_cell();
+        if let Some((_, row)) = self.row.take() {
+            self.table.push(row);
+        }
+    }
+
+    fn finish(mut self) -> TagGroup {
+        self.close_row();
+        self.table
     }
 }
 

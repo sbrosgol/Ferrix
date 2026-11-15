@@ -8,8 +8,8 @@ use crate::edit::{Applied, Edit, Fragment, Settings};
 use crate::fonts::Fonts;
 use crate::layout::{Layout, LayoutCache, Line, resolve};
 use crate::model::{
-    Align, CharFormat, Color, Document, Image, ImageData, List, ListKind, Paragraph,
-    ParagraphStyle, Position, TextRange,
+    Align, Cell, CharFormat, Color, Document, Image, ImageData, List, ListKind, MAX_TABLE_COLUMNS,
+    Paragraph, ParagraphStyle, Position, TextRange,
 };
 
 /// A rectangle on a page, in points from the page's top-left corner.
@@ -46,6 +46,18 @@ pub enum Clicks {
     Double,
     /// Selects a paragraph.
     Triple,
+}
+
+/// A change to the table at the caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableOp {
+    RowAbove,
+    RowBelow,
+    ColumnLeft,
+    ColumnRight,
+    DeleteRow,
+    DeleteColumn,
+    DeleteTable,
 }
 
 /// Character formatting that can be switched on and off.
@@ -417,6 +429,7 @@ impl Editor {
     }
 
     fn insert(&mut self, text: &str, label: &'static str, mergeable: bool) {
+        self.clear_selection_across_cells();
         let range = self.selection.range();
         let Ok(mut edit) = self.doc.insert_text(range, text) else {
             return;
@@ -431,6 +444,7 @@ impl Editor {
 
     /// Splits the paragraph at the caret (Enter).
     pub fn enter(&mut self) {
+        self.clear_selection_across_cells();
         let range = self.selection.range();
         // Enter in an empty list item ends the list, as in every word processor.
         let paragraph = &self.doc.paragraphs[range.start.block];
@@ -480,7 +494,7 @@ impl Editor {
                     Selection::caret(a.range.start)
                 });
             }
-        } else if at.block > 0 {
+        } else if at.block > 0 && self.same_cell(at.block - 1, at.block) {
             let prev = Position::new(at.block - 1, self.doc.paragraphs[at.block - 1].len());
             self.delete_range(TextRange::between(prev, at), "Delete");
         }
@@ -506,7 +520,8 @@ impl Editor {
                     Selection::caret(a.range.start)
                 });
             }
-        } else if at.block + 1 < self.doc.paragraphs.len() {
+        } else if at.block + 1 < self.doc.paragraphs.len() && self.same_cell(at.block, at.block + 1)
+        {
             self.delete_range(
                 TextRange::between(at, Position::new(at.block + 1, 0)),
                 "Delete",
@@ -515,8 +530,58 @@ impl Editor {
     }
 
     fn delete_range(&mut self, range: TextRange, label: &'static str) {
+        if let Some(edit) = self.clear_across_cells(range) {
+            let start = range.start;
+            self.commit(edit, label, None, move |_| Selection::caret(start));
+            return;
+        }
         if let Ok(edit) = self.doc.delete(range) {
             self.commit(edit, label, None, |a| Selection::caret(a.range.start));
+        }
+    }
+
+    /// Whether two paragraphs are in the same table cell (or both outside tables), so text may
+    /// flow between them.
+    fn same_cell(&self, a: usize, b: usize) -> bool {
+        self.doc.paragraphs[a].cell == self.doc.paragraphs[b].cell
+    }
+
+    /// Deleting a range that crosses table cells clears the text of each paragraph in it
+    /// instead of joining them, so the table keeps its shape.
+    fn clear_across_cells(&self, range: TextRange) -> Option<Edit> {
+        let cells_differ = (range.start.block..range.end.block).any(|b| !self.same_cell(b, b + 1));
+        if !cells_differ {
+            return None;
+        }
+        let edits: Vec<Edit> = (range.start.block..=range.end.block)
+            .rev()
+            .filter_map(|b| {
+                let len = self.doc.paragraphs[b].len();
+                let from = if b == range.start.block {
+                    range.start.offset
+                } else {
+                    0
+                };
+                let to = if b == range.end.block {
+                    range.end.offset
+                } else {
+                    len
+                };
+                let part = TextRange::between(Position::new(b, from), Position::new(b, to));
+                (!part.is_empty())
+                    .then(|| self.doc.delete(part).ok())
+                    .flatten()
+            })
+            .collect();
+        Some(Edit::Batch(edits))
+    }
+
+    /// Before typing over a selection that crosses table cells: clears it and collapses the
+    /// selection to its start, so the typing goes into the first cell. Returns whether it did.
+    fn clear_selection_across_cells(&mut self) {
+        let range = self.selection.range();
+        if !range.is_empty() && self.clear_across_cells(range).is_some() {
+            self.delete_range(range, "Delete");
         }
     }
 
@@ -540,9 +605,36 @@ impl Editor {
     /// paragraph joins the paragraph at the caret and takes on its style; further paragraphs
     /// keep their own.
     pub fn paste_fragment(&mut self, fragment: &Fragment) {
+        self.clear_selection_across_cells();
         let range = self.selection.range();
         let target = &self.doc.paragraphs[range.start.block];
         let mut parts = fragment.paragraphs().to_vec();
+        if target.cell.is_some() {
+            // No tables inside tables: pasted cells become plain paragraphs.
+            for p in &mut parts {
+                p.cell = None;
+            }
+        } else {
+            // Pasted tables get table numbers of their own.
+            let mut next = self.next_table_id();
+            let mut renumbered: std::collections::HashMap<u32, u32> =
+                std::collections::HashMap::new();
+            for p in &mut parts {
+                if let Some(cell) = &mut p.cell {
+                    cell.table = *renumbered.entry(cell.table).or_insert_with(|| {
+                        next += 1;
+                        next - 1
+                    });
+                }
+            }
+            // A table must not merge with the paragraphs around the caret.
+            if parts.first().is_some_and(|p| p.cell.is_some()) {
+                parts.insert(0, Paragraph::new(ParagraphStyle::Normal));
+            }
+            if parts.len() > 1 && parts.last().is_some_and(|p| p.cell.is_some()) {
+                parts.push(target.continuation());
+            }
+        }
         let image = parts[0].image.take();
         parts[0].style = target.style;
         parts[0].format = target.format;
@@ -762,6 +854,9 @@ impl Editor {
     /// types a tab.
     pub fn tab(&mut self, back: bool) {
         let range = self.selection.range();
+        if self.doc.paragraphs[range.start.block].cell.is_some() {
+            return self.next_cell(back);
+        }
         let in_list = self.doc.paragraphs[range.start.block].format.list.is_some();
         if in_list && (range.start.offset == 0 || !range.is_empty()) {
             let label = if back {
@@ -867,6 +962,257 @@ impl Editor {
         self.doc.paragraphs[self.selection.focus.block]
             .image
             .is_some()
+    }
+
+    // ── Tables ────────────────────────────────────────────────────────────────
+
+    /// Whether the caret is in a table.
+    pub fn in_table(&self) -> bool {
+        self.doc.paragraphs[self.selection.focus.block]
+            .cell
+            .is_some()
+    }
+
+    /// Inserts an empty table at the caret, with the caret in its first cell.
+    pub fn insert_table(&mut self, rows: u32, cols: u32) {
+        let (rows, cols) = (rows.clamp(1, 100), cols.clamp(1, MAX_TABLE_COLUMNS));
+        let range = self.selection.range();
+        let current = &self.doc.paragraphs[range.start.block];
+        if current.cell.is_some() || self.doc.paragraphs[range.end.block].cell.is_some() {
+            return; // tables inside tables are not supported
+        }
+        let table = self.next_table_id();
+        let mut parts = Vec::new();
+        let reuse = range.is_empty() && current.is_empty() && current.image.is_none();
+        if !reuse {
+            parts.push(current.empty_like());
+        }
+        for row in 0..rows {
+            for col in 0..cols {
+                let mut cell = Paragraph::new(ParagraphStyle::Normal);
+                cell.cell = Some(Cell { table, row, col });
+                parts.push(cell);
+            }
+        }
+        // Text after the caret, or an empty paragraph to carry on typing after the table.
+        let mut after = self.doc.paragraphs[range.end.block].continuation();
+        after.format.list = None;
+        parts.push(after);
+        let first = if reuse {
+            range.start.block
+        } else {
+            range.start.block + 1
+        };
+        let Some(with) = Fragment::new(parts) else {
+            return;
+        };
+        self.commit(
+            Edit::Replace { range, with },
+            "Insert Table",
+            None,
+            move |_| Selection::caret(Position::new(first, 0)),
+        );
+    }
+
+    fn next_table_id(&self) -> u32 {
+        self.doc
+            .paragraphs
+            .iter()
+            .filter_map(|p| p.cell.map(|c| c.table + 1))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The paragraphs of the table containing `block`: `start..end`.
+    fn table_span(&self, block: usize) -> Option<(usize, usize, u32)> {
+        let table = self.doc.paragraphs.get(block)?.cell?.table;
+        let in_table = |b: usize| {
+            self.doc.paragraphs[b]
+                .cell
+                .is_some_and(|c| c.table == table)
+        };
+        let mut start = block;
+        while start > 0 && in_table(start - 1) {
+            start -= 1;
+        }
+        let mut end = block + 1;
+        while end < self.doc.paragraphs.len() && in_table(end) {
+            end += 1;
+        }
+        Some((start, end, table))
+    }
+
+    /// A table's cells as rows of columns of paragraphs. Missing cells become empty ones.
+    fn table_grid(&self, start: usize, end: usize) -> Vec<Vec<Vec<Paragraph>>> {
+        let (mut rows, mut cols) = (1, 1);
+        for p in &self.doc.paragraphs[start..end] {
+            if let Some(c) = p.cell {
+                rows = rows.max(c.row as usize + 1);
+                cols = cols.max(c.col as usize + 1);
+            }
+        }
+        let mut grid = vec![vec![Vec::new(); cols]; rows];
+        for p in &self.doc.paragraphs[start..end] {
+            if let Some(c) = p.cell {
+                grid[c.row as usize][c.col as usize].push(p.clone());
+            }
+        }
+        grid
+    }
+
+    /// Replaces a table's paragraphs with a rebuilt grid (or removes the table if the grid is
+    /// empty) as one undo step, and puts the caret at the start of cell `focus`.
+    fn rebuild_table(
+        &mut self,
+        start: usize,
+        end: usize,
+        table: u32,
+        grid: Vec<Vec<Vec<Paragraph>>>,
+        focus: (usize, usize),
+        label: &'static str,
+    ) {
+        let cols = grid.first().map_or(0, Vec::len);
+        let mut parts = Vec::new();
+        let mut caret = start;
+        if grid.is_empty() || cols == 0 {
+            parts.push(Paragraph::new(ParagraphStyle::Normal));
+        } else {
+            for (r, row) in grid.into_iter().enumerate() {
+                for (c, mut cell) in row.into_iter().enumerate() {
+                    if (r, c) == focus {
+                        caret = start + parts.len();
+                    }
+                    if cell.is_empty() {
+                        cell.push(Paragraph::new(ParagraphStyle::Normal));
+                    }
+                    for mut p in cell {
+                        p.cell = Some(Cell {
+                            table,
+                            row: r as u32,
+                            col: c as u32,
+                        });
+                        parts.push(p);
+                    }
+                }
+            }
+        }
+        let range = TextRange::between(
+            Position::new(start, 0),
+            Position::new(end - 1, self.doc.paragraphs[end - 1].len()),
+        );
+        let Some(with) = Fragment::new(parts) else {
+            return;
+        };
+        self.commit(Edit::Replace { range, with }, label, None, move |_| {
+            Selection::caret(Position::new(caret, 0))
+        });
+    }
+
+    /// Changes the table at the caret.
+    pub fn table_op(&mut self, op: TableOp) {
+        let focus = self.selection.focus;
+        let Some((start, end, table)) = self.table_span(focus.block) else {
+            return;
+        };
+        let Some(cell) = self.doc.paragraphs[focus.block].cell else {
+            return;
+        };
+        let (row, col) = (cell.row as usize, cell.col as usize);
+        let mut grid = self.table_grid(start, end);
+        let cols = grid[0].len();
+        let empty_row = || vec![Vec::new(); cols];
+        let (focus, label) = match op {
+            TableOp::RowAbove => {
+                grid.insert(row, empty_row());
+                ((row, col), "Insert Row")
+            }
+            TableOp::RowBelow => {
+                grid.insert(row + 1, empty_row());
+                ((row + 1, col), "Insert Row")
+            }
+            TableOp::ColumnLeft | TableOp::ColumnRight => {
+                if cols as u32 >= MAX_TABLE_COLUMNS {
+                    return;
+                }
+                let at = if op == TableOp::ColumnLeft {
+                    col
+                } else {
+                    col + 1
+                };
+                for r in &mut grid {
+                    r.insert(at, Vec::new());
+                }
+                ((row, at), "Insert Column")
+            }
+            TableOp::DeleteRow => {
+                grid.remove(row);
+                ((row.min(grid.len().saturating_sub(1)), col), "Delete Row")
+            }
+            TableOp::DeleteColumn => {
+                for r in &mut grid {
+                    r.remove(col);
+                }
+                let cols = grid[0].len();
+                if cols == 0 {
+                    grid.clear();
+                }
+                ((row, col.min(cols.saturating_sub(1))), "Delete Column")
+            }
+            TableOp::DeleteTable => {
+                grid.clear();
+                ((0, 0), "Delete Table")
+            }
+        };
+        self.rebuild_table(start, end, table, grid, focus, label);
+    }
+
+    /// Tab in a table: to the next cell (adding a row after the last one); Shift+Tab: back.
+    fn next_cell(&mut self, back: bool) {
+        let focus = self.selection.focus;
+        let (Some((start, end, _)), Some(cell)) = (
+            self.table_span(focus.block),
+            self.doc.paragraphs[focus.block].cell,
+        ) else {
+            return;
+        };
+        let grid = self.table_grid(start, end);
+        let (rows, cols) = (grid.len(), grid[0].len());
+        let index = cell.row as usize * cols + cell.col as usize;
+        let target = if back {
+            match index.checked_sub(1) {
+                Some(i) => i,
+                None => return,
+            }
+        } else if index + 1 < rows * cols {
+            index + 1
+        } else {
+            // From the last cell: a new row, starting in its first cell.
+            self.table_op(TableOp::RowBelow);
+            let row = rows as u32;
+            if let Some((start, end, _)) = self.table_span(self.selection.focus.block)
+                && let Some(b) = (start..end).find(|&b| {
+                    self.doc.paragraphs[b]
+                        .cell
+                        .is_some_and(|x| x.row == row && x.col == 0)
+                })
+            {
+                self.select(TextRange::caret(Position::new(b, 0)));
+            }
+            return;
+        };
+        let (r, c) = ((target / cols) as u32, (target % cols) as u32);
+        if let Some(b) = (start..end).find(|&b| {
+            self.doc.paragraphs[b]
+                .cell
+                .is_some_and(|x| x.row == r && x.col == c)
+        }) {
+            // Like other word processors: select the cell's text, so typing replaces it.
+            let len = self.doc.paragraphs[b].len();
+            self.select(TextRange::between(
+                Position::new(b, 0),
+                Position::new(b, len),
+            ));
+        }
     }
 
     // ── Find and replace ──────────────────────────────────────────────────────
@@ -1049,24 +1395,51 @@ impl Editor {
 
     /// The position `lines` lines above (negative) or below the caret, at the goal column.
     fn vertical(&self, at: Position, lines: isize) -> Position {
-        let all: Vec<(usize, &Line)> = self.lines().collect();
-        let Some(current) = all.iter().position(|(_, l)| {
-            std::ptr::eq(*l, self.line_of(at).map_or(std::ptr::null(), |(_, l)| l))
-        }) else {
+        let Some((mut page, line)) = self.line_of(at) else {
             return at;
         };
-        let x = self
-            .goal_x
-            .or_else(|| self.line_of(at).map(|(_, l)| self.x_at(l, at.offset)))
-            .unwrap_or(0.0);
-        let target = current as isize + lines;
-        if target < 0 {
-            return Position::START;
+        let x = self.goal_x.unwrap_or_else(|| self.x_at(line, at.offset));
+        let mut line = line;
+        for _ in 0..lines.unsigned_abs() {
+            match self.next_line(page, line, x, lines > 0) {
+                Some((p, l)) => {
+                    page = p;
+                    line = l;
+                }
+                None if lines > 0 => return self.doc.end(),
+                None => return Position::START,
+            }
         }
-        let Some((_, line)) = all.get(target as usize) else {
-            return self.doc.end();
-        };
         Position::new(line.block, self.hit_line(line, x))
+    }
+
+    /// The nearest line below (or above) `from`, preferring one under column `x`. In a table,
+    /// that keeps the caret in its column.
+    fn next_line(&self, page: usize, from: &Line, x: f32, down: bool) -> Option<(usize, &Line)> {
+        let key = |p: usize, l: &Line| (p, l.top);
+        let start = key(page, from);
+        let mut candidates: Vec<(usize, &Line)> = self
+            .lines()
+            .filter(|(p, l)| {
+                let k = key(*p, l);
+                if down {
+                    k.0 > start.0 || (k.0 == start.0 && k.1 > start.1 + 0.01)
+                } else {
+                    k.0 < start.0 || (k.0 == start.0 && k.1 < start.1 - 0.01)
+                }
+            })
+            .collect();
+        candidates.sort_by(|a, b| {
+            let (ka, kb) = (key(a.0, a.1), key(b.0, b.1));
+            let order = ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1));
+            if down { order } else { order.reverse() }
+        });
+        let contains = |l: &Line| x >= l.left - 0.5 && x <= l.left + l.width + 0.5;
+        candidates
+            .iter()
+            .find(|(_, l)| contains(l))
+            .or(candidates.first())
+            .copied()
     }
 
     /// Places the caret (or extends the selection) at a point on a page.
@@ -1202,15 +1575,21 @@ impl Editor {
     pub fn hit(&self, page: usize, x: f32, y: f32) -> Position {
         let page = page.min(self.layout.pages.len() - 1);
         let lines = &self.layout.pages[page].lines;
-        let Some(first) = lines.first() else {
+        // The line under the point: first by column (horizontal distance), then by height.
+        // Plain text spans the full width, so this only matters in tables.
+        let distance = |l: &Line| {
+            let outside = |v: f32, lo: f32, hi: f32| (lo - v).max(v - hi).max(0.0);
+            (
+                outside(x, l.left, l.left + l.width),
+                outside(y, l.top, l.top + l.height),
+            )
+        };
+        let Some(line) = lines.iter().min_by(|a, b| {
+            let (da, db) = (distance(a), distance(b));
+            da.0.total_cmp(&db.0).then(da.1.total_cmp(&db.1))
+        }) else {
             return self.doc.end();
         };
-        let line = lines
-            .iter()
-            .find(|l| y < l.top + l.height)
-            .or_else(|| lines.last())
-            .unwrap_or(first);
-        let line = if y < first.top { first } else { line };
         Position::new(line.block, self.hit_line(line, x))
     }
 

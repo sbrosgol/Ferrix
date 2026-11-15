@@ -79,6 +79,16 @@ impl Rasterizer {
     }
 
     fn draw(&mut self, raster: &mut Raster, page: &PageLayout, scale: f32, fonts: &mut Fonts) {
+        for rule in &page.rules {
+            fill_rect(
+                raster,
+                rule.x * scale,
+                rule.top * scale,
+                (rule.width * scale).max(1.0),
+                (rule.thickness * scale).max(1.0),
+                rule.color,
+            );
+        }
         for line in page.lines.iter().chain(&page.furniture) {
             if let Some(image) = &line.image {
                 self.draw_image(raster, image, scale);

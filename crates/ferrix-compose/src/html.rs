@@ -16,7 +16,35 @@ const MAX_HTML: usize = 8 * 1024 * 1024;
 pub fn fragment_to_html(fragment: &Fragment) -> String {
     let mut out = String::from("<meta charset=\"utf-8\">");
     let mut open_list: Option<ListKind> = None;
+    // The open table, row and cell, as (table, row, col).
+    let mut open_cell: Option<(u32, u32, u32)> = None;
     for paragraph in fragment.paragraphs() {
+        let cell = paragraph.cell.map(|c| (c.table, c.row, c.col));
+        if open_cell != cell {
+            if let Some(kind) = open_list.take() {
+                out.push_str(list_tag(kind, true));
+            }
+            match (open_cell, cell) {
+                (Some((t0, r0, _)), Some((t1, r1, _))) if t0 == t1 => {
+                    out.push_str("</td>");
+                    if r0 != r1 {
+                        out.push_str("</tr><tr>");
+                    }
+                    out.push_str("<td>");
+                }
+                (old, new) => {
+                    if old.is_some() {
+                        out.push_str("</td></tr></table>");
+                    }
+                    if new.is_some() {
+                        out.push_str(
+                            "<table border=\"1\" style=\"border-collapse:collapse\"><tr><td>",
+                        );
+                    }
+                }
+            }
+            open_cell = cell;
+        }
         let list = paragraph.format.list.map(|l| l.kind);
         if open_list != list {
             if let Some(kind) = open_list {
@@ -98,6 +126,9 @@ pub fn fragment_to_html(fragment: &Fragment) -> String {
     if let Some(kind) = open_list {
         out.push_str(list_tag(kind, true));
     }
+    if open_cell.is_some() {
+        out.push_str("</td></tr></table>");
+    }
     out
 }
 
@@ -138,7 +169,9 @@ pub fn fragment_from_html(html: &str) -> Option<Fragment> {
         reader.token(token);
     }
     reader.finish_paragraph();
-    let paragraphs: Vec<Paragraph> = reader.done;
+    let mut paragraphs: Vec<Paragraph> = reader.done;
+    // Every table cell gets at least one paragraph, and cells come in row order.
+    fill_tables(&mut paragraphs);
     if paragraphs.iter().all(Paragraph::is_empty) {
         return None;
     }
@@ -325,6 +358,10 @@ struct Reader {
     lists: Vec<ListKind>,
     /// Whether the last character added was a (collapsed) space.
     space: bool,
+    /// Open tables, innermost last: (table number, row, column). Nested tables are flattened
+    /// into the outer table's cell.
+    tables: Vec<(u32, i64, i64)>,
+    next_table: u32,
 }
 
 impl Reader {
@@ -353,8 +390,13 @@ impl Reader {
     }
 
     fn start_paragraph(&mut self, style: ParagraphStyle, list: bool) {
+        // A block opened right inside another (`<td><p>`, `<li><p>`) continues it.
+        if self.current.as_ref().is_some_and(Paragraph::is_empty) {
+            self.current = None;
+        }
         self.finish_paragraph();
         let mut paragraph = Paragraph::new(style);
+        paragraph.cell = self.current_cell();
         if list && let Some(kind) = self.lists.last() {
             paragraph.format.list = Some(List {
                 kind: *kind,
@@ -362,6 +404,15 @@ impl Reader {
             });
         }
         self.current = Some(paragraph);
+    }
+
+    fn current_cell(&self) -> Option<crate::model::Cell> {
+        let (table, row, col) = *self.tables.first()?;
+        Some(crate::model::Cell {
+            table,
+            row: row.max(0) as u32,
+            col: col.max(0) as u32,
+        })
     }
 
     fn text(&mut self, raw: &str) {
@@ -385,8 +436,13 @@ impl Reader {
             return;
         }
         let format = self.format();
+        let cell = self.current_cell();
         self.current
-            .get_or_insert_with(|| Paragraph::new(ParagraphStyle::Normal))
+            .get_or_insert_with(|| {
+                let mut p = Paragraph::new(ParagraphStyle::Normal);
+                p.cell = cell;
+                p
+            })
             .push(&text, format);
     }
 
@@ -399,6 +455,26 @@ impl Reader {
                     .find(|(k, _)| k == "style")
                     .map_or("", |(_, v)| v.as_str());
                 match name.as_str() {
+                    "table" => {
+                        self.finish_paragraph();
+                        let id = self.next_table;
+                        self.next_table += 1;
+                        self.tables.push((id, -1, -1));
+                    }
+                    "tr" if self.tables.len() == 1 => {
+                        self.finish_paragraph();
+                        if let Some(t) = self.tables.last_mut() {
+                            t.1 += 1;
+                            t.2 = -1;
+                        }
+                    }
+                    "td" | "th" if self.tables.len() == 1 => {
+                        if let Some(t) = self.tables.last_mut() {
+                            t.1 = t.1.max(0);
+                            t.2 += 1;
+                        }
+                        self.start_paragraph(ParagraphStyle::Normal, false);
+                    }
                     "p" | "div" | "blockquote" | "tr" | "dt" | "dd" | "pre" => {
                         self.start_paragraph(ParagraphStyle::Normal, false);
                     }
@@ -468,6 +544,11 @@ impl Reader {
                         self.finish_paragraph();
                         self.lists.pop();
                     }
+                    "td" | "th" if self.tables.len() == 1 => self.finish_paragraph(),
+                    "table" => {
+                        self.finish_paragraph();
+                        self.tables.pop();
+                    }
                     _ => {}
                 }
                 // Close the innermost element of this name (tolerating bad nesting).
@@ -476,6 +557,54 @@ impl Reader {
                 }
             }
         }
+    }
+}
+
+/// Fills in empty cells of pasted tables, so each has a paragraph to type into.
+fn fill_tables(paragraphs: &mut Vec<Paragraph>) {
+    let mut i = 0;
+    while i < paragraphs.len() {
+        let Some(cell) = paragraphs[i].cell else {
+            i += 1;
+            continue;
+        };
+        let end = (i..paragraphs.len())
+            .find(|&j| paragraphs[j].cell.is_none_or(|c| c.table != cell.table))
+            .unwrap_or(paragraphs.len());
+        let mut rows: Vec<Vec<Vec<Paragraph>>> = Vec::new();
+        let mut cols = 1;
+        for p in paragraphs.drain(i..end) {
+            let c = p.cell.unwrap_or(cell);
+            let (r, k) = (c.row as usize, c.col as usize);
+            if rows.len() <= r {
+                rows.resize(r + 1, Vec::new());
+            }
+            if rows[r].len() <= k {
+                rows[r].resize(k + 1, Vec::new());
+            }
+            cols = cols.max(k + 1);
+            rows[r][k].push(p);
+        }
+        let mut rebuilt = Vec::new();
+        for (r, mut row) in rows.into_iter().enumerate() {
+            row.resize(cols, Vec::new());
+            for (k, mut ps) in row.into_iter().enumerate() {
+                if ps.is_empty() {
+                    ps.push(Paragraph::new(ParagraphStyle::Normal));
+                }
+                for mut p in ps {
+                    p.cell = Some(crate::model::Cell {
+                        table: cell.table,
+                        row: r as u32,
+                        col: k as u32,
+                    });
+                    rebuilt.push(p);
+                }
+            }
+        }
+        let n = rebuilt.len();
+        paragraphs.splice(i..i, rebuilt);
+        i += n;
     }
 }
 

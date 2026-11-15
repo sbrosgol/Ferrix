@@ -83,6 +83,11 @@ impl Document {
         }
         self.page.validate()?;
         for paragraph in &self.paragraphs {
+            if let Some(cell) = paragraph.cell
+                && (cell.row >= MAX_TABLE_SIZE || cell.col >= MAX_TABLE_COLUMNS)
+            {
+                return Err(ModelError::Invalid("a table is too large".into()));
+            }
             if let Some(image) = &paragraph.image
                 && !(1.0..=14_400.0).contains(&image.width)
             {
@@ -270,6 +275,19 @@ pub struct Paragraph {
     /// A picture shown above the paragraph's text (which then serves as its caption).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<Image>,
+    /// The table cell this paragraph is in. A table is a run of consecutive paragraphs with the
+    /// same table number; each cell holds one or more of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<Cell>,
+}
+
+/// Where a paragraph sits in a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Cell {
+    /// Identifies the table within the document.
+    pub table: u32,
+    pub row: u32,
+    pub col: u32,
 }
 
 impl Paragraph {
@@ -279,6 +297,7 @@ impl Paragraph {
             format: ParagraphFormat::default(),
             runs: Vec::new(),
             image: None,
+            cell: None,
         }
     }
 
@@ -289,6 +308,7 @@ impl Paragraph {
             format: self.format,
             runs: Vec::new(),
             image: self.image.clone(),
+            cell: self.cell,
         }
     }
 
@@ -520,6 +540,10 @@ pub enum ImageKind {
     Png,
     Jpeg,
 }
+
+/// Tables are limited to this many rows and columns.
+pub const MAX_TABLE_SIZE: u32 = 10_000;
+pub const MAX_TABLE_COLUMNS: u32 = 64;
 
 /// Pictures larger than this are refused.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
