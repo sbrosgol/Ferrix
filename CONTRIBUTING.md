@@ -26,6 +26,16 @@ Any editor with rust-analyzer works; RustRover opens the workspace from the root
 - Before pushing: `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
 - Significant design changes start as an ADR in `docs/adr/`.
 
+## Releasing
+
+1. Bump `version` in the root `Cargo.toml`, merge to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+3. The [Release workflow](.github/workflows/release.yml) builds a universal macOS `.dmg`, Windows
+   x64/arm64 `.zip`s and Linux x64/arm64 `.tar.gz`s, then creates a **draft** release with
+   `SHA256SUMS` and build-provenance attestations. Review the draft on GitHub and publish it.
+
+`dist/package.sh <version>` builds the same package for the host OS into `out/`.
+
 ## Licensing
 
 Ferrix is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
