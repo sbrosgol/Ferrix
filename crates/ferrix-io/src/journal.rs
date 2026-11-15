@@ -76,6 +76,9 @@ impl JournalWriter {
 }
 
 /// Reads every intact record, stopping at the first damaged or incomplete one.
+///
+/// Only for journals no writer holds (see [`is_orphaned`]): on Windows the writer's lock is
+/// mandatory and blocks reads through any other handle.
 pub fn read(path: &Path) -> io::Result<Vec<Vec<u8>>> {
     let mut bytes = Vec::new();
     File::open(path)?.read_to_end(&mut bytes)?;
@@ -137,10 +140,20 @@ mod tests {
         journal.append(b"first").expect("append");
         journal.append(b"").expect("append empty");
         journal.append(&[7; 1000]).expect("append large");
+        // Read it the way recovery does: after the writer is gone. (On Windows the writer's
+        // lock blocks all other readers.)
+        drop(journal);
         assert_eq!(
             read(&path).expect("read"),
             [b"first".to_vec(), Vec::new(), vec![7; 1000]]
         );
+    }
+
+    #[test]
+    fn discarding_deletes_the_journal() {
+        let path = scratch("discard");
+        let mut journal = JournalWriter::create(&path).expect("create");
+        journal.append(b"unsaved work").expect("append");
         journal.discard().expect("discard");
         assert!(!path.exists());
     }
