@@ -58,3 +58,27 @@ needs a document model of its own, from which the PDF is produced.
    undo/redo, formatting toolbar, page setup, save/reopen, crash recovery.
 3. Lists, images, page breaks, headers and footers with page numbers, find and replace.
 4. Tables, pasting formatted text, spell check, tagged PDF, PDF/A.
+
+## Implementation notes (phase 2, 2026-11-15)
+- `ferrix_compose::Editor` holds the caret, selection, cursor movement (grapheme, word, line,
+  page, document), hit testing, formatting commands and undo history. It has no UI dependency,
+  so its behaviour is unit-tested. Consecutive typing or deleting in one paragraph is one undo
+  step, recorded as a whole-paragraph replace so merged steps stay exact inverses.
+- Each keystroke re-lays out only the changed paragraphs (`LayoutCache`, keyed by paragraph
+  content and page width); pagination reruns in full.
+- The editor shows pages rasterized by swash from the layout the PDF is written from, cut into
+  512-pixel tiles like rendered PDF pages, and only for pages near the visible area. A
+  transparent overlay widget above them draws the caret and selection and turns mouse,
+  keyboard and input-method events into editor calls.
+- Saving runs `ExportJob` (document, layout and the used font data, detached from the editor)
+  on a background thread, then writes atomically; a file changed by another app since it was
+  opened is not overwritten.
+- Opening a PDF first looks for `ferrix-document.json` in its bytes; only then is it parsed
+  for the source. Unchanged Ferrix PDFs open for writing, changed ones as ordinary PDFs with
+  a notice.
+- Crash recovery journals a snapshot of the document followed by every applied edit, undo and
+  redo included; recovery replays them.
+- Fonts (bundled plus system fonts, for other scripts) load on a background thread at startup
+  and are reused between documents.
+- Known gaps: the caret does not blink; text being composed with an input method is drawn in
+  the UI font, not the document's; the font list shows every installed family.

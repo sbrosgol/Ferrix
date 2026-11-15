@@ -1354,6 +1354,7 @@ dependencies = [
 name = "ferrix-app"
 version = "0.0.1"
 dependencies = [
+ "ferrix-compose",
  "ferrix-convert",
  "ferrix-core",
  "ferrix-engine",

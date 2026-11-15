@@ -10,6 +10,8 @@ mod render;
 pub mod theme;
 mod view;
 mod worker;
+pub mod writer;
+mod writer_canvas;
 
 use std::path::PathBuf;
 
@@ -19,6 +21,7 @@ use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
 pub use recovery::Recoverable;
 use worker::EngineWorker;
+pub use writer::{Action as WriteAction, KeyCommand};
 
 /// Builds the application, optionally opening `initial` on start.
 ///
@@ -58,4 +61,10 @@ fn window_settings() -> window::Settings {
         },
         ..window::Settings::default()
     }
+}
+
+/// A paragraph style for scripts and tests: 0 Normal, 1 Title, 2–4 Heading 1–3.
+#[doc(hidden)]
+pub fn writer_style(index: usize) -> writer::StyleChoice {
+    writer::STYLES[index.min(writer::STYLES.len() - 1)]
 }

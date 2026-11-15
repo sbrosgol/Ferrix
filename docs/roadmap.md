@@ -59,8 +59,9 @@ demo. Exit criteria are the definition of done, not the feature list.
 Runs alongside M1–M3; phases are independent of the viewer milestones.
 1. ~~Model, edits with undo, layout and pagination, PDF export with embedded source,
    `ferrix compose` / `ferrix source` CLI~~ (done: `ferrix-compose`).
-2. Editor view in `ferrix-app`: caret, selection, typing with input methods, clipboard,
-   undo/redo, formatting toolbar, page setup, save/reopen, crash recovery.
+2. ~~Editor view in `ferrix-app`: caret, selection, typing with input methods, clipboard,
+   undo/redo, formatting toolbar, page setup, save/reopen, crash recovery~~ (done; see ADR-0008
+   phase 2 notes).
 3. Lists, images, page breaks, headers and footers with page numbers, find and replace.
 4. Tables, pasting formatted text, spell check, tagged PDF, PDF/A.
 

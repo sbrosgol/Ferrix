@@ -201,6 +201,21 @@ impl Editor {
         &mut self.fonts
     }
 
+    /// Draws a page of the current layout with `scale` pixels per point.
+    pub fn rasterize(
+        &mut self,
+        rasterizer: &mut crate::raster::Rasterizer,
+        page: usize,
+        scale: f32,
+    ) -> Option<crate::raster::Raster> {
+        rasterizer.page(&self.layout, page, scale, &mut self.fonts)
+    }
+
+    /// A detached copy of what saving needs, to write the PDF on another thread.
+    pub fn export_job(&self) -> crate::export::ExportJob {
+        crate::export::ExportJob::new(&self.doc, &self.layout, &self.fonts)
+    }
+
     /// Changes whenever the document, the selection or the caret formatting changes.
     pub fn revision(&self) -> u64 {
         self.revision

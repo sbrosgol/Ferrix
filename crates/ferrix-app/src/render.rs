@@ -115,6 +115,26 @@ pub(crate) fn render_page(
     })
 }
 
+/// Tiles an RGBA image for display at `logical` size, like rendered PDF pages.
+pub(crate) fn tiled_image(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    logical: iced::Size,
+) -> PageImage {
+    Rendered {
+        rows: slice_tiles(pixels, width, height),
+        width,
+        logical,
+        page_size: Size {
+            width: logical.width,
+            height: logical.height,
+        },
+        zoom: 1.0,
+    }
+    .into_image()
+}
+
 /// Splits a tightly packed RGBA image into rows of tiles of at most [`TILE_EDGE`] pixels.
 fn slice_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<Vec<RawTile>> {
     let stride = width as usize * 4;

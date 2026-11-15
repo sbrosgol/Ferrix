@@ -19,6 +19,7 @@ path = "src/main.rs"
 name = "screenshot"
 
 [dependencies]
+ferrix-compose.workspace = true
 ferrix-convert.workspace = true
 ferrix-core.workspace = true
 ferrix-engine.workspace = true
@@ -35,6 +36,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+ferrix-compose.workspace = true
 ferrix-types.workspace = true
 iced_test = "0.14.0"
 image.workspace = true
