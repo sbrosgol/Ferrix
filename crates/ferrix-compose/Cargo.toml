@@ -1,0 +1,26 @@
+[package]
+name = "ferrix-compose"
+description = "Ferrix documents written from scratch: model, edits, layout and PDF export"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+cosmic-text.workspace = true
+ferrix-pdf.workspace = true
+krilla.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+
+[dev-dependencies]
+ferrix-engine.workspace = true
+ferrix-engine-pdfium.workspace = true
+ferrix-types.workspace = true
+
+[lints]
+workspace = true

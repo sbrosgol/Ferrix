@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ferrix-compose.workspace = true
 ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
 ferrix-io.workspace = true

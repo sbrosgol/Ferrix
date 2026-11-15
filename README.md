@@ -14,9 +14,12 @@ What works today:
 - **Printing** through the operating system's print dialog
 - **Creating PDFs**: blank documents, or converted from images, Word, Excel, PowerPoint and
   OpenDocument files (Office formats need LibreOffice installed)
-- **CLI** (`ferrix`): `info`, `render`, `text`, `outline` and `organize`
+- **CLI** (`ferrix`): `info`, `render`, `text`, `outline`, `organize`, and `compose` /
+  `source` for documents written from scratch
 
-Not yet: annotations, forms, text selection and search, and the sandboxed engine process.
+Not yet: annotations, forms, text selection and search, the sandboxed engine process, and the
+editor for writing documents ([ADR-0008](docs/adr/0008-writing-documents.md); its layout and PDF
+export engine is done).
 
 ## Goals
 - Fast, faithful rendering of real-world PDFs
@@ -45,3 +48,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
+
+The bundled Liberation fonts in `crates/ferrix-compose/fonts/` are under the
+[SIL Open Font License 1.1](crates/ferrix-compose/fonts/LICENSE-OFL).
