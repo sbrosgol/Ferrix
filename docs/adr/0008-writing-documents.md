@@ -82,3 +82,24 @@ needs a document model of its own, from which the PDF is produced.
   and are reused between documents.
 - Known gaps: the caret does not blink; text being composed with an input method is drawn in
   the UI font, not the document's; the font list shows every installed family.
+
+## Implementation notes (phase 3, 2026-11-15)
+- **Lists** are paragraph formatting (`List { kind, level }`). Layout numbers them: bullets
+  `•` `◦` `▪` by level, numbers `1.` / `a.` / `i.` by level, continuing while list items follow
+  each other and restarting after any other paragraph. Markers hang left of the indented text
+  and are drawn and exported, but are not editable text. Tab and Shift+Tab nest and un-nest;
+  Enter in an empty item ends the list; Backspace at an item's start removes its bullet first.
+- **Page breaks** are a paragraph flag (`page_break_before`), inserted with ⌘/Ctrl+Enter and
+  removed with Backspace at the start of the paragraph.
+- **Pictures** (PNG, JPEG) belong to a paragraph and get a line of their own above its text,
+  which then serves as a caption. Any combination of text and picture is valid, so `Replace`
+  stays exactly invertible. The bytes are embedded base64 in the source and shared (`Arc`)
+  between edits; the layout cache keys pictures by hash. Pictures are inserted at 96 dpi,
+  shrunk to the text width, and embedded in the PDF as-is by krilla.
+- **Headers and footers** are document settings: one line each, with `{page}` and `{pages}`,
+  optionally left off the first page. They are laid out per page after pagination as page
+  "furniture" outside the editable text.
+- **Find and replace** match within paragraphs, optionally case-insensitive (character by
+  character, so offsets stay valid). Replace All applies an `Edit::Batch` and is one undo step.
+- A paragraph split keeps the paragraph's formatting but never copies its picture or page
+  break (`Paragraph::continuation`).

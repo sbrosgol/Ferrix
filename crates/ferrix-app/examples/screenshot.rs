@@ -45,6 +45,9 @@ fn main() {
     if flag(&mut args, "--write") {
         script.extend(writing_script());
     }
+    if flag(&mut args, "--features") {
+        script.extend(features_script());
+    }
     if flag(&mut args, "--fit-page") {
         script.push(Message::FitPage);
     }
@@ -146,6 +149,71 @@ fn writing_script() -> Vec<Message> {
         }));
     }
     s
+}
+
+/// Lists, a picture, a footer with page numbers and the find bar.
+fn features_script() -> Vec<Message> {
+    use ferrix_app::{KeyCommand as K, WriteAction as A};
+    use ferrix_compose::{ImageData, ListKind};
+    let key = |k| Message::Write(A::Key(k));
+    let typed = |t: &str| key(K::Insert(t.into()));
+    let picture = image::RgbaImage::from_fn(480, 160, |x, y| {
+        let t = x as f32 / 480.0;
+        image::Rgba([
+            (40.0 + 180.0 * t) as u8,
+            (90 + y / 4) as u8,
+            (220.0 - 120.0 * t) as u8,
+            255,
+        ])
+    });
+    let mut png = Vec::new();
+    picture
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    vec![
+        Message::NewDialog,
+        Message::CreateWriting,
+        Message::Write(A::Style(ferrix_app::writer_style(2))),
+        typed("Launch checklist"),
+        key(K::Enter),
+        Message::Write(A::List(ListKind::Bullet)),
+        typed("Freeze the feature set"),
+        key(K::Enter),
+        typed("Write the release notes"),
+        key(K::Enter),
+        key(K::Tab { back: false }),
+        typed("Include screenshots"),
+        key(K::Enter),
+        key(K::Tab { back: true }),
+        typed("Tag the release"),
+        key(K::Enter),
+        key(K::Enter),
+        typed("Steps, in order:"),
+        key(K::Enter),
+        Message::Write(A::List(ListKind::Numbered)),
+        typed("Build installers"),
+        key(K::Enter),
+        typed("Sign and notarize"),
+        key(K::Enter),
+        typed("Publish the release notes"),
+        key(K::Enter),
+        key(K::Enter),
+        Message::Write(A::ImageLoaded(Ok(Box::new(
+            ImageData::from_bytes(png).unwrap(),
+        )))),
+        typed("Figure 1: release timeline"),
+        key(K::PageBreak),
+        typed("Appendix"),
+        Message::PageSetupDialog,
+        Message::PageSetupFooter("Page {page} of {pages}".into()),
+        Message::ApplyPageSetup,
+        key(K::Move {
+            motion: ferrix_compose::Motion::DocumentStart,
+            extend: false,
+        }),
+        Message::FindOpen,
+        Message::FindQuery("release".into()),
+    ]
 }
 
 /// Viewport in logical pixels, overridable with `SHOT_SIZE=WxH`.

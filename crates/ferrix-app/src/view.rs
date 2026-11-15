@@ -9,13 +9,13 @@ use iced::{
     },
 };
 
-use ferrix_compose::{Align, Toggle};
+use ferrix_compose::{Align, ListKind, Toggle};
 
 use crate::{
     app::{
-        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS, PageSetupForm,
-        Recovery, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, page_scroll_id, sidebar_scroll_id,
-        writer_scroll_id,
+        App, Choice, FindState, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS,
+        PageSetupForm, Recovery, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, find_input_id,
+        page_scroll_id, sidebar_scroll_id, writer_scroll_id,
     },
     document::{Document, MAX_THUMBNAILS},
     icon::Icon,
@@ -76,6 +76,11 @@ impl App {
             window = window
                 .push(self.format_bar(writer))
                 .push(horizontal_divider());
+            if let Some(find) = &self.find {
+                window = window
+                    .push(self.find_bar(writer, find))
+                    .push(horizontal_divider());
+            }
         }
         let window = window
             .push(container(body).height(Length::Fill))
@@ -204,11 +209,10 @@ impl App {
             .padding([4, 6])
             .align_x(Alignment::Center)
             .style(theme::input);
-        let center = if let Some(w) = writer {
-            row![muted(
-                format!("Page {} of {}", w.current_page() + 1, w.page_count()),
-                13.0
-            )]
+        // A written document's page number is in the status bar; the toolbar keeps its room for
+        // the title.
+        let center = if writer.is_some() {
+            row![]
         } else {
             row![
                 icon_button(
@@ -842,10 +846,22 @@ impl App {
         } else {
             Length::Fill
         });
+        let matches = self
+            .find
+            .as_ref()
+            .map(|f| {
+                w.editor
+                    .find_all(&f.query, f.match_case)
+                    .into_iter()
+                    .flat_map(|range| w.editor.range_rects(range))
+                    .collect()
+            })
+            .unwrap_or_default();
         let canvas = Canvas::new(page, images.len(), w.zoom, Message::Write)
             .selection(w.editor.selection_rects())
             .caret(w.editor.caret_rect())
-            .focused(self.can_edit())
+            .matches(matches)
+            .focused(self.can_edit() && !self.find.as_ref().is_some_and(|f| f.focused))
             .wide(wide);
         let direction = if wide {
             scrollable::Direction::Both {
@@ -958,6 +974,31 @@ impl App {
             line_spacing,
             toolbar_separator(),
             icon_button(
+                Icon::BulletList,
+                "Bulleted list",
+                act(Action::List(ListKind::Bullet)),
+                format.list == Some(ListKind::Bullet),
+            ),
+            icon_button(
+                Icon::NumberedList,
+                "Numbered list",
+                act(Action::List(ListKind::Numbered)),
+                format.list == Some(ListKind::Numbered),
+            ),
+            icon_button(
+                Icon::Picture,
+                "Insert picture…",
+                act(Action::InsertImage),
+                false
+            ),
+            icon_button(
+                Icon::PageBreak,
+                "Page break (⌘↩)",
+                act(Action::PageBreak),
+                false
+            ),
+            toolbar_separator(),
+            icon_button(
                 Icon::ClearFormatting,
                 "Clear formatting",
                 act(Action::ClearFormatting),
@@ -981,6 +1022,82 @@ impl App {
         .width(Length::Fill)
         .style(theme::chrome)
         .into()
+    }
+}
+
+impl App {
+    /// Find and replace, under the formatting bar.
+    fn find_bar<'a>(&'a self, w: &'a Writer, find: &'a FindState) -> Element<'a, Message> {
+        let count = w.editor.find_all(&find.query, find.match_case).len();
+        let any = count > 0;
+        let status = if find.query.is_empty() {
+            String::new()
+        } else {
+            match count {
+                0 => "No matches".to_owned(),
+                1 => "1 match".to_owned(),
+                n => format!("{n} matches"),
+            }
+        };
+        let bar = row![
+            svg(Icon::Search.handle())
+                .width(16)
+                .height(16)
+                .style(theme::icon_colored(|t| t.text_muted)),
+            text_input("Find", &find.query)
+                .id(find_input_id())
+                .on_input(Message::FindQuery)
+                .on_submit(Message::FindNext)
+                .size(13)
+                .padding([4, 8])
+                .width(220)
+                .style(theme::input),
+            icon_button(
+                Icon::MatchCase,
+                "Match case",
+                Some(Message::FindCase(!find.match_case)),
+                find.match_case,
+            ),
+            icon_button(
+                Icon::MoveUp,
+                "Previous match",
+                any.then_some(Message::FindPrevious),
+                false
+            ),
+            icon_button(
+                Icon::MoveDown,
+                "Next match (↩)",
+                any.then_some(Message::FindNext),
+                false
+            ),
+            muted(status, 12.0).width(90),
+            text_input("Replace with", &find.replacement)
+                .on_input(Message::FindReplacement)
+                .on_submit(Message::ReplaceOne)
+                .size(13)
+                .padding([4, 8])
+                .width(200)
+                .style(theme::input),
+            button(text("Replace").size(13))
+                .padding([4, 12])
+                .style(theme::secondary)
+                .on_press_maybe(any.then_some(Message::ReplaceOne)),
+            button(text("Replace All").size(13))
+                .padding([4, 12])
+                .style(theme::secondary)
+                .on_press_maybe(any.then_some(Message::ReplaceAll)),
+            Space::new().width(Length::Fill),
+            icon_button(Icon::Close, "Close (Esc)", Some(Message::FindClose), false),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        container(bar)
+            .height(40)
+            .padding([0, 10])
+            .center_y(40)
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into()
     }
 }
 
@@ -1034,10 +1151,33 @@ fn page_setup_dialog(form: &PageSetupForm) -> Element<'_, Message> {
             .style(theme::input),
     ]
     .spacing(4);
+    let page_text = column![
+        label("Header and footer: {page} and {pages} become page numbers"),
+        row![
+            text_input("Header", &form.header)
+                .on_input(Message::PageSetupHeader)
+                .size(13)
+                .padding([5, 8])
+                .style(theme::input),
+            text_input("Footer, e.g. Page {page} of {pages}", &form.footer)
+                .on_input(Message::PageSetupFooter)
+                .size(13)
+                .padding([5, 8])
+                .style(theme::input),
+        ]
+        .spacing(8),
+        iced::widget::checkbox(form.skip_first)
+            .label("Not on the first page")
+            .on_toggle(Message::PageSetupSkipFirst)
+            .text_size(13)
+            .size(16),
+    ]
+    .spacing(6);
     let card = column![
         text("Page Setup").size(16).font(SEMIBOLD),
         fields,
         title,
+        page_text,
         Space::new().height(4),
         row![
             Space::new().width(Length::Fill),
@@ -1054,7 +1194,7 @@ fn page_setup_dialog(form: &PageSetupForm) -> Element<'_, Message> {
     ]
     .spacing(14)
     .padding(20)
-    .width(460);
+    .width(540);
     opaque(
         container(container(card).style(theme::card))
             .center(Length::Fill)

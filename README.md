@@ -17,11 +17,12 @@ What works today:
 - **CLI** (`ferrix`): `info`, `render`, `text`, `outline`, `organize`, and `compose` /
   `source` for documents written from scratch
 - **Writing documents** ([ADR-0008](docs/adr/0008-writing-documents.md)): type and format
-  letters and reports (styles, fonts, bold/italic/underline, colour, alignment, spacing),
-  saved as ordinary PDFs that stay editable in Ferrix
+  letters and reports (styles, fonts, bold/italic/underline, colour, alignment, spacing,
+  bulleted and numbered lists, pictures, page breaks, headers and footers with page numbers,
+  find and replace), saved as ordinary PDFs that stay editable in Ferrix
 
 Not yet: annotations, forms, text selection and search in PDFs, and the sandboxed engine
-process. Lists, images, page numbers and tables in written documents are planned.
+process. Tables, pasting formatted text and spell check in written documents are planned.
 
 ## Goals
 - Fast, faithful rendering of real-world PDFs

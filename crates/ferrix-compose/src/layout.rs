@@ -23,6 +23,9 @@ const MIN_LINES: usize = 2;
 /// Indent per list level; the marker hangs in the first one.
 const LIST_INDENT: f32 = 18.0;
 
+/// Space after a list item, in points.
+const LIST_SPACING: f32 = 3.0;
+
 /// Space between a picture and the paragraph's text.
 const IMAGE_GAP: f32 = 4.0;
 
@@ -618,7 +621,12 @@ fn break_lines(
 
     ParagraphLines {
         space_before: format.space_before.unwrap_or(style.space_before),
-        space_after: format.space_after.unwrap_or(style.space_after),
+        // List items sit close together, as in every word processor.
+        space_after: format.space_after.unwrap_or(if format.list.is_some() {
+            LIST_SPACING
+        } else {
+            style.space_after
+        }),
         keep_with_next: paragraph.style.is_heading(),
         page_break: format.page_break_before,
         lines,

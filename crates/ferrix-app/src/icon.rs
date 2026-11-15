@@ -42,6 +42,13 @@ pub(crate) enum Icon {
     AlignJustify,
     PageSetup,
     ClearFormatting,
+    BulletList,
+    NumberedList,
+    Picture,
+    PageBreak,
+    Search,
+    Close,
+    MatchCase,
 }
 
 macro_rules! icons {
@@ -96,6 +103,13 @@ icons! {
     AlignJustify => "text-align-justify",
     PageSetup => "file-cog",
     ClearFormatting => "remove-formatting",
+    BulletList => "list",
+    NumberedList => "list-ordered",
+    Picture => "image",
+    PageBreak => "separator-horizontal",
+    Search => "search",
+    Close => "x",
+    MatchCase => "case-sensitive",
 }
 
 fn load(source: &str) -> svg::Handle {

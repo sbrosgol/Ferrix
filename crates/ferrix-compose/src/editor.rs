@@ -1194,7 +1194,11 @@ impl Editor {
 
     /// Rectangles covering the selection, by page.
     pub fn selection_rects(&self) -> Vec<(usize, Rect)> {
-        let range = self.selection.range();
+        self.range_rects(self.selection.range())
+    }
+
+    /// Rectangles covering any range of text (search matches, for example), by page.
+    pub fn range_rects(&self, range: TextRange) -> Vec<(usize, Rect)> {
         if range.is_empty() {
             return Vec::new();
         }
