@@ -480,7 +480,54 @@ pub enum Action {
     /// Opens a file dialog for a picture.
     InsertImage,
     ImageLoaded(Result<Box<ImageData>, String>),
+    Table(TableChoice),
 }
+
+/// Entries of the Table menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableChoice {
+    Insert(u32, u32),
+    Op(ferrix_compose::TableOp),
+}
+
+impl fmt::Display for TableChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ferrix_compose::TableOp as Op;
+        match self {
+            Self::Insert(rows, cols) => write!(f, "Insert {cols} × {rows} table"),
+            Self::Op(op) => f.write_str(match op {
+                Op::RowAbove => "Insert row above",
+                Op::RowBelow => "Insert row below",
+                Op::ColumnLeft => "Insert column left",
+                Op::ColumnRight => "Insert column right",
+                Op::DeleteRow => "Delete row",
+                Op::DeleteColumn => "Delete column",
+                Op::DeleteTable => "Delete table",
+            }),
+        }
+    }
+}
+
+/// The Table menu outside a table, and inside one.
+pub(crate) const TABLE_INSERTS: [TableChoice; 5] = [
+    TableChoice::Insert(2, 2),
+    TableChoice::Insert(3, 3),
+    TableChoice::Insert(4, 3),
+    TableChoice::Insert(5, 4),
+    TableChoice::Insert(8, 5),
+];
+pub(crate) const TABLE_EDITS: [TableChoice; 7] = {
+    use ferrix_compose::TableOp as Op;
+    [
+        TableChoice::Op(Op::RowAbove),
+        TableChoice::Op(Op::RowBelow),
+        TableChoice::Op(Op::ColumnLeft),
+        TableChoice::Op(Op::ColumnRight),
+        TableChoice::Op(Op::DeleteRow),
+        TableChoice::Op(Op::DeleteColumn),
+        TableChoice::Op(Op::DeleteTable),
+    ]
+};
 
 #[cfg(test)]
 mod tests {

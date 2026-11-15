@@ -1676,6 +1676,10 @@ impl App {
                 );
             }
             WriteAction::ImageLoaded(Ok(data)) => e.insert_image(*data),
+            WriteAction::Table(crate::writer::TableChoice::Insert(rows, cols)) => {
+                e.insert_table(rows, cols);
+            }
+            WriteAction::Table(crate::writer::TableChoice::Op(op)) => e.table_op(op),
             WriteAction::ImageLoaded(Err(error)) => {
                 self.error = Some(format!("Couldn’t insert the picture: {error}"));
                 return Task::none();

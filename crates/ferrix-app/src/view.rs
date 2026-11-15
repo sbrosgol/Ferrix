@@ -997,6 +997,21 @@ impl App {
                 act(Action::PageBreak),
                 false
             ),
+            pick_list(
+                if w.editor.in_table() {
+                    &crate::writer::TABLE_EDITS[..]
+                } else {
+                    &crate::writer::TABLE_INSERTS[..]
+                },
+                None::<crate::writer::TableChoice>,
+                |c| Message::Write(Action::Table(c)),
+            )
+            .placeholder("Table")
+            .text_size(13)
+            .padding([4, 8])
+            .width(84)
+            .style(theme::select)
+            .menu_style(theme::select_menu),
             toolbar_separator(),
             icon_button(
                 Icon::ClearFormatting,
