@@ -62,8 +62,11 @@ Runs alongside M1–M3; phases are independent of the viewer milestones.
 2. ~~Editor view in `ferrix-app`: caret, selection, typing with input methods, clipboard,
    undo/redo, formatting toolbar, page setup, save/reopen, crash recovery~~ (done; see ADR-0008
    phase 2 notes).
-3. Lists, images, page breaks, headers and footers with page numbers, find and replace.
-4. Tables, pasting formatted text, spell check, tagged PDF, PDF/A.
+3. ~~Lists, images, page breaks, headers and footers with page numbers, find and replace~~
+   (done; see ADR-0008 phase 3 notes).
+4. ~~Tables, pasting formatted text, tagged PDF, PDF/A~~ (done; see ADR-0008 phase 4 notes).
+   Spell check is deferred pending a licensing decision (native checkers vs. MPL-2.0
+   `spellbook`).
 
 **Exit (phase 2):** a two-page letter can be written, formatted, saved, reopened and edited
 again, entirely with the keyboard; the saved PDF passes `qpdf --check`.

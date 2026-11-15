@@ -27,6 +27,7 @@ pub(crate) struct Canvas<'a, Message> {
     /// Logical pixels per point.
     zoom: f32,
     selection: Vec<(usize, Rectangle)>,
+    matches: Vec<(usize, Rectangle)>,
     caret: Option<(usize, Rectangle)>,
     focused: bool,
     /// Wider than the window: the canvas takes the pages' width and scrolls sideways.
@@ -46,6 +47,7 @@ impl<'a, Message> Canvas<'a, Message> {
             pages,
             zoom,
             selection: Vec::new(),
+            matches: Vec::new(),
             caret: None,
             focused: true,
             wide: false,
@@ -56,6 +58,15 @@ impl<'a, Message> Canvas<'a, Message> {
     /// Selection rectangles, in points on their pages.
     pub(crate) fn selection(mut self, rects: Vec<(usize, ferrix_compose::Rect)>) -> Self {
         self.selection = rects
+            .into_iter()
+            .map(|(p, r)| (p, self.scaled(r)))
+            .collect();
+        self
+    }
+
+    /// Search matches to highlight, in points on their pages.
+    pub(crate) fn matches(mut self, rects: Vec<(usize, ferrix_compose::Rect)>) -> Self {
+        self.matches = rects
             .into_iter()
             .map(|(p, r)| (p, self.scaled(r)))
             .collect();
@@ -212,7 +223,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Canvas<'_, Message> {
                 modifiers,
                 text,
                 ..
-            }) if self.focused => {
+            }) if self.focused && !shell.is_event_captured() => {
                 if let Some(command) = key_command(key, *physical_key, *modifiers, text.as_deref())
                 {
                     shell.publish((self.on_action)(Action::Key(command)));
@@ -293,6 +304,20 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Canvas<'_, Message> {
         let tokens = theme::tokens(theme);
         let bounds = layout.bounds();
 
+        let found = Color::from_rgba8(0xF5, 0xC2, 0x11, 0.35);
+        for (index, rect) in &self.matches {
+            let page = self.page_bounds(bounds, *index);
+            let rect = Rectangle::new(page.position() + Vector::new(rect.x, rect.y), rect.size());
+            if rect.intersects(viewport) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: rect,
+                        ..renderer::Quad::default()
+                    },
+                    found,
+                );
+            }
+        }
         let highlight = Color {
             a: 0.28,
             ..tokens.accent

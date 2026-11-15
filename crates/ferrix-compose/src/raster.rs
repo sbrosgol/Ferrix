@@ -4,7 +4,7 @@
 use cosmic_text::{CacheKey, CacheKeyFlags, SwashCache, SwashContent};
 
 use crate::fonts::Fonts;
-use crate::layout::{Layout, PageLayout};
+use crate::layout::{Layout, PageLayout, PlacedGlyph, PlacedImage};
 use crate::model::Color;
 
 /// An RGBA page image, premultiplied by nothing: white paper with opaque content.
@@ -28,6 +28,8 @@ impl std::fmt::Debug for Raster {
 /// Rasterizes glyphs, keeping the ones it has drawn for reuse.
 pub struct Rasterizer {
     cache: SwashCache,
+    /// Decoded pictures by (hash, width, height) in pixels.
+    images: std::collections::HashMap<(u64, u32, u32), image::RgbaImage>,
 }
 
 impl std::fmt::Debug for Rasterizer {
@@ -49,6 +51,7 @@ impl Rasterizer {
     pub fn new() -> Self {
         Self {
             cache: SwashCache::new(),
+            images: std::collections::HashMap::new(),
         }
     }
 
@@ -76,41 +79,23 @@ impl Rasterizer {
     }
 
     fn draw(&mut self, raster: &mut Raster, page: &PageLayout, scale: f32, fonts: &mut Fonts) {
-        for line in &page.lines {
-            for glyph in &line.glyphs {
-                let (key, x, y) = CacheKey::new(
-                    glyph.font,
-                    glyph.glyph_id,
-                    glyph.size * scale,
-                    (glyph.x * scale, glyph.y * scale),
-                    glyph.weight,
-                    CacheKeyFlags::empty(),
-                );
-                let Some(image) = self.cache.get_image(fonts.system(), key) else {
-                    continue;
-                };
-                let left = x + image.placement.left;
-                let top = y - image.placement.top;
-                let (w, h) = (image.placement.width as i32, image.placement.height as i32);
-                for row in 0..h {
-                    for col in 0..w {
-                        let i = (row * w + col) as usize;
-                        let (alpha, color) = match image.content {
-                            SwashContent::Mask => (image.data[i], glyph.color),
-                            SwashContent::Color => {
-                                let p = &image.data[i * 4..i * 4 + 4];
-                                (p[3], Color(p[0], p[1], p[2]))
-                            }
-                            SwashContent::SubpixelMask => {
-                                let p = &image.data[i * 4..i * 4 + 4];
-                                let a = ((u16::from(p[0]) + u16::from(p[1]) + u16::from(p[2])) / 3)
-                                    as u8;
-                                (a, glyph.color)
-                            }
-                        };
-                        blend(raster, left + col, top + row, color, alpha);
-                    }
-                }
+        for rule in &page.rules {
+            fill_rect(
+                raster,
+                rule.x * scale,
+                rule.top * scale,
+                (rule.width * scale).max(1.0),
+                (rule.thickness * scale).max(1.0),
+                rule.color,
+            );
+        }
+        for line in page.lines.iter().chain(&page.furniture) {
+            if let Some(image) = &line.image {
+                self.draw_image(raster, image, scale);
+            }
+            self.draw_glyphs(raster, &line.glyphs, scale, fonts);
+            if let Some((_, marker)) = &line.marker {
+                self.draw_glyphs(raster, marker, scale, fonts);
             }
             for bar in &line.decorations {
                 fill_rect(
@@ -122,6 +107,86 @@ impl Rasterizer {
                     bar.color,
                 );
             }
+        }
+    }
+
+    fn draw_glyphs(
+        &mut self,
+        raster: &mut Raster,
+        glyphs: &[PlacedGlyph],
+        scale: f32,
+        fonts: &mut Fonts,
+    ) {
+        for glyph in glyphs {
+            let (key, x, y) = CacheKey::new(
+                glyph.font,
+                glyph.glyph_id,
+                glyph.size * scale,
+                (glyph.x * scale, glyph.y * scale),
+                glyph.weight,
+                CacheKeyFlags::empty(),
+            );
+            let Some(image) = self.cache.get_image(fonts.system(), key) else {
+                continue;
+            };
+            let left = x + image.placement.left;
+            let top = y - image.placement.top;
+            let (w, h) = (image.placement.width as i32, image.placement.height as i32);
+            for row in 0..h {
+                for col in 0..w {
+                    let i = (row * w + col) as usize;
+                    let (alpha, color) = match image.content {
+                        SwashContent::Mask => (image.data[i], glyph.color),
+                        SwashContent::Color => {
+                            let p = &image.data[i * 4..i * 4 + 4];
+                            (p[3], Color(p[0], p[1], p[2]))
+                        }
+                        SwashContent::SubpixelMask => {
+                            let p = &image.data[i * 4..i * 4 + 4];
+                            let a =
+                                ((u16::from(p[0]) + u16::from(p[1]) + u16::from(p[2])) / 3) as u8;
+                            (a, glyph.color)
+                        }
+                    };
+                    blend(raster, left + col, top + row, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Draws a picture, decoded and scaled once per size and kept for the next page drawn.
+    fn draw_image(&mut self, raster: &mut Raster, image: &PlacedImage, scale: f32) {
+        let width = (image.width * scale).round().max(1.0) as u32;
+        let height = (image.height * scale).round().max(1.0) as u32;
+        let key = (image.data.hash, width, height);
+        if !self.images.contains_key(&key) {
+            let Ok(decoded) = image::load_from_memory(&image.data.bytes) else {
+                return;
+            };
+            let scaled = image::imageops::resize(
+                &decoded.to_rgba8(),
+                width,
+                height,
+                image::imageops::FilterType::Triangle,
+            );
+            // Keep the cache small: pictures at other sizes are dropped.
+            self.images
+                .retain(|(hash, _, _), _| *hash != image.data.hash);
+            self.images.insert(key, scaled);
+        }
+        let Some(pixels) = self.images.get(&key) else {
+            return;
+        };
+        let left = (image.x * scale).round() as i32;
+        let top = (image.top * scale).round() as i32;
+        for (col, row, p) in pixels.enumerate_pixels() {
+            blend(
+                raster,
+                left + col as i32,
+                top + row as i32,
+                Color(p[0], p[1], p[2]),
+                p[3],
+            );
         }
     }
 }

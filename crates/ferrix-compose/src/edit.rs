@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    CharFormat, Document, FontChoice, PageSetup, Paragraph, ParagraphFormat, ParagraphStyle,
-    Position, TextRange,
+    CharFormat, Document, FontChoice, PageSetup, PageText, Paragraph, ParagraphFormat,
+    ParagraphStyle, Position, TextRange,
 };
 
 /// Paragraphs that replace a range of text. The first is joined to the text before the range,
@@ -65,11 +65,19 @@ pub struct Settings {
     pub title: Option<String>,
     pub page: PageSetup,
     pub font: FontChoice,
+    #[serde(default)]
+    pub header: Option<PageText>,
+    #[serde(default)]
+    pub footer: Option<PageText>,
+    #[serde(default)]
+    pub archival: bool,
 }
 
 /// A change to a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Edit {
+    /// Several edits applied in order, as one (Replace All).
+    Batch(Vec<Edit>),
     /// Replaces the text in `range` with `with`. Covers typing, deleting, splitting and joining
     /// paragraphs, pasting, and formatting (replacing text with a reformatted copy of itself).
     Replace {
@@ -106,11 +114,38 @@ impl Document {
     pub fn apply(&mut self, edit: &Edit) -> Result<Applied, EditError> {
         match edit {
             Edit::Replace { range, with } => self.replace(*range, with),
+            Edit::Batch(edits) => {
+                let mut inverses = Vec::with_capacity(edits.len());
+                let mut range = TextRange::caret(Position::START);
+                for edit in edits {
+                    match self.apply(edit) {
+                        Ok(applied) => {
+                            inverses.push(applied.inverse);
+                            range = applied.range;
+                        }
+                        Err(e) => {
+                            // Leave the document as it was.
+                            for inverse in inverses.iter().rev() {
+                                let _ = self.apply(inverse);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                inverses.reverse();
+                Ok(Applied {
+                    inverse: Edit::Batch(inverses),
+                    range,
+                })
+            }
             Edit::Settings(settings) => {
                 let mut next = self.clone();
                 next.title.clone_from(&settings.title);
                 next.page = settings.page;
                 next.font.clone_from(&settings.font);
+                next.header.clone_from(&settings.header);
+                next.footer.clone_from(&settings.footer);
+                next.archival = settings.archival;
                 next.validate()?;
                 let inverse = Edit::Settings(self.settings());
                 *self = next;
@@ -127,6 +162,9 @@ impl Document {
             title: self.title.clone(),
             page: self.page,
             font: self.font.clone(),
+            header: self.header.clone(),
+            footer: self.footer.clone(),
+            archival: self.archival,
         }
     }
 
@@ -152,6 +190,13 @@ impl Document {
             return Err(EditError::Reversed);
         }
         Ok(())
+    }
+
+    /// Checks that pasting `fragment` keeps the document valid (font sizes, picture widths).
+    pub fn validate_fragment(&self, fragment: &Fragment) -> Result<(), crate::model::ModelError> {
+        let mut probe = Document::new();
+        probe.paragraphs = fragment.0.clone();
+        probe.validate()
     }
 
     /// A copy of the text in `range`, each paragraph keeping its style and formatting.
@@ -214,8 +259,10 @@ impl Document {
         let mut lines = normalized.split(['\n', '\r']).peekable();
         let mut parts = Vec::new();
         while let Some(line) = lines.next() {
-            let style = if parts.is_empty() || lines.peek().is_some() {
+            let style = if parts.is_empty() {
                 paragraph.empty_like()
+            } else if lines.peek().is_some() {
+                paragraph.continuation()
             } else {
                 self.paragraph_after(range)
             };
@@ -288,7 +335,7 @@ impl Document {
         if at_end && paragraph.style.is_heading() {
             Paragraph::new(paragraph.style.next())
         } else {
-            self.paragraphs[range.start.block].empty_like()
+            self.paragraphs[range.start.block].continuation()
         }
     }
 }

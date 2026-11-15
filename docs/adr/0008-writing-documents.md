@@ -82,3 +82,54 @@ needs a document model of its own, from which the PDF is produced.
   and are reused between documents.
 - Known gaps: the caret does not blink; text being composed with an input method is drawn in
   the UI font, not the document's; the font list shows every installed family.
+
+## Implementation notes (phase 3, 2026-11-15)
+- **Lists** are paragraph formatting (`List { kind, level }`). Layout numbers them: bullets
+  `•` `◦` `▪` by level, numbers `1.` / `a.` / `i.` by level, continuing while list items follow
+  each other and restarting after any other paragraph. Markers hang left of the indented text
+  and are drawn and exported, but are not editable text. Tab and Shift+Tab nest and un-nest;
+  Enter in an empty item ends the list; Backspace at an item's start removes its bullet first.
+- **Page breaks** are a paragraph flag (`page_break_before`), inserted with ⌘/Ctrl+Enter and
+  removed with Backspace at the start of the paragraph.
+- **Pictures** (PNG, JPEG) belong to a paragraph and get a line of their own above its text,
+  which then serves as a caption. Any combination of text and picture is valid, so `Replace`
+  stays exactly invertible. The bytes are embedded base64 in the source and shared (`Arc`)
+  between edits; the layout cache keys pictures by hash. Pictures are inserted at 96 dpi,
+  shrunk to the text width, and embedded in the PDF as-is by krilla.
+- **Headers and footers** are document settings: one line each, with `{page}` and `{pages}`,
+  optionally left off the first page. They are laid out per page after pagination as page
+  "furniture" outside the editable text.
+- **Find and replace** match within paragraphs, optionally case-insensitive (character by
+  character, so offsets stay valid). Replace All applies an `Edit::Batch` and is one undo step.
+- A paragraph split keeps the paragraph's formatting but never copies its picture or page
+  break (`Paragraph::continuation`).
+
+## Implementation notes (phase 4, 2026-11-15)
+- **Tagged PDF.** Every export carries a structure tree in reading order: headings (Title and
+  Heading 1 as H1, then H2, H3), paragraphs, lists (L > LI > Lbl + LBody), figures with the
+  caption as alternative text, and tables (Table > TR > TD). Headers, footers, underlines and
+  table borders are marked as artifacts.
+- **PDF/A-3b.** A document marked archival in Page Setup is written with krilla's PDF/A-3b
+  validator, which fails the save rather than writing a non-conforming file. PDF/A-3 is the
+  part that allows the embedded editable source (as an associated file). Archival files carry
+  creation dates; other exports stay undated and byte-for-byte reproducible. Images are never
+  flagged for interpolation (PDF/A forbids it).
+- **Formatted copy and paste.** Copy puts HTML and plain text on the system clipboard
+  (`arboard`). Paste prefers Ferrix's own copy of what it last put there (lossless), then HTML
+  from other apps, then plain text; Shift+Cmd/Ctrl+V pastes plain text. A small, tolerant HTML
+  reader in `ferrix-compose` handles headings, paragraphs, lists, tables, character formatting
+  (including Google Docs' `font-weight:normal` wrapper) and alignment, and ignores the rest.
+  The first pasted paragraph joins the caret's and takes its style; pasted tables get fresh
+  table numbers, and no table is pasted into a table cell.
+- **Tables.** Cells are ordinary paragraphs tagged with `Cell { table, row, col }`; a table is a
+  run of consecutive paragraphs with the same table number. Edits, undo, the recovery journal,
+  find and paste therefore work unchanged. Layout uses equal-width columns, cell padding and
+  thin borders, and moves whole rows between pages. Backspace and Delete never merge cells;
+  deleting across cells clears each cell's text; Tab and Shift+Tab move between cells (Tab
+  from the last adds a row); Up and Down keep to the column; hit testing finds the cell under
+  the pointer. Row and column changes rebuild the table's paragraphs in a single `Replace`,
+  which also normalizes any gaps. Tables are not nested.
+- **Spell check** was deferred: native checkers need platform code, and the portable option
+  (`spellbook`, MPL-2.0) would change the licence policy. Decision pending.
+- Known gaps: column widths are always equal; no merged cells; rows taller than a page are not
+  split; HTML paste ignores pictures.

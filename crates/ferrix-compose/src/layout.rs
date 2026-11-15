@@ -9,13 +9,50 @@ use std::ops::Range;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight, Wrap, fontdb};
 
 use crate::fonts::Fonts;
-use crate::model::{Align, CharFormat, Color, Document, PageSetup, Paragraph};
+use crate::model::{
+    Align, CharFormat, Color, Document, ImageData, ListKind, PageSetup, PageText, Paragraph,
+    ParagraphStyle,
+};
 
 /// Normal line height as a multiple of the font size ("single" spacing).
 const LINE_HEIGHT: f32 = 1.15;
 
 /// Fewest lines of a paragraph left alone at the bottom or top of a page.
 const MIN_LINES: usize = 2;
+
+/// Indent per list level; the marker hangs in the first one.
+const LIST_INDENT: f32 = 18.0;
+
+/// Space after a list item, in points.
+const LIST_SPACING: f32 = 3.0;
+
+/// Space between a picture and the paragraph's text.
+const IMAGE_GAP: f32 = 4.0;
+
+/// Space between a table cell's border and its text, and the border's thickness and colour.
+const CELL_PADDING: f32 = 5.0;
+const RULE_WIDTH: f32 = 0.75;
+const RULE_COLOR: Color = Color(0x9A, 0xA0, 0xA6);
+
+/// The box a paragraph is laid out in: the page's text area, or a table cell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Frame {
+    left: f32,
+    width: f32,
+}
+
+impl Frame {
+    fn page(doc: &Document) -> Self {
+        Self {
+            left: doc.page.margins.left,
+            width: doc.page.content_width(),
+        }
+    }
+}
+
+/// Header and footer text, relative to the base font size, and its colour.
+const PAGE_TEXT_SCALE: f32 = 0.8;
+const PAGE_TEXT_COLOR: Color = Color(0x5F, 0x63, 0x68);
 
 /// A laid-out document.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +65,10 @@ pub struct Layout {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PageLayout {
     pub lines: Vec<Line>,
+    /// Header and footer: drawn and exported, but not part of the editable text.
+    pub furniture: Vec<Line>,
+    /// Table borders.
+    pub rules: Vec<Decoration>,
 }
 
 /// One line of a paragraph, placed on a page.
@@ -48,6 +89,22 @@ pub struct Line {
     /// In visual order.
     pub glyphs: Vec<PlacedGlyph>,
     pub decorations: Vec<Decoration>,
+    /// A list item's bullet or number, hanging left of the first line: its text and glyphs.
+    pub marker: Option<(String, Vec<PlacedGlyph>)>,
+    /// A paragraph's picture, which gets a line of its own above the text.
+    pub image: Option<PlacedImage>,
+    /// For header and footer lines: the text their glyphs show (they belong to no paragraph).
+    pub source_text: Option<String>,
+}
+
+/// A picture at its final position and size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImage {
+    pub data: std::sync::Arc<ImageData>,
+    pub x: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// A glyph at its final position.
@@ -125,12 +182,21 @@ impl std::fmt::Debug for LayoutCache {
     }
 }
 
-fn cache_key(doc: &Document, paragraph: &Paragraph) -> u64 {
+fn cache_key(doc: &Document, paragraph: &Paragraph, marker: Option<&str>, frame: Frame) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_vec(paragraph)
+    // Pictures go in by their hash: serializing their bytes on every keystroke would be slow.
+    let mut text_only = paragraph.clone();
+    if let Some(image) = text_only.image.take() {
+        image.data.hash.hash(&mut hasher);
+        image.width.to_bits().hash(&mut hasher);
+    }
+    serde_json::to_vec(&text_only)
         .unwrap_or_default()
         .hash(&mut hasher);
+    marker.hash(&mut hasher);
+    frame.left.to_bits().hash(&mut hasher);
+    frame.width.to_bits().hash(&mut hasher);
     serde_json::to_vec(&doc.font)
         .unwrap_or_default()
         .hash(&mut hasher);
@@ -150,7 +216,10 @@ struct ParagraphLines {
     space_before: f32,
     space_after: f32,
     keep_with_next: bool,
+    page_break: bool,
     lines: Vec<Line>,
+    /// A table row: its height (lines sit side by side), borders, and it is never split.
+    row: Option<(f32, Vec<Decoration>)>,
 }
 
 impl Layout {
@@ -163,29 +232,140 @@ impl Layout {
     /// the same cache.
     pub fn cached(doc: &Document, fonts: &mut Fonts, cache: &mut LayoutCache) -> Self {
         let mut used = std::collections::HashMap::with_capacity(doc.paragraphs.len());
-        let paragraphs: Vec<ParagraphLines> = doc
-            .paragraphs
-            .iter()
-            .enumerate()
-            .map(|(block, p)| {
-                let key = cache_key(doc, p);
+        let mut lay_out =
+            |block: usize, p: &Paragraph, marker: Option<&str>, frame: Frame, fonts: &mut Fonts| {
+                let key = cache_key(doc, p, marker, frame);
                 let mut lines = match cache
                     .entries
                     .remove(&key)
                     .or_else(|| used.get(&key).cloned())
                 {
                     Some(lines) => lines,
-                    None => break_lines(doc, block, p, fonts),
+                    None => break_lines(doc, block, p, marker, frame, fonts),
                 };
                 for line in &mut lines.lines {
                     line.block = block;
                 }
                 used.insert(key, lines.clone());
                 lines
-            })
-            .collect();
+            };
+        let markers = list_markers(doc);
+        let mut units: Vec<ParagraphLines> = Vec::with_capacity(doc.paragraphs.len());
+        let mut block = 0;
+        while block < doc.paragraphs.len() {
+            let Some(cell) = doc.paragraphs[block].cell else {
+                let p = &doc.paragraphs[block];
+                units.push(lay_out(
+                    block,
+                    p,
+                    markers[block].as_deref(),
+                    Frame::page(doc),
+                    fonts,
+                ));
+                block += 1;
+                continue;
+            };
+            // A table: the run of paragraphs with this table number, laid out row by row.
+            let end = (block..doc.paragraphs.len())
+                .find(|&i| doc.paragraphs[i].cell.is_none_or(|c| c.table != cell.table))
+                .unwrap_or(doc.paragraphs.len());
+            let grid = TableGrid::of(doc, block..end);
+            for row in 0..grid.rows {
+                let mut lines = Vec::new();
+                let mut row_height: f32 = 0.0;
+                for col in 0..grid.cols {
+                    let frame = Frame {
+                        left: doc.page.margins.left + col as f32 * grid.col_width + CELL_PADDING,
+                        width: (grid.col_width - 2.0 * CELL_PADDING).max(1.0),
+                    };
+                    let mut y = CELL_PADDING;
+                    let blocks = grid.cell(row, col);
+                    for (k, &b) in blocks.iter().enumerate() {
+                        let p = &doc.paragraphs[b];
+                        let laid = lay_out(b, p, markers[b].as_deref(), frame, fonts);
+                        if k > 0 {
+                            y += laid.space_before;
+                        }
+                        for line in &laid.lines {
+                            lines.push(place(line, y + line.top));
+                        }
+                        y += laid.lines.iter().map(|l| l.height).sum::<f32>();
+                        if k + 1 < blocks.len() {
+                            y += laid.space_after;
+                        }
+                    }
+                    if blocks.is_empty() {
+                        y += doc.font.size * LINE_HEIGHT;
+                    }
+                    row_height = row_height.max(y + CELL_PADDING);
+                }
+                let left = doc.page.margins.left;
+                let width = grid.col_width * grid.cols as f32;
+                let rule = |x: f32, top: f32, width: f32, thickness: f32| Decoration {
+                    x,
+                    top,
+                    width,
+                    thickness,
+                    color: RULE_COLOR,
+                };
+                let mut rules = vec![
+                    rule(left, 0.0, width, RULE_WIDTH),
+                    rule(left, row_height - RULE_WIDTH, width, RULE_WIDTH),
+                ];
+                for col in 0..=grid.cols {
+                    let x = left + col as f32 * grid.col_width - RULE_WIDTH / 2.0;
+                    // Vertical bars: `width` is the bar's width, `thickness` its height.
+                    rules.push(rule(x.max(left), 0.0, RULE_WIDTH, row_height));
+                }
+                let first = grid.cell(row, 0).first().copied();
+                units.push(ParagraphLines {
+                    space_before: 0.0,
+                    space_after: if row + 1 == grid.rows {
+                        ParagraphStyle::Normal.defaults().space_after
+                    } else {
+                        0.0
+                    },
+                    keep_with_next: false,
+                    page_break: row == 0
+                        && first.is_some_and(|b| doc.paragraphs[b].format.page_break_before),
+                    lines,
+                    row: Some((row_height, rules)),
+                });
+            }
+            block = end;
+        }
+        let mut layout = paginate(doc.page, units);
+
+        // Headers and footers, now that the page count is known.
+        let count = layout.pages.len();
+        for (index, page) in layout.pages.iter_mut().enumerate() {
+            for (text, footer) in [(&doc.header, false), (&doc.footer, true)] {
+                let Some(text) = text.as_ref().filter(|t| !(t.skip_first && index == 0)) else {
+                    continue;
+                };
+                let paragraph = page_text_paragraph(doc, text, index + 1, count);
+                let lines = lay_out(usize::MAX, &paragraph, None, Frame::page(doc), fonts);
+                let Some(line) = lines.lines.first() else {
+                    continue;
+                };
+                let margin = if footer {
+                    doc.page.margins.bottom
+                } else {
+                    doc.page.margins.top
+                };
+                let centre = if footer {
+                    doc.page.height - margin / 2.0
+                } else {
+                    margin / 2.0
+                };
+                let mut line = place(line, (centre - line.height / 2.0).max(0.0));
+                line.block = usize::MAX;
+                line.source_text = Some(paragraph.text());
+                page.furniture.push(line);
+            }
+        }
         cache.entries = used;
-        paginate(doc.page, paragraphs)
+        layout
     }
 
     /// The page and line showing a position.
@@ -202,22 +382,141 @@ impl Layout {
     }
 }
 
+/// The paragraph a header or footer is laid out as.
+fn page_text_paragraph(doc: &Document, text: &PageText, page: usize, pages: usize) -> Paragraph {
+    let mut paragraph = Paragraph::new(ParagraphStyle::Normal).with_text(
+        &text.for_page(page, pages),
+        CharFormat {
+            size: Some(doc.font.size * PAGE_TEXT_SCALE),
+            color: Some(PAGE_TEXT_COLOR),
+            ..CharFormat::default()
+        },
+    );
+    paragraph.format.align = Some(text.align);
+    paragraph.format.space_after = Some(0.0);
+    paragraph
+}
+
+/// Each paragraph's list marker: bullets by level, or the item's number. Numbering continues
+/// while list items follow each other and restarts after any other paragraph.
+fn list_markers(doc: &Document) -> Vec<Option<String>> {
+    let mut counters = [0u32; crate::model::List::MAX_LEVEL as usize + 1];
+    doc.paragraphs
+        .iter()
+        .map(|p| {
+            let Some(list) = p.format.list else {
+                counters = [0; crate::model::List::MAX_LEVEL as usize + 1];
+                return None;
+            };
+            let level = usize::from(list.level.min(crate::model::List::MAX_LEVEL));
+            counters[level] += 1;
+            for deeper in &mut counters[level + 1..] {
+                *deeper = 0;
+            }
+            Some(match list.kind {
+                ListKind::Bullet => ["•", "◦", "▪"][level % 3].to_owned(),
+                ListKind::Numbered => number_label(counters[level], level),
+            })
+        })
+        .collect()
+}
+
+/// `1.`, `a.` or `i.` style numbers, by level.
+fn number_label(n: u32, level: usize) -> String {
+    match level % 3 {
+        0 => format!("{n}."),
+        1 => {
+            // a, b, ... z, aa, ab, ...
+            let mut n = n;
+            let mut letters = Vec::new();
+            while n > 0 {
+                n -= 1;
+                letters.push(char::from(b'a' + (n % 26) as u8));
+                n /= 26;
+            }
+            letters.iter().rev().collect::<String>() + "."
+        }
+        _ => {
+            const NUMERALS: [(u32, &str); 13] = [
+                (1000, "m"),
+                (900, "cm"),
+                (500, "d"),
+                (400, "cd"),
+                (100, "c"),
+                (90, "xc"),
+                (50, "l"),
+                (40, "xl"),
+                (10, "x"),
+                (9, "ix"),
+                (5, "v"),
+                (4, "iv"),
+                (1, "i"),
+            ];
+            let mut n = n.min(3999);
+            let mut out = String::new();
+            for (value, numeral) in NUMERALS {
+                while n >= value {
+                    out.push_str(numeral);
+                    n -= value;
+                }
+            }
+            out + "."
+        }
+    }
+}
+
+/// A table's cells: which paragraphs are in each, by row and column.
+struct TableGrid {
+    rows: usize,
+    cols: usize,
+    col_width: f32,
+    cells: std::collections::BTreeMap<(usize, usize), Vec<usize>>,
+}
+
+impl TableGrid {
+    fn of(doc: &Document, blocks: Range<usize>) -> Self {
+        let mut cells: std::collections::BTreeMap<(usize, usize), Vec<usize>> =
+            std::collections::BTreeMap::new();
+        let (mut rows, mut cols) = (1, 1);
+        for b in blocks {
+            if let Some(cell) = doc.paragraphs[b].cell {
+                let (r, c) = (cell.row as usize, cell.col as usize);
+                rows = rows.max(r + 1);
+                cols = cols.max(c + 1);
+                cells.entry((r, c)).or_default().push(b);
+            }
+        }
+        Self {
+            rows,
+            cols,
+            col_width: doc.page.content_width() / cols as f32,
+            cells,
+        }
+    }
+
+    fn cell(&self, row: usize, col: usize) -> &[usize] {
+        self.cells.get(&(row, col)).map_or(&[], Vec::as_slice)
+    }
+}
+
 fn break_lines(
     doc: &Document,
     block: usize,
     paragraph: &Paragraph,
+    marker: Option<&str>,
+    frame: Frame,
     fonts: &mut Fonts,
 ) -> ParagraphLines {
     let style = paragraph.style.defaults();
     let format = paragraph.format;
     let format_align = format.align.unwrap_or_default();
     let spacing = format.line_spacing.unwrap_or(1.0).clamp(0.5, 5.0);
-    let indent = format
-        .indent
-        .unwrap_or(0.0)
-        .clamp(0.0, doc.page.content_width() / 2.0);
-    let left = doc.page.margins.left + indent;
-    let width = doc.page.content_width() - indent;
+    let list_indent = format.list.map_or(0.0, |l| {
+        LIST_INDENT * f32::from(l.level.min(crate::model::List::MAX_LEVEL) + 1)
+    });
+    let indent = (format.indent.unwrap_or(0.0) + list_indent).clamp(0.0, frame.width / 2.0);
+    let left = frame.left + indent;
+    let width = frame.width - indent;
 
     // Spans for cosmic-text, with the run index as metadata. Line breaks are not allowed inside a
     // paragraph; any that slipped into the model are laid out as spaces (same byte length).
@@ -359,6 +658,9 @@ fn break_lines(
             rtl: run.rtl,
             glyphs,
             decorations,
+            marker: None,
+            image: None,
+            source_text: None,
         });
     }
     if lines.is_empty() {
@@ -375,7 +677,39 @@ fn break_lines(
             rtl: false,
             glyphs: Vec::new(),
             decorations: Vec::new(),
+            marker: None,
+            image: None,
+            source_text: None,
         });
+    }
+
+    // The list marker hangs left of the first line, in the format of the paragraph's start.
+    if let Some(marker) = marker {
+        let mut buffer = Buffer::new(
+            system,
+            Metrics::new(first.size, first.size * LINE_HEIGHT * spacing),
+        );
+        buffer.set_size(system, None, None);
+        buffer.set_text(system, marker, &attrs[0], Shaping::Advanced, None);
+        buffer.shape_until_scroll(system, false);
+        let first_line = &lines[0];
+        let glyphs: Vec<PlacedGlyph> = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| PlacedGlyph {
+                font: g.font_id,
+                glyph_id: g.glyph_id,
+                size: g.font_size,
+                x: left - LIST_INDENT + g.x + g.x_offset,
+                y: first_line.baseline - g.y_offset,
+                advance: g.w,
+                range: g.start..g.end,
+                color: first.color,
+                rtl: false,
+                weight: g.font_weight,
+            })
+            .collect();
+        lines[0].marker = Some((marker.to_owned(), glyphs));
     }
     // Each line runs up to where the next starts; the last to the end of the paragraph.
     let len = paragraph.len();
@@ -385,11 +719,58 @@ fn break_lines(
         line.range = start..starts.get(i + 1).copied().unwrap_or(len);
     }
 
+    // A picture gets a line of its own above the text, aligned like the paragraph.
+    if let Some(image) = &paragraph.image {
+        let shown = image.width.min(width).max(1.0);
+        let height = image.data.height_for(shown);
+        let x = match format_align {
+            Align::Left | Align::Justify => left,
+            Align::Center => left + (width - shown) / 2.0,
+            Align::Right => left + width - shown,
+        };
+        let below = height + IMAGE_GAP;
+        for line in &mut lines {
+            *line = place(line, line.top + below);
+        }
+        lines.insert(
+            0,
+            Line {
+                block,
+                range: 0..0,
+                top: 0.0,
+                height: below,
+                baseline: height,
+                left,
+                width,
+                align: format_align,
+                rtl: false,
+                glyphs: Vec::new(),
+                decorations: Vec::new(),
+                marker: None,
+                source_text: None,
+                image: Some(PlacedImage {
+                    data: std::sync::Arc::clone(&image.data),
+                    x,
+                    top: 0.0,
+                    width: shown,
+                    height,
+                }),
+            },
+        );
+    }
+
     ParagraphLines {
         space_before: format.space_before.unwrap_or(style.space_before),
-        space_after: format.space_after.unwrap_or(style.space_after),
+        // List items sit close together, as in every word processor.
+        space_after: format.space_after.unwrap_or(if format.list.is_some() {
+            LIST_SPACING
+        } else {
+            style.space_after
+        }),
         keep_with_next: paragraph.style.is_heading(),
+        page_break: format.page_break_before,
         lines,
+        row: None,
     }
 }
 
@@ -405,6 +786,14 @@ fn place(line: &Line, y: f32) -> Line {
     for bar in &mut line.decorations {
         bar.top += dy;
     }
+    if let Some((_, glyphs)) = &mut line.marker {
+        for glyph in glyphs {
+            glyph.y += dy;
+        }
+    }
+    if let Some(image) = &mut line.image {
+        image.top += dy;
+    }
     line
 }
 
@@ -417,6 +806,31 @@ fn paginate(page: PageSetup, paragraphs: Vec<ParagraphLines>) -> Layout {
 
     for (index, paragraph) in paragraphs.iter().enumerate() {
         let lines = &paragraph.lines;
+        let started = pages.last().is_some_and(|p| !p.lines.is_empty());
+        if paragraph.page_break && started {
+            pages.push(PageLayout::default());
+            y = 0.0;
+        }
+        // A table row moves to the next page as a whole.
+        if let Some((row_height, rules)) = &paragraph.row {
+            if y > 0.0 && y + row_height > height + 0.01 {
+                pages.push(PageLayout::default());
+                y = 0.0;
+            }
+            let cursor = top + y;
+            if let Some(page) = pages.last_mut() {
+                for line in lines {
+                    page.lines.push(place(line, cursor + line.top));
+                }
+                for rule in rules {
+                    let mut rule = rule.clone();
+                    rule.top += cursor;
+                    page.rules.push(rule);
+                }
+            }
+            y += row_height + paragraph.space_after;
+            continue;
+        }
         let before = if y > 0.0 { paragraph.space_before } else { 0.0 };
 
         // Keep a heading with the start of the next paragraph.

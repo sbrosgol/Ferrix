@@ -212,6 +212,26 @@ pub(crate) struct PageSetupForm {
     pub(crate) orientation: Orientation,
     pub(crate) margins: MarginChoice,
     pub(crate) title: String,
+    pub(crate) header: String,
+    pub(crate) footer: String,
+    /// Leave header and footer off the first page.
+    pub(crate) skip_first: bool,
+    /// Save as PDF/A-3b.
+    pub(crate) archival: bool,
+}
+
+/// The find and replace bar of a written document.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FindState {
+    pub(crate) query: String,
+    pub(crate) replacement: String,
+    pub(crate) match_case: bool,
+    /// Typing goes to the bar's fields rather than the document.
+    pub(crate) focused: bool,
+}
+
+pub(crate) fn find_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("find")
 }
 
 /// Fonts loaded on a background thread, handed over once.
@@ -292,6 +312,10 @@ pub struct App {
     pub(crate) page_setup: Option<PageSetupForm>,
     /// Shown once the document being opened is open.
     open_notice: Option<String>,
+    /// The find and replace bar, while open.
+    pub(crate) find: Option<FindState>,
+    /// Formatted copy and paste for written documents.
+    clipboard: crate::clipboard::RichClipboard,
 }
 
 #[derive(Debug, Clone)]
@@ -365,7 +389,20 @@ pub enum Message {
     PageSetupOrientation(Orientation),
     PageSetupMargins(MarginChoice),
     PageSetupTitle(String),
+    PageSetupHeader(String),
+    PageSetupFooter(String),
+    PageSetupSkipFirst(bool),
+    PageSetupArchival(bool),
     ApplyPageSetup,
+    FindOpen,
+    FindQuery(String),
+    FindReplacement(String),
+    FindCase(bool),
+    FindNext,
+    FindPrevious,
+    ReplaceOne,
+    ReplaceAll,
+    FindClose,
 }
 
 pub(crate) fn page_scroll_id() -> iced::widget::Id {
@@ -415,6 +452,8 @@ impl App {
             writer_journal: None,
             page_setup: None,
             open_notice: None,
+            find: None,
+            clipboard: crate::clipboard::RichClipboard::default(),
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -796,6 +835,9 @@ impl App {
                 }
             }
             Message::Escape => {
+                if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
+                    self.find = None;
+                }
                 self.confirm = None;
                 self.new_form = None;
                 self.page_setup = None;
@@ -974,6 +1016,18 @@ impl App {
                         },
                         margins: MarginChoice::nearest(page.margins.left),
                         title: doc.title.clone().unwrap_or_default(),
+                        header: doc
+                            .header
+                            .as_ref()
+                            .map(|t| t.text.clone())
+                            .unwrap_or_default(),
+                        footer: doc
+                            .footer
+                            .as_ref()
+                            .map(|t| t.text.clone())
+                            .unwrap_or_default(),
+                        skip_first: doc.header.iter().chain(&doc.footer).any(|t| t.skip_first),
+                        archival: doc.archival,
                     });
                 }
             }
@@ -997,6 +1051,93 @@ impl App {
                     form.title = title.chars().take(200).collect();
                 }
             }
+            Message::PageSetupHeader(text) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.header = text.chars().take(200).collect();
+                }
+            }
+            Message::PageSetupFooter(text) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.footer = text.chars().take(200).collect();
+                }
+            }
+            Message::PageSetupSkipFirst(skip) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.skip_first = skip;
+                }
+            }
+            Message::PageSetupArchival(on) => {
+                if let Some(form) = &mut self.page_setup {
+                    form.archival = on;
+                }
+            }
+            Message::FindOpen => {
+                let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) else {
+                    return Task::none();
+                };
+                // Start from the selected text, if it is a short single line.
+                let selected = w.editor.selected_text();
+                let mut find = self.find.take().unwrap_or_default();
+                if !selected.is_empty() && selected.len() <= 200 && !selected.contains('\n') {
+                    find.query = selected;
+                }
+                find.focused = true;
+                self.find = Some(find);
+                return Task::batch([
+                    operation::focus(find_input_id()),
+                    operation::select_all(find_input_id()),
+                ]);
+            }
+            Message::FindQuery(query) => {
+                if let Some(find) = &mut self.find {
+                    find.query = query.chars().take(200).collect();
+                    find.focused = true;
+                }
+            }
+            Message::FindReplacement(text) => {
+                if let Some(find) = &mut self.find {
+                    find.replacement = text.chars().take(200).collect();
+                    find.focused = true;
+                }
+            }
+            Message::FindCase(on) => {
+                if let Some(find) = &mut self.find {
+                    find.match_case = on;
+                }
+            }
+            Message::FindNext
+            | Message::FindPrevious
+            | Message::ReplaceOne
+            | Message::ReplaceAll => {
+                let (Some(find), true) = (self.find.clone(), self.can_edit()) else {
+                    return Task::none();
+                };
+                let Some(w) = &mut self.writer else {
+                    return Task::none();
+                };
+                let e = &mut w.editor;
+                let found = match message {
+                    Message::FindPrevious => e.find_next(&find.query, find.match_case, true),
+                    Message::ReplaceOne => {
+                        e.replace(&find.query, &find.replacement, find.match_case)
+                    }
+                    Message::ReplaceAll => {
+                        let count = e.replace_all(&find.query, &find.replacement, find.match_case);
+                        self.notice = Some(match count {
+                            0 => "Nothing to replace".to_owned(),
+                            1 => "Replaced 1 match".to_owned(),
+                            n => format!("Replaced {n} matches"),
+                        });
+                        true
+                    }
+                    _ => e.find_next(&find.query, find.match_case, false),
+                };
+                if !found && !find.query.is_empty() {
+                    self.notice = Some(format!("“{}” not found", find.query));
+                }
+                return self.after_write(true);
+            }
+            Message::FindClose => self.find = None,
             Message::ApplyPageSetup => {
                 let (Some(form), Some(w)) = (self.page_setup.take(), self.writer.as_mut()) else {
                     return Task::none();
@@ -1010,6 +1151,16 @@ impl App {
                 settings.page.margins = ferrix_compose::Margins::uniform(form.margins.points());
                 let title = form.title.trim();
                 settings.title = (!title.is_empty()).then(|| title.to_owned());
+                let page_text = |text: &str| {
+                    let text = text.trim();
+                    (!text.is_empty()).then(|| ferrix_compose::PageText {
+                        skip_first: form.skip_first,
+                        ..ferrix_compose::PageText::new(text)
+                    })
+                };
+                settings.header = page_text(&form.header);
+                settings.footer = page_text(&form.footer);
+                settings.archival = form.archival;
                 if settings != w.editor.document().settings() {
                     w.editor.set_settings(settings);
                     return Task::batch([self.after_write(false), self.render()]);
@@ -1312,6 +1463,7 @@ impl App {
             journal.discard();
         }
         self.page_setup = None;
+        self.find = None;
         if let Some(writer) = self.writer.take() {
             self.fonts = Some(writer.editor.into_fonts());
         }
@@ -1454,11 +1606,33 @@ impl App {
             } => {
                 w.press(page, x, y, clicks, extend);
                 follow = false;
+                if let Some(find) = &mut self.find {
+                    find.focused = false;
+                }
             }
             WriteAction::Drag { page, x, y } => e.drag(page, x, y),
-            WriteAction::Key(KeyCommand::Paste) => {
-                return iced::clipboard::read()
-                    .map(|text| Message::Write(WriteAction::Pasted(text)));
+            WriteAction::Key(KeyCommand::Paste) => match self.clipboard.paste() {
+                Some(crate::clipboard::Pasted::Formatted(fragment)) => e.paste_fragment(&fragment),
+                Some(crate::clipboard::Pasted::Text(text)) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(KeyCommand::PastePlain) => match self.clipboard.paste_plain() {
+                Some(text) => e.paste(&text),
+                None => {
+                    return iced::clipboard::read()
+                        .map(|text| Message::Write(WriteAction::Pasted(text)));
+                }
+            },
+            WriteAction::Key(command @ (KeyCommand::Copy | KeyCommand::Cut)) => {
+                let fragment = e.copy_fragment();
+                if let Some(text) = w.key(command)
+                    && !fragment.is_some_and(|f| self.clipboard.copy(f))
+                {
+                    task = iced::clipboard::write(text);
+                }
             }
             WriteAction::Key(command) => {
                 if let Some(text) = w.key(command) {
@@ -1475,6 +1649,41 @@ impl App {
             WriteAction::Align(align) => e.set_align(align),
             WriteAction::Spacing(spacing) => e.set_line_spacing(spacing.0),
             WriteAction::ClearFormatting => e.clear_formatting(),
+            WriteAction::List(kind) => e.toggle_list(kind),
+            WriteAction::PageBreak => e.page_break(),
+            WriteAction::InsertImage => {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Insert Picture")
+                    .add_filter("Pictures", &["png", "jpg", "jpeg"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        let path = file.path().to_path_buf();
+                        Some(
+                            blocking(move || {
+                                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                                ferrix_compose::ImageData::from_bytes(bytes)
+                                    .map(Box::new)
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await,
+                        )
+                    },
+                    |result| match result {
+                        Some(result) => Message::Write(WriteAction::ImageLoaded(result)),
+                        None => Message::DialogClosed,
+                    },
+                );
+            }
+            WriteAction::ImageLoaded(Ok(data)) => e.insert_image(*data),
+            WriteAction::Table(crate::writer::TableChoice::Insert(rows, cols)) => {
+                e.insert_table(rows, cols);
+            }
+            WriteAction::Table(crate::writer::TableChoice::Op(op)) => e.table_op(op),
+            WriteAction::ImageLoaded(Err(error)) => {
+                self.error = Some(format!("Couldn’t insert the picture: {error}"));
+                return Task::none();
+            }
         }
         if self
             .writer
@@ -1973,6 +2182,7 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "o" => Some(Message::OpenDialog),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
+                "f" => Some(Message::FindOpen),
                 "s" if shift => Some(Message::SaveAs),
                 "s" => Some(Message::Save),
                 "z" if shift => Some(Message::Redo),

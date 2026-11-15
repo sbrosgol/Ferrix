@@ -4,7 +4,8 @@
 use std::{fmt, path::PathBuf};
 
 use ferrix_compose::{
-    Align, Clicks, Color, Editor, Motion, PageLayout, PageSetup, ParagraphStyle, Rasterizer, Toggle,
+    Align, Clicks, Color, Editor, ImageData, ListKind, Motion, PageLayout, PageSetup,
+    ParagraphStyle, Rasterizer, Toggle,
 };
 use ferrix_io::FileStamp;
 use iced::keyboard;
@@ -153,6 +154,8 @@ impl Writer {
         match command {
             KeyCommand::Insert(text) => e.type_text(&text),
             KeyCommand::Enter => e.enter(),
+            KeyCommand::PageBreak => e.page_break(),
+            KeyCommand::Tab { back } => e.tab(back),
             KeyCommand::Backspace { word } => e.backspace(word),
             KeyCommand::Delete { word } => e.delete_forward(word),
             KeyCommand::Move { motion, extend } => e.move_caret(motion, extend),
@@ -166,7 +169,7 @@ impl Writer {
                 let text = e.cut();
                 return (!text.is_empty()).then_some(text);
             }
-            KeyCommand::Paste => {}
+            KeyCommand::Paste | KeyCommand::PastePlain => {}
         }
         None
     }
@@ -181,13 +184,28 @@ impl Writer {
 pub enum KeyCommand {
     Insert(String),
     Enter,
-    Backspace { word: bool },
-    Delete { word: bool },
-    Move { motion: Motion, extend: bool },
+    /// Starts a new page (⌘/Ctrl+Enter).
+    PageBreak,
+    /// Nests a list item (or types a tab); `back` un-nests (Shift+Tab).
+    Tab {
+        back: bool,
+    },
+    Backspace {
+        word: bool,
+    },
+    Delete {
+        word: bool,
+    },
+    Move {
+        motion: Motion,
+        extend: bool,
+    },
     SelectAll,
     Copy,
     Cut,
     Paste,
+    /// Paste without formatting (⇧⌘V).
+    PastePlain,
     Toggle(Toggle),
 }
 
@@ -217,10 +235,11 @@ pub(crate) fn key_command(
     let go = |motion| Some(KeyCommand::Move { motion, extend });
 
     match key.as_ref() {
+        Key::Named(Named::Enter) if command => Some(KeyCommand::PageBreak),
         Key::Named(Named::Enter) => Some(KeyCommand::Enter),
         Key::Named(Named::Backspace) => Some(KeyCommand::Backspace { word }),
         Key::Named(Named::Delete) => Some(KeyCommand::Delete { word }),
-        Key::Named(Named::Tab) if !command => Some(KeyCommand::Insert("\t".into())),
+        Key::Named(Named::Tab) if !command => Some(KeyCommand::Tab { back: extend }),
         Key::Named(Named::ArrowLeft) if line_jump => go(Motion::LineStart),
         Key::Named(Named::ArrowLeft) if word => go(Motion::WordLeft),
         Key::Named(Named::ArrowLeft) => go(Motion::Left),
@@ -241,6 +260,7 @@ pub(crate) fn key_command(
             Some('a') => Some(KeyCommand::SelectAll),
             Some('c') => Some(KeyCommand::Copy),
             Some('x') => Some(KeyCommand::Cut),
+            Some('v') if modifiers.shift() => Some(KeyCommand::PastePlain),
             Some('v') if !modifiers.alt() => Some(KeyCommand::Paste),
             Some('b') => Some(KeyCommand::Toggle(Toggle::Bold)),
             Some('i') => Some(KeyCommand::Toggle(Toggle::Italic)),
@@ -455,7 +475,59 @@ pub enum Action {
     Align(Align),
     Spacing(SpacingChoice),
     ClearFormatting,
+    List(ListKind),
+    PageBreak,
+    /// Opens a file dialog for a picture.
+    InsertImage,
+    ImageLoaded(Result<Box<ImageData>, String>),
+    Table(TableChoice),
 }
+
+/// Entries of the Table menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TableChoice {
+    Insert(u32, u32),
+    Op(ferrix_compose::TableOp),
+}
+
+impl fmt::Display for TableChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ferrix_compose::TableOp as Op;
+        match self {
+            Self::Insert(rows, cols) => write!(f, "Insert {cols} × {rows} table"),
+            Self::Op(op) => f.write_str(match op {
+                Op::RowAbove => "Insert row above",
+                Op::RowBelow => "Insert row below",
+                Op::ColumnLeft => "Insert column left",
+                Op::ColumnRight => "Insert column right",
+                Op::DeleteRow => "Delete row",
+                Op::DeleteColumn => "Delete column",
+                Op::DeleteTable => "Delete table",
+            }),
+        }
+    }
+}
+
+/// The Table menu outside a table, and inside one.
+pub(crate) const TABLE_INSERTS: [TableChoice; 5] = [
+    TableChoice::Insert(2, 2),
+    TableChoice::Insert(3, 3),
+    TableChoice::Insert(4, 3),
+    TableChoice::Insert(5, 4),
+    TableChoice::Insert(8, 5),
+];
+pub(crate) const TABLE_EDITS: [TableChoice; 7] = {
+    use ferrix_compose::TableOp as Op;
+    [
+        TableChoice::Op(Op::RowAbove),
+        TableChoice::Op(Op::RowBelow),
+        TableChoice::Op(Op::ColumnLeft),
+        TableChoice::Op(Op::ColumnRight),
+        TableChoice::Op(Op::DeleteRow),
+        TableChoice::Op(Op::DeleteColumn),
+        TableChoice::Op(Op::DeleteTable),
+    ]
+};
 
 #[cfg(test)]
 mod tests {
@@ -519,7 +591,17 @@ mod tests {
             press(Key::Character("v".into()), command, Some("v")),
             Some(KeyCommand::Paste)
         );
-        // Save and undo belong to the app.
+        assert_eq!(
+            press(Key::Named(Named::Enter), command, None),
+            Some(KeyCommand::PageBreak)
+        );
+        assert_eq!(
+            press(Key::Named(Named::Tab), Modifiers::SHIFT, None),
+            Some(KeyCommand::Tab { back: true })
+        );
+        // Save, undo and find belong to the app.
+        assert_eq!(press(Key::Character("f".into()), command, Some("f")), None);
+        // (and so do these)
         assert_eq!(press(Key::Character("s".into()), command, Some("s")), None);
         assert_eq!(press(Key::Character("z".into()), command, Some("z")), None);
         assert_eq!(
