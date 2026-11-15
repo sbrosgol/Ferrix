@@ -1,6 +1,6 @@
-# ADR-0002: UI toolkit
+# ADR-0002: UI toolkit — iced
 
-- Status: **Proposed** — decided after a 2-week spike (roadmap M0)
+- Status: **Accepted**
 - Date: 2026-11-15
 
 ## Context
@@ -10,7 +10,8 @@ Requirements, in priority order:
 2. **Accessibility** (screen readers) for chrome *and* document content — a hard requirement for a
    PDF reader (education/government users).
 3. Native feel: menus (macOS global menu), file dialogs, drag & drop, IME, HiDPI, multi-window.
-4. Productivity for contributors; stable, permissively usable license; active maintenance.
+4. Productivity for contributors; a permissive license with no commercial tiers, so the project
+   stays `MIT OR Apache-2.0` end to end; active maintenance.
 
 ## Candidates
 
@@ -20,21 +21,26 @@ Requirements, in priority order:
 | Accessibility | **not upstream** (forks only) | AccessKit built-in | in progress | best (browser a11y) | AccessKit |
 | Native look | custom theme | Fluent/Cupertino/Material styles | custom | web | tool-like |
 | License | MIT | GPLv3 / royalty-free / commercial | Apache-2.0 | MIT/Apache | MIT/Apache |
-| Risk | a11y gap | DSL + license nuance | API churn, docs | two stacks, perf | polish |
+| Risk | a11y gap | DSL + license tiers | API churn, docs | two stacks, perf | polish |
 
-## Proposed decision
-Spike **Slint** and **iced** on the same scope: canvas with tiled scrolling of a 500-page PDF,
-text selection overlay, toolbar + sidebar, VoiceOver/NVDA reading toolbar and page text.
+## Decision
+Use **iced** (MIT) for `ferrix-app`, without a comparative trial.
 
-- Lean: **Slint**, because accessibility is a hard requirement and upstream iced lacks it.
-- Pick iced if the Slint canvas integration cannot hit frame-time targets or custom a11y nodes for
-  page text are not achievable.
+- Permissive and single-licensed, matching the project; no commercial license tiers.
+- Elm-style architecture fits our design: `ferrix-core` owns state and commands, the UI maps
+  messages to intents.
+- wgpu-native with a `shader` widget, giving us full control of the tiled document canvas.
+- Proven in a full desktop environment (COSMIC), on macOS, Windows and Linux.
 
-Regardless of the outcome, the toolkit lives only in `ferrix-app`; `ferrix-core` exposes state +
-intents, so the cost of changing toolkits later is bounded to the presentation layer.
-
-## Exit criteria for the spike
-- p95 frame time < 8 ms while flinging through pages on a 2020-era laptop.
-- Screen reader can read toolbar controls and the selected page's text in reading order.
-- IME input works in a form-field text box.
-- Written comparison appended to this ADR, status → Accepted.
+## Consequences
+- **Accessibility is the main risk.** Mitigations, in order:
+  1. Track and contribute to upstream AccessKit integration in iced.
+  2. If it isn't upstream by M3 (public beta), carry an AccessKit-enabled iced fork
+     (forks already exist) behind a workspace `[patch]`, rebased each iced release.
+  3. The document canvas exposes its own AccessKit subtree from `ferrix-text` regardless of
+     toolkit, so that work is never wasted.
+  A screen-reader audit remains an exit criterion for 1.0.
+- Native menus and dialogs come from separate crates (`rfd` for file dialogs; `muda` for menus
+  if needed), since iced does not provide them.
+- iced makes breaking releases; we pin a minor version and upgrade deliberately.
+- The toolkit stays confined to `ferrix-app`, so changing it later only touches that crate.

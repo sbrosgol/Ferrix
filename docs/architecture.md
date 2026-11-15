@@ -74,7 +74,7 @@ No network access is required for any core feature.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  Presentation        ferrix-app (UI toolkit, ADR-0002)                     │
+│  Presentation        ferrix-app (iced, ADR-0002)                          │
 │                      windows/tabs, toolbars, sidebars, dialogs,           │
 │                      DocumentCanvas widget (GPU textured tiles + overlays)│
 ├──────────────────────────────────────────────────────────────────────────┤
@@ -112,6 +112,7 @@ ferrix/
 │  ├─ ferrix-text/            # text model, selection, search, extraction
 │  ├─ ferrix-core/            # sessions, commands, undo, tools, view state, events
 │  ├─ ferrix-io/              # file I/O, atomic save, autosave journal, recovery
+│  ├─ ferrix-store/           # settings.json + SQLite state.db (ADR-0005)
 │  ├─ ferrix-app/             # bin: desktop UI
 │  └─ ferrix-cli/             # bin: headless ops (render, merge, split, annotate, diff)
 ├─ xtask/                     # cargo xtask: fetch-pdfium, corpus, bundle, release
@@ -290,7 +291,8 @@ Communication via channels (`tokio::sync::mpsc`, `watch` for view state). Every 
   code and a localized message; never surface raw engine strings.
 - **Logging/diagnostics:** `tracing` with a rolling local file; "Export diagnostics" bundles logs
   without document contents. No telemetry by default; any future telemetry is opt-in.
-- **Config:** TOML in the platform config dir, versioned with migrations.
+- **Config & state:** preferences in `settings.json`, per-document state and history in SQLite
+  (`state.db`) behind a `ferrix-store` crate — see [ADR-0005](adr/0005-settings-and-state-storage.md) (proposed).
 - **i18n:** Fluent (`fluent-bundle`) for UI strings; ICU4X for segmentation/collation in search.
 - **Accessibility:** AccessKit for UI chrome and the document canvas subtree; WCAG 2.2 AA
   contrast; every action reachable by keyboard; high-contrast & reduced-motion modes.
@@ -350,7 +352,7 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 ## 11. Open questions
 
 1. ~~Project license~~ — **decided: `MIT OR Apache-2.0`**.
-2. **UI toolkit** — ADR-0002 is *Proposed* pending a 2-week spike.
+2. ~~UI toolkit~~ — **decided: iced** (ADR-0002); accessibility tracked as the top risk.
 3. Minimum OS versions (proposal: macOS 12+, Windows 10 22H2+, glibc 2.31+ / Flatpak runtime).
 4. Do we need XFA dynamic forms at all? (Proposal: no; show a clear notice.)
 5. Tabs vs. one window per document vs. both (proposal: tabs + "move to new window").

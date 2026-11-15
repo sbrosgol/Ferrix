@@ -10,10 +10,10 @@ demo. Exit criteria are the definition of done, not the feature list.
 - `ferrix-types`, `ferrix-engine` trait + DTOs, `ferrix-engine-pdfium` (open, page info, render, text).
 - `ferrix-cli render <file> --page N --dpi D -o out.png` and `ferrix-cli text`.
 - Visual-regression harness running on the corpus.
-- **UI toolkit spike** (ADR-0002) → decision.
+- `ferrix-app` skeleton on iced (ADR-0002): window, open file, page navigation; built on all platforms in CI.
 - Repo hygiene: LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY.md, issue templates.
 
-**Exit:** CI green on 3 OSes; CLI renders 95% of corpus without error; ADR-0002 accepted.
+**Exit:** CI green on 3 OSes; CLI renders 95% of corpus without error; app skeleton runs on all 3 OSes.
 
 ## M1 — Viewer MVP (weeks 5–12) → `0.1`
 - App shell: open (dialog, drag & drop, file association, recent files), tabs.
@@ -23,6 +23,7 @@ demo. Exit criteria are the definition of done, not the feature list.
 - Text selection + copy, find-in-document with streaming results.
 - Password-protected PDFs, light/dark/system theme, page-inversion reading mode.
 - Keyboard navigation and basic a11y for chrome.
+- `ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom.
 
 **Exit:** first paint < 300 ms on 1,000-page doc; 60+ fps scroll; zero crashes on corpus in a
 1-hour soak; screen reader can operate all chrome.
@@ -67,7 +68,7 @@ demo. Exit criteria are the definition of done, not the feature list.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| UI toolkit can't meet a11y + canvas needs | Med | High | M0 spike; toolkit confined to `ferrix-app` |
+| iced lacks upstream screen-reader support | High | High | Contribute upstream; AccessKit fork via `[patch]` by M3; canvas a11y tree is toolkit-independent; toolkit confined to `ferrix-app` |
 | PDFium API gaps for editing | Med | Med | `ferrix-pdf` object layer; contribute upstream |
 | File corruption on save | Low | Critical | Atomic + verified saves, journal, round-trip & fuzz tests |
 | Malicious PDFs | High | High | Out-of-process sandboxed engine, no JS, fuzzing |
