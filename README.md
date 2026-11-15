@@ -2,7 +2,21 @@
 
 A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, written in Rust.
 
-> Status: early development (milestone M0). The CLI works; there is no desktop app yet.
+> **Status: pre-alpha.** Not ready for everyday use. Milestone M1 (viewer MVP) is in progress;
+> see the [roadmap](docs/roadmap.md).
+
+What works today:
+- **Desktop app** (`ferrix-app`): open, view and navigate PDFs with zoom, fit width/page,
+  thumbnails and light/dark themes
+- **Page organization**: reorder, rotate, delete and insert pages from other files, with
+  undo/redo and safe incremental save / Save As
+- **Crash recovery**: unsaved edits are journaled and offered back after a crash
+- **Printing** through the operating system's print dialog
+- **Creating PDFs**: blank documents, or converted from images, Word, Excel, PowerPoint and
+  OpenDocument files (Office formats need LibreOffice installed)
+- **CLI** (`ferrix`): `info`, `render`, `text`, `outline` and `organize`
+
+Not yet: annotations, forms, text selection and search, and the sandboxed engine process.
 
 ## Goals
 - Fast, faithful rendering of real-world PDFs
@@ -21,6 +35,7 @@ A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, wr
 
 ```sh
 cargo xtask fetch-pdfium
+cargo run -p ferrix-app
 cargo run -p ferrix-cli -- info document.pdf
 cargo run -p ferrix-cli -- render document.pdf --pages 1-3 --dpi 144 -o out/
 ```
