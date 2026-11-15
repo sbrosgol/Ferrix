@@ -113,6 +113,8 @@ ferrix/
 │  ├─ ferrix-core/            # sessions, commands, undo, tools, view state, events
 │  ├─ ferrix-io/              # file I/O, atomic save, autosave journal, recovery
 │  ├─ ferrix-store/           # settings.json + SQLite state.db (ADR-0005)
+│  ├─ ferrix-print/           # native print dialogs per platform (ADR-0006)
+│  ├─ ferrix-convert/         # images + office documents → PDF via Word/LibreOffice (ADR-0007)
 │  ├─ ferrix-app/             # bin: desktop UI
 │  └─ ferrix-cli/             # bin: headless ops (render, merge, split, annotate, diff)
 ├─ xtask/                     # cargo xtask: fetch-pdfium, corpus, bundle, release

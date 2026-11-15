@@ -1,0 +1,16 @@
+[package]
+name = "ferrix-core"
+description = "Ferrix document model: editable page list, commands and undo history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrix-types.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

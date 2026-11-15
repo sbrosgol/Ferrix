@@ -1,0 +1,380 @@
+//! The open document as the UI sees it: its page list and history, selection and thumbnails.
+
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use ferrix_core::{Edit, EditError, History, PageEntry, PageKey, PageList};
+use ferrix_engine::DocInfo;
+use ferrix_io::FileStamp;
+use ferrix_pdf::LayoutPage;
+use ferrix_types::{DocId, Rotation, Size};
+
+use crate::render::{PageImage, PageRef};
+
+/// Thumbnails beyond this are not rendered until the virtualized sidebar lands in M1.
+pub(crate) const MAX_THUMBNAILS: usize = 500;
+
+/// Where a document's bytes come from.
+#[derive(Debug, Clone)]
+pub enum Origin {
+    File(PathBuf),
+    /// Created or converted in memory and not saved yet.
+    Untitled {
+        name: String,
+        /// Where Save As proposes to put it, e.g. beside the converted file.
+        suggested: Option<PathBuf>,
+        bytes: Arc<Vec<u8>>,
+    },
+}
+
+impl Origin {
+    pub(crate) fn untitled(name: String, suggested: Option<PathBuf>, bytes: Vec<u8>) -> Self {
+        Self::Untitled {
+            name,
+            suggested,
+            bytes: Arc::new(bytes),
+        }
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Untitled { .. } => None,
+        }
+    }
+
+    pub(crate) fn file_name(&self) -> String {
+        match self {
+            Self::File(path) => file_name(path),
+            Self::Untitled { name, .. } => name.clone(),
+        }
+    }
+
+    /// The location Save As starts from.
+    pub(crate) fn save_location(&self) -> Option<&Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Untitled { suggested, .. } => suggested.as_deref(),
+        }
+    }
+
+    /// Reads the bytes. Blocking for files.
+    pub(crate) fn read(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::File(path) => {
+                std::fs::read(path).map_err(|e| format!("{}: {e}", file_name(path)))
+            }
+            Self::Untitled { bytes, .. } => Ok(bytes.as_ref().clone()),
+        }
+    }
+}
+
+/// A PDF whose pages appear in the document. Index 0 is the document itself.
+#[derive(Debug)]
+pub(crate) struct Source {
+    pub(crate) origin: Origin,
+    pub(crate) doc: DocId,
+}
+
+#[derive(Debug)]
+pub(crate) struct Thumbnail {
+    pub(crate) rotation: Rotation,
+    pub(crate) image: PageImage,
+}
+
+/// How a thumbnail click changes the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Click {
+    Replace,
+    Toggle,
+    Extend,
+}
+
+#[derive(Debug)]
+pub(crate) struct Document {
+    pub(crate) origin: Origin,
+    /// File size and mtime when opened, to detect changes made by other apps.
+    pub(crate) stamp: Option<FileStamp>,
+    pub(crate) info: DocInfo,
+    pub(crate) sources: Vec<Source>,
+    pub(crate) pages: PageList,
+    pub(crate) history: History,
+    /// Index of the page on screen.
+    pub(crate) current: usize,
+    pub(crate) selection: BTreeSet<PageKey>,
+    anchor: Option<PageKey>,
+    /// Displayed size and zoom of the page on screen.
+    pub(crate) shown: Option<(Size, f32)>,
+    pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
+    pub(crate) thumbnail_busy: bool,
+}
+
+impl Document {
+    pub(crate) fn new(origin: Origin, info: DocInfo) -> Self {
+        let pages = PageList::identity(info.page_count);
+        let mut doc = Self {
+            stamp: origin.path().and_then(|p| FileStamp::of(p).ok()),
+            sources: vec![Source {
+                origin: origin.clone(),
+                doc: info.id,
+            }],
+            origin,
+            info,
+            pages,
+            history: History::new(),
+            current: 0,
+            selection: BTreeSet::new(),
+            anchor: None,
+            shown: None,
+            thumbnails: HashMap::new(),
+            thumbnail_busy: false,
+        };
+        if let Some(key) = doc.key_at(0) {
+            doc.select_only(key);
+        }
+        doc
+    }
+
+    pub(crate) fn name(&self) -> String {
+        self.info
+            .metadata
+            .title
+            .clone()
+            .unwrap_or_else(|| self.origin.file_name())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    /// Unsaved edits, or a document that was never saved at all.
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.history.is_dirty() || self.is_untitled()
+    }
+
+    pub(crate) fn is_untitled(&self) -> bool {
+        self.origin.path().is_none()
+    }
+
+    pub(crate) fn key_at(&self, index: usize) -> Option<PageKey> {
+        self.pages.get(index).map(|e| e.key)
+    }
+
+    pub(crate) fn page_ref(&self, entry: &PageEntry) -> Option<PageRef> {
+        let source = self.sources.get(entry.source.0 as usize)?;
+        Some(PageRef {
+            doc: source.doc,
+            page: entry.page,
+            rotation: entry.rotation,
+        })
+    }
+
+    pub(crate) fn current_page(&self) -> Option<PageRef> {
+        self.pages.get(self.current).and_then(|e| self.page_ref(e))
+    }
+
+    /// The pages an action applies to: the selection in document order, or the current page.
+    pub(crate) fn targets(&self) -> Vec<PageKey> {
+        let selected: Vec<PageKey> = self
+            .pages
+            .entries()
+            .iter()
+            .map(|e| e.key)
+            .filter(|k| self.selection.contains(k))
+            .collect();
+        if selected.is_empty() {
+            self.key_at(self.current).into_iter().collect()
+        } else {
+            selected
+        }
+    }
+
+    pub(crate) fn select_only(&mut self, key: PageKey) {
+        self.selection.clear();
+        self.selection.insert(key);
+        self.anchor = Some(key);
+    }
+
+    pub(crate) fn click(&mut self, key: PageKey, click: Click) {
+        match click {
+            Click::Replace => self.select_only(key),
+            Click::Toggle => {
+                if !self.selection.remove(&key) {
+                    self.selection.insert(key);
+                }
+                self.anchor = Some(key);
+            }
+            Click::Extend => {
+                let anchor = self
+                    .anchor
+                    .and_then(|a| self.pages.position(a))
+                    .unwrap_or(self.current);
+                let Some(end) = self.pages.position(key) else {
+                    return;
+                };
+                let (from, to) = (anchor.min(end), anchor.max(end));
+                self.selection = (from..=to).filter_map(|i| self.key_at(i)).collect();
+            }
+        }
+        if let Some(index) = self.pages.position(key) {
+            self.current = index;
+        }
+    }
+
+    /// Applies an edit through the undo history, keeping the current page in view.
+    pub(crate) fn edit(&mut self, edit: Edit, label: String) -> Result<(), EditError> {
+        let keep = self.key_at(self.current);
+        self.history.perform(&mut self.pages, edit, label)?;
+        self.after_change(keep);
+        Ok(())
+    }
+
+    pub(crate) fn undo(&mut self) -> Option<String> {
+        let keep = self.key_at(self.current);
+        let label = self.history.undo(&mut self.pages)?;
+        self.after_change(keep);
+        Some(label)
+    }
+
+    pub(crate) fn redo(&mut self) -> Option<String> {
+        let keep = self.key_at(self.current);
+        let label = self.history.redo(&mut self.pages)?;
+        self.after_change(keep);
+        Some(label)
+    }
+
+    fn after_change(&mut self, keep: Option<PageKey>) {
+        let last = self.len().saturating_sub(1);
+        self.current = keep
+            .and_then(|k| self.pages.position(k))
+            .unwrap_or(self.current.min(last));
+        let present: BTreeSet<PageKey> = self.pages.entries().iter().map(|e| e.key).collect();
+        self.selection.retain(|k| present.contains(k));
+        self.thumbnails.retain(|k, _| present.contains(k));
+        if self.selection.is_empty()
+            && let Some(key) = self.key_at(self.current)
+        {
+            self.select_only(key);
+        }
+    }
+
+    /// The next page whose thumbnail is missing or shows an outdated rotation.
+    pub(crate) fn next_thumbnail(&self) -> Option<(PageKey, PageRef)> {
+        self.pages
+            .entries()
+            .iter()
+            .take(MAX_THUMBNAILS)
+            .find(|e| {
+                self.thumbnails
+                    .get(&e.key)
+                    .is_none_or(|t| t.rotation != e.rotation)
+            })
+            .and_then(|e| Some((e.key, self.page_ref(e)?)))
+    }
+
+    /// The page list as written on save: source 0 is the document, `n` is `sources[n]`.
+    pub(crate) fn layout(&self) -> Vec<LayoutPage> {
+        self.pages
+            .entries()
+            .iter()
+            .map(|e| LayoutPage {
+                source: e.source.0 as usize,
+                page: e.page.0,
+                rotate_by: e.rotation,
+            })
+            .collect()
+    }
+
+    /// Inserted documents, in source order (matching [`Document::layout`]).
+    pub(crate) fn imports(&self) -> Vec<Origin> {
+        self.sources
+            .iter()
+            .skip(1)
+            .map(|s| s.origin.clone())
+            .collect()
+    }
+
+    pub(crate) fn engine_docs(&self) -> Vec<DocId> {
+        self.sources.iter().map(|s| s.doc).collect()
+    }
+}
+
+pub(crate) fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// "Page" or "3 Pages", for undo labels.
+pub(crate) fn pages_label(verb: &str, count: usize) -> String {
+    if count == 1 {
+        format!("{verb} Page")
+    } else {
+        format!("{verb} {count} Pages")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ferrix_core::Edit;
+    use ferrix_engine::DocMetadata;
+
+    use super::*;
+
+    fn document(pages: u32) -> Document {
+        Document::new(
+            Origin::File(PathBuf::from("/tmp/ferrix-test.pdf")),
+            DocInfo {
+                id: DocId(1),
+                page_count: pages,
+                pdf_version: None,
+                metadata: DocMetadata::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn shift_click_selects_a_range_from_the_anchor() {
+        let mut doc = document(6);
+        let (k1, k4) = (doc.key_at(1).expect("page"), doc.key_at(4).expect("page"));
+        doc.click(k1, Click::Replace);
+        doc.click(k4, Click::Extend);
+        assert_eq!(doc.targets().len(), 4);
+        assert_eq!(doc.current, 4);
+    }
+
+    #[test]
+    fn deleting_the_current_page_moves_to_a_neighbour() {
+        let mut doc = document(3);
+        let last = doc.key_at(2).expect("page");
+        doc.click(last, Click::Replace);
+        doc.edit(Edit::Remove { keys: vec![last] }, pages_label("Delete", 1))
+            .expect("applies");
+        assert_eq!(doc.current, 1);
+        assert_eq!(doc.targets(), [doc.key_at(1).expect("page")]);
+        assert!(doc.is_dirty());
+        doc.undo();
+        assert!(!doc.is_dirty());
+        assert_eq!(doc.len(), 3);
+    }
+
+    #[test]
+    fn layout_maps_sources_and_rotation() {
+        let mut doc = document(2);
+        let k0 = doc.key_at(0).expect("page");
+        doc.edit(
+            Edit::Rotate {
+                keys: vec![k0],
+                by: Rotation::R90,
+            },
+            pages_label("Rotate", 1),
+        )
+        .expect("applies");
+        let layout = doc.layout();
+        assert_eq!(layout[0].rotate_by, Rotation::R90);
+        assert_eq!((layout[1].source, layout[1].page), (0, 1));
+    }
+}

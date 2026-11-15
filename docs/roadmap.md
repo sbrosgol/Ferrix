@@ -29,10 +29,12 @@ demo. Exit criteria are the definition of done, not the feature list.
 1-hour soak; screen reader can operate all chrome.
 
 ## M2 — Annotate & save (weeks 13–20) → `0.2`
-- Command stack, undo/redo, autosave journal + crash recovery.
+- ~~Command stack, undo/redo~~ (done: `ferrix-core`); autosave journal + crash recovery.
+- ~~Page organizer: reorder, rotate, delete, insert from file~~ — delivered early (see ADR-0003
+  notes); remaining: drag-and-drop reordering, extract/split, blank pages.
 - Highlight / underline / strikeout / squiggly, sticky notes, free text, ink (pressure), shapes, stamps.
 - Annotation list panel; edit/delete existing annotations from other apps.
-- Incremental + atomic + verified save; Save As.
+- ~~Incremental + atomic + verified save; Save As~~ (done: `ferrix-pdf`, `ferrix-io`).
 - Engine moved out of process (ADR-0004) with crash recovery.
 
 **Exit:** round-trip tests pass for every annotation type in PDFium, hayro, Acrobat-equivalent check
@@ -42,11 +44,15 @@ demo. Exit criteria are the definition of done, not the feature list.
 - Page organizer: reorder, rotate, delete, insert blank/from file, extract, merge, split.
 - AcroForm fill (text, checkbox, radio, combo, list), tab order, flatten.
 - Visual signature (draw/type/image), reusable.
-- Printing via OS dialogs (render-to-printer path per platform).
+- ~~Printing via OS dialogs~~ — delivered early in `ferrix-print` (ADR-0006); remaining: print
+  the unsaved in-memory state once editing lands.
 - Sandboxing of engine hosts on all platforms; packaging + signing; Flathub, winget, Homebrew.
 - Localization infrastructure + 3 initial languages.
 
 **Exit:** signed installers on all platforms; public beta.
+
+## Delivered ahead of plan
+- New blank documents; images, Word, Excel, PowerPoint and OpenDocument files to PDF (ADR-0007).
 
 ## M4 — Pro features (weeks 29–40) → `1.0`
 - True redaction (search & redact patterns; purge content; full save).

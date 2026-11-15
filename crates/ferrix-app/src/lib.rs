@@ -1,13 +1,19 @@
 //! Ferrix desktop application (iced, ADR-0002).
 
 mod app;
+mod document;
 mod icon;
+#[cfg(windows)]
+mod print;
+mod render;
 pub mod theme;
+mod view;
 mod worker;
 
 use std::path::PathBuf;
 
 pub use app::{App, Message};
+pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
 use worker::EngineWorker;
@@ -31,6 +37,8 @@ pub fn application(
     .theme(App::theme)
     .subscription(App::subscription)
     .window(window_settings())
+    // Closing asks about unsaved changes first; the app exits itself when it may.
+    .exit_on_close_request(false)
     .antialiasing(true)
 }
 

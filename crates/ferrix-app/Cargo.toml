@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
 
 [lib]
@@ -18,8 +19,13 @@ path = "src/main.rs"
 name = "screenshot"
 
 [dependencies]
+ferrix-convert.workspace = true
+ferrix-core.workspace = true
 ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
+ferrix-io.workspace = true
+ferrix-pdf.workspace = true
+ferrix-print.workspace = true
 ferrix-types.workspace = true
 iced.workspace = true
 rfd.workspace = true

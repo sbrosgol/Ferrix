@@ -87,11 +87,18 @@ impl PdfEngine for PdfiumEngine {
         password: Option<&Secret>,
     ) -> Result<DocInfo, EngineError> {
         let password = password.map(Secret::expose);
-        let document = match source {
-            DocSource::Path(path) => self.pdfium.load_pdf_from_file(&path, password),
-            DocSource::Bytes(bytes) => self.pdfium.load_pdf_from_byte_vec(bytes, password),
-        }
-        .map_err(open_error)?;
+        // Read files into memory rather than keeping them open: an open handle would block
+        // (Windows) or go stale (Unix) when a save atomically replaces the file.
+        let bytes = match source {
+            DocSource::Path(path) => {
+                std::fs::read(&path).map_err(|e| EngineError::Io(e.to_string()))?
+            }
+            DocSource::Bytes(bytes) => bytes,
+        };
+        let document = self
+            .pdfium
+            .load_pdf_from_byte_vec(bytes, password)
+            .map_err(open_error)?;
 
         let id = DocId(self.next_id);
         self.next_id += 1;

@@ -62,3 +62,29 @@ impl std::fmt::Display for EngineUnavailable {
         f.write_str("the PDF engine is not available")
     }
 }
+
+/// Collapses an engine call's two failure modes into a message for the UI.
+pub(crate) fn flatten<T>(
+    result: Result<Result<T, ferrix_engine::EngineError>, EngineUnavailable>,
+) -> Result<T, String> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Runs blocking work (file I/O, PDF writing) on its own thread so the UI never waits on it.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = oneshot::channel();
+    thread::Builder::new()
+        .name("ferrix-io".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await
+        .unwrap_or_else(|_| Err("background work stopped unexpectedly".into()))
+}

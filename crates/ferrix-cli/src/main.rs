@@ -63,6 +63,20 @@ enum Command {
         #[command(flatten)]
         doc: DocArgs,
     },
+    /// Write a copy with pages reordered, removed or rotated, e.g. `--pages 3,1-2`.
+    Organize {
+        #[command(flatten)]
+        doc: DocArgs,
+        /// The pages to keep, in output order.
+        #[arg(short, long)]
+        pages: String,
+        /// Extra clockwise rotation for every kept page (multiple of 90).
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        rotate: i32,
+        /// Output file; the input is never modified.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -97,6 +111,16 @@ fn main() -> Result<()> {
         }
         Command::Text { doc, pages } => text(&mut engine, &doc, pages.as_deref()),
         Command::Outline { doc } => outline(&mut engine, &doc),
+        Command::Organize {
+            doc,
+            pages,
+            rotate,
+            output,
+        } => {
+            let rotation = Rotation::from_degrees(rotate)
+                .with_context(|| format!("--rotate must be a multiple of 90, got {rotate}"))?;
+            organize(&mut engine, &doc, &pages, rotation, &output)
+        }
     }
 }
 
@@ -246,6 +270,50 @@ fn outline(engine: &mut impl PdfEngine, args: &DocArgs) -> Result<()> {
     }
     let doc = open(engine, args)?;
     print_items(&engine.outline(doc.id)?, 0);
+    Ok(())
+}
+
+fn organize(
+    engine: &mut impl PdfEngine,
+    args: &DocArgs,
+    pages: &str,
+    rotation: Rotation,
+    output: &Path,
+) -> Result<()> {
+    let doc = open(engine, args)?;
+    let layout: Vec<_> = parse_pages(pages, doc.page_count)?
+        .into_iter()
+        .map(|page| ferrix_pdf::LayoutPage {
+            source: 0,
+            page: page.0,
+            rotate_by: rotation,
+        })
+        .collect();
+    let bytes = std::fs::read(&args.file)
+        .with_context(|| format!("cannot read {}", args.file.display()))?;
+    let source = ferrix_pdf::Source {
+        bytes: &bytes,
+        password: args.password.as_deref(),
+    };
+    let out = ferrix_pdf::write_page_layout(source, &[], &layout)?;
+
+    // Check the result with the rendering engine before writing it anywhere.
+    let check = engine.open(DocSource::Bytes(out.clone()), None)?;
+    if check.page_count as usize != layout.len() {
+        bail!(
+            "verification failed: wrote {} pages, expected {}",
+            check.page_count,
+            layout.len()
+        );
+    }
+    ferrix_io::write_atomic(output, &out)
+        .with_context(|| format!("cannot write {}", output.display()))?;
+    eprintln!(
+        "{} pages → {} ({} bytes)",
+        layout.len(),
+        output.display(),
+        out.len()
+    );
     Ok(())
 }
 

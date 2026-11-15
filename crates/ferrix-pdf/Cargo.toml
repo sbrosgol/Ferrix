@@ -1,0 +1,21 @@
+[package]
+name = "ferrix-pdf"
+description = "Object-level PDF writing for Ferrix: structural edits as incremental updates"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrix-types.workspace = true
+lopdf.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ferrix-engine.workspace = true
+ferrix-engine-pdfium.workspace = true
+
+[lints]
+workspace = true

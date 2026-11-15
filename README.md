@@ -7,6 +7,7 @@ A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, wr
 ## Goals
 - Fast, faithful rendering of real-world PDFs
 - Everyday editing: annotate, fill & sign forms, organize pages, redact, OCR
+- Create PDFs: blank documents, or from Word, Excel, PowerPoint and image files
 - Never corrupt your files; recover from crashes
 - Safe with untrusted documents: no PDF JavaScript, sandboxed engine
 - Accessible, keyboard-friendly, localizable; no telemetry by default

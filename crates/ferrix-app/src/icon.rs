@@ -11,6 +11,7 @@ const STROKE_WIDTH: &str = "1.75";
 pub(crate) enum Icon {
     PanelLeft,
     FolderOpen,
+    Printer,
     ChevronLeft,
     ChevronRight,
     ZoomIn,
@@ -21,6 +22,16 @@ pub(crate) enum Icon {
     Moon,
     FileText,
     Alert,
+    Save,
+    Undo,
+    Redo,
+    RotateLeft,
+    RotateRight,
+    MoveUp,
+    MoveDown,
+    Delete,
+    InsertPages,
+    New,
 }
 
 macro_rules! icons {
@@ -44,6 +55,7 @@ macro_rules! icons {
 icons! {
     PanelLeft => "panel-left",
     FolderOpen => "folder-open",
+    Printer => "printer",
     ChevronLeft => "chevron-left",
     ChevronRight => "chevron-right",
     ZoomIn => "zoom-in",
@@ -54,6 +66,16 @@ icons! {
     Moon => "moon",
     FileText => "file-text",
     Alert => "circle-alert",
+    Save => "save",
+    Undo => "undo-2",
+    Redo => "redo-2",
+    RotateLeft => "rotate-ccw",
+    RotateRight => "rotate-cw",
+    MoveUp => "arrow-up",
+    MoveDown => "arrow-down",
+    Delete => "trash-2",
+    InsertPages => "file-plus",
+    New => "file-new",
 }
 
 fn load(source: &str) -> svg::Handle {
