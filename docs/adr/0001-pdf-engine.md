@@ -1,6 +1,6 @@
 # ADR-0001: PDF engine — PDFium behind an engine trait, pure-Rust track in parallel
 
-- Status: **Accepted (pending license confirmation)**
+- Status: **Accepted** (license confirmed: MIT OR Apache-2.0)
 - Date: 2026-11-15
 
 ## Context

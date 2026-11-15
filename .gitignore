@@ -1,0 +1,7 @@
+/target
+/vendor/
+/tests/corpus/files/
+/out/
+.idea/
+.vscode/
+.DS_Store

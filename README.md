@@ -2,7 +2,7 @@
 
 A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, written in Rust.
 
-> Status: design phase. Nothing to install yet.
+> Status: early development (milestone M0). The CLI works; there is no desktop app yet.
 
 ## Goals
 - Fast, faithful rendering of real-world PDFs
@@ -15,3 +15,17 @@ A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, wr
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
 - [Architecture Decision Records](docs/adr/)
+
+## Building
+
+```sh
+cargo xtask fetch-pdfium
+cargo run -p ferrix-cli -- info document.pdf
+cargo run -p ferrix-cli -- render document.pdf --pages 1-3 --dpi 144 -o out/
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

@@ -21,7 +21,8 @@ ADRs in [`docs/adr/`](adr/); the delivery plan is in [`roadmap.md`](roadmap.md).
    or execute code.
 5. **Accessible and international.** Screen-reader support, full keyboard operation, RTL/CJK
    text, localizable UI.
-6. **Cross-platform, native-feeling.** macOS, Windows, Linux as first-class targets.
+6. **Cross-platform, native-feeling.** macOS, Windows and Linux are equally important: every
+   platform is tier 1 and gates every merge in CI.
 
 ### Non-goals (for 1.0)
 - PDF JavaScript execution (forms work without it; scripts are ignored, see §9).
@@ -339,7 +340,8 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 - **macOS:** universal `.app` in signed, notarized `.dmg`; Homebrew cask.
 - **Windows:** MSIX + MSI, Authenticode signed; winget.
 - **Linux:** Flatpak (Flathub) primary, AppImage secondary, `.deb`/`.rpm` from CI.
-- PDFium shipped as a pinned prebuilt dynamic library (bblanchon/pdfium-binaries), hash-verified
+- PDFium shipped as a pinned prebuilt dynamic library (bblanchon/pdfium-binaries `chromium/8125`,
+  matching the `pdfium_8125` feature of `pdfium-render`; bump both together), SHA-256-verified
   by `xtask fetch-pdfium`, loaded at runtime from the bundle.
 - Updates: platform-native channels; in-app update *check* is opt-in.
 
@@ -347,7 +349,7 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 
 ## 11. Open questions
 
-1. **Project license** — recommend `MIT OR Apache-2.0` (see ADR-0001 for why that rules out MuPDF).
+1. ~~Project license~~ — **decided: `MIT OR Apache-2.0`**.
 2. **UI toolkit** — ADR-0002 is *Proposed* pending a 2-week spike.
 3. Minimum OS versions (proposal: macOS 12+, Windows 10 22H2+, glibc 2.31+ / Flatpak runtime).
 4. Do we need XFA dynamic forms at all? (Proposal: no; show a clear notice.)
