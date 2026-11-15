@@ -21,7 +21,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
@@ -47,13 +47,13 @@ jobs:
           - { name: linux-arm64, os: ubuntu-22.04-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # No build cache: release binaries are built from a clean slate.
       - name: Package
         shell: bash
         run: dist/package.sh "${{ needs.version.outputs.version }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: out/Ferrix-*
@@ -68,7 +68,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: out
           merge-multiple: true
