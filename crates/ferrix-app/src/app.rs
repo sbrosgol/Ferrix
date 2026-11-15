@@ -1,7 +1,4 @@
-//! Application state, update logic and view.
-//!
-//! Renders one whole page per request. The tiled, continuously scrolling canvas arrives with
-//! `ferrix-render` in M1.
+//! Application state and update logic. Layout lives in `view.rs`.
 
 use std::{
     fmt,
@@ -12,60 +9,37 @@ use std::{
     },
 };
 
-use ferrix_engine::{DocInfo, DocSource, EngineError, PdfEngine, RenderFlags, TileRequest};
+use ferrix_core::{Edit, PageKey};
+use ferrix_engine::{DocInfo, DocSource, PdfEngine};
 use ferrix_engine_pdfium::PdfiumEngine;
+use ferrix_io::FileStamp;
+use ferrix_pdf::{LayoutPage, Source as PdfSource};
 use ferrix_print::{PrintJob, PrintOutcome};
-use ferrix_types::{DocId, PageIndex, PixelRect, Rotation, Size};
+use ferrix_types::{DocId, Rotation, Size};
 use iced::{
-    Alignment, Element, Event, Font, Length, Subscription, Task, Theme, event, font, keyboard,
+    Event, Subscription, Task, Theme, event, keyboard,
     keyboard::key::Named,
     system,
-    widget::{
-        Space, button, column, container, image, mouse_area, operation, pick_list, row, scrollable,
-        svg, text, text_input, tooltip,
-    },
+    widget::{operation, scrollable},
     window,
 };
 
 use crate::{
-    icon::Icon,
-    theme::{self, Tokens},
-    worker::{EngineUnavailable, EngineWorker},
+    document::{Click, Document, Thumbnail, file_name, pages_label},
+    render::{LOGICAL_PX_PER_POINT, PageRef, Rendered, render_page},
+    worker::{EngineWorker, blocking, flatten},
 };
 
-/// Logical pixels per PDF point at 100% zoom (96 dpi screens, 72 points per inch).
-const LOGICAL_PX_PER_POINT: f32 = 96.0 / 72.0;
 const ZOOM_STEPS: [f32; 15] = [
     0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0,
 ];
-const MIN_ZOOM: f32 = 0.1;
-const MAX_ZOOM: f32 = 4.0;
+pub(crate) const MIN_ZOOM: f32 = 0.1;
+pub(crate) const MAX_ZOOM: f32 = 4.0;
 /// "Automatic" zoom fits the width but never enlarges beyond this (as pdf.js does).
 const MAX_AUTO_ZOOM: f32 = 1.25;
-/// Caps the longest edge of a rendered page (~200 MB of pixels for Letter). The M1 canvas
-/// renders only visible tiles and removes this limit.
-const MAX_RENDER_EDGE: f32 = 8192.0;
-/// Pages are shown as a grid of tiles this size. Each stays under iced's 2 MiB synchronous
-/// upload limit, so a new page appears in the same frame instead of flashing blank.
-const TILE_EDGE: u32 = 512;
+pub(crate) const THUMB_WIDTH: f32 = 112.0;
 
-const TOOLBAR_HEIGHT: f32 = 46.0;
-const STATUS_HEIGHT: f32 = 26.0;
-const SIDEBAR_WIDTH: f32 = 188.0;
-const THUMB_WIDTH: f32 = 112.0;
-/// Thumbnails beyond this are not rendered until the virtualized sidebar lands in M1.
-const MAX_THUMBNAILS: u32 = 500;
-const PAGE_MARGIN: f32 = 28.0;
-const SCROLLBAR_ALLOWANCE: f32 = 12.0;
-/// Space for the macOS traffic lights, which sit over our toolbar.
-const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
-
-const SEMIBOLD: Font = Font {
-    weight: font::Weight::Semibold,
-    ..Font::DEFAULT
-};
-
-type Worker = EngineWorker<PdfiumEngine>;
+pub(crate) type Worker = EngineWorker<PdfiumEngine>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Appearance {
@@ -75,7 +49,7 @@ enum Appearance {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Zoom {
+pub(crate) enum Zoom {
     Auto,
     FitWidth,
     FitPage,
@@ -106,7 +80,7 @@ pub enum ZoomChoice {
     Percent(u16),
 }
 
-const ZOOM_CHOICES: [ZoomChoice; 10] = [
+pub(crate) const ZOOM_CHOICES: [ZoomChoice; 10] = [
     ZoomChoice::FitWidth,
     ZoomChoice::FitPage,
     ZoomChoice::Percent(50),
@@ -129,39 +103,46 @@ impl fmt::Display for ZoomChoice {
     }
 }
 
+/// What to do once the user has dealt with unsaved changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Proceed {
+    OpenDialog,
+    Open(PathBuf),
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    Save,
+    Discard,
+    Cancel,
+}
+
 #[derive(Debug)]
 pub struct App {
-    engine: Result<Worker, String>,
+    pub(crate) engine: Result<Worker, String>,
     /// Generation of the newest page render; the engine thread skips older queued requests.
     latest_render: Arc<AtomicU64>,
     window: Option<window::Id>,
-    window_size: iced::Size,
+    pub(crate) window_size: iced::Size,
     scale_factor: f32,
     appearance: Appearance,
     system_dark: bool,
-    sidebar: bool,
-    zoom: Zoom,
-    doc: Option<OpenDoc>,
-    page_input: String,
-    page_image: Option<PageImage>,
-    status: Option<String>,
-}
-
-#[derive(Debug)]
-struct OpenDoc {
-    path: PathBuf,
-    info: DocInfo,
-    page: PageIndex,
-    /// Size and zoom of the page currently on screen.
-    shown: Option<(Size, f32)>,
-    thumbnails: Vec<Option<PageImage>>,
-}
-
-/// A rendered page as rows of tiles, each with its display size in logical pixels.
-#[derive(Debug)]
-struct PageImage {
-    rows: Vec<Vec<(image::Handle, iced::Size)>>,
-    logical: iced::Size,
+    pub(crate) sidebar: bool,
+    pub(crate) zoom: Zoom,
+    pub(crate) doc: Option<Document>,
+    pub(crate) page_input: String,
+    pub(crate) page_image: Option<crate::render::PageImage>,
+    pub(crate) error: Option<String>,
+    pub(crate) notice: Option<String>,
+    /// Set while a save or export runs; editing is paused until it finishes.
+    pub(crate) busy: Option<&'static str>,
+    /// Asking whether to save unsaved changes before doing this.
+    pub(crate) confirm: Option<Proceed>,
+    after_save: Option<Proceed>,
+    /// Page to return to when a document is reopened after saving.
+    reopen_at: Option<usize>,
+    modifiers: keyboard::Modifiers,
 }
 
 #[derive(Debug, Clone)]
@@ -170,7 +151,7 @@ pub enum Message {
     Open(PathBuf),
     DialogClosed,
     Opened(PathBuf, Result<DocInfo, String>),
-    GoTo(u32),
+    GoTo(usize),
     Next,
     Previous,
     First,
@@ -186,63 +167,39 @@ pub enum Message {
     ToggleTheme,
     SystemTheme(iced::theme::Mode),
     Rendered(Result<Option<Rendered>, String>),
-    Thumbnail(DocId, u32, Result<Rendered, String>),
+    Thumbnail(DocId, PageKey, Rotation, Result<Rendered, String>),
     WindowOpened(Option<window::Id>),
     ScaleFactor(f32),
     Resized(iced::Size),
+    ModifiersChanged(keyboard::Modifiers),
     DragWindow,
     DismissStatus,
     Print,
+    PrintReady(Result<PathBuf, String>),
     Printed(Result<PrintOutcome, String>),
+    ThumbnailClicked(PageKey),
+    Rotate(Rotation),
+    Delete,
+    Move { earlier: bool },
+    InsertDialog,
+    Insert(PathBuf),
+    Inserted(PathBuf, Result<DocInfo, String>),
+    Undo,
+    Redo,
+    Save,
+    SaveAs,
+    SaveAsPicked(Option<PathBuf>),
+    Saved(Result<PathBuf, String>),
+    CloseRequested,
+    Confirmed(Choice),
+    Escape,
 }
 
-#[derive(Debug, Clone)]
-pub struct Rendered {
-    /// Device-pixel width of the whole page.
-    width: u32,
-    rows: Vec<Vec<RawTile>>,
-    logical: iced::Size,
-    page_size: Size,
-    zoom: f32,
-}
-
-#[derive(Debug, Clone)]
-struct RawTile {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-}
-
-impl Rendered {
-    fn into_image(self) -> PageImage {
-        let px_per_logical = self.width as f32 / self.logical.width;
-        let rows = self
-            .rows
-            .into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|t| {
-                        let size = iced::Size::new(
-                            t.width as f32 / px_per_logical,
-                            t.height as f32 / px_per_logical,
-                        );
-                        (image::Handle::from_rgba(t.width, t.height, t.pixels), size)
-                    })
-                    .collect()
-            })
-            .collect();
-        PageImage {
-            rows,
-            logical: self.logical,
-        }
-    }
-}
-
-fn page_scroll_id() -> iced::widget::Id {
+pub(crate) fn page_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("page")
 }
 
-fn sidebar_scroll_id() -> iced::widget::Id {
+pub(crate) fn sidebar_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("sidebar")
 }
 
@@ -251,7 +208,7 @@ impl App {
         engine: Result<Worker, String>,
         initial: Option<PathBuf>,
     ) -> (Self, Task<Message>) {
-        let status = engine.as_ref().err().cloned();
+        let error = engine.as_ref().err().cloned();
         let app = Self {
             engine,
             latest_render: Arc::new(AtomicU64::new(0)),
@@ -265,7 +222,13 @@ impl App {
             doc: None,
             page_input: String::new(),
             page_image: None,
-            status,
+            error,
+            notice: None,
+            busy: None,
+            confirm: None,
+            after_save: None,
+            reopen_at: None,
+            modifiers: keyboard::Modifiers::default(),
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -277,66 +240,57 @@ impl App {
 
     pub(crate) fn title(&self) -> String {
         match &self.doc {
-            Some(doc) => format!("{} — Ferrix", doc_name(doc)),
+            Some(doc) if doc.is_dirty() => format!("{} — Edited — Ferrix", doc.name()),
+            Some(doc) => format!("{} — Ferrix", doc.name()),
             None => "Ferrix".into(),
         }
     }
 
     pub(crate) fn theme(&self) -> Theme {
-        let dark = match self.appearance {
+        if self.is_dark() {
+            crate::theme::dark()
+        } else {
+            crate::theme::light()
+        }
+    }
+
+    pub(crate) fn is_dark(&self) -> bool {
+        match self.appearance {
             Appearance::System => self.system_dark,
             Appearance::Light => false,
             Appearance::Dark => true,
-        };
-        if dark { theme::dark() } else { theme::light() }
+        }
+    }
+
+    /// Whether page-editing actions are available right now.
+    pub(crate) fn can_edit(&self) -> bool {
+        self.doc.is_some() && self.busy.is_none() && self.confirm.is_none()
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::OpenDialog => {
-                return Task::perform(
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("PDF documents", &["pdf"])
-                        .pick_file(),
-                    |file| {
-                        file.map_or(Message::DialogClosed, |f| {
-                            Message::Open(f.path().to_path_buf())
-                        })
-                    },
-                );
-            }
+            Message::OpenDialog => return self.guard(Proceed::OpenDialog),
+            Message::Open(path) => return self.guard(Proceed::Open(path)),
             Message::DialogClosed => {}
-            Message::Open(path) => return self.open(path),
-            Message::Opened(path, Ok(info)) => {
-                let close = self.close_document();
-                self.status = (info.page_count == 0).then(|| "This document has no pages".into());
-                let thumbs = info.page_count.min(MAX_THUMBNAILS) as usize;
-                let id = info.id;
-                self.doc = Some(OpenDoc {
-                    path,
-                    info,
-                    page: PageIndex(0),
-                    shown: None,
-                    thumbnails: (0..thumbs).map(|_| None).collect(),
-                });
-                self.sync_page_input();
-                return Task::batch([close, self.render(), self.render_thumbnail(id, 0)]);
-            }
+            Message::Opened(path, Ok(info)) => return self.opened(path, info),
             Message::Opened(path, Err(e)) => {
-                self.status = Some(format!("Couldn’t open “{}”: {e}", file_name(&path)));
+                self.reopen_at = None;
+                self.error = Some(format!("Couldn’t open “{}”: {e}", file_name(&path)));
             }
-            Message::GoTo(page) => return self.go_to(|_, _| page),
-            Message::Next => return self.go_to(|page, count| (page + 1).min(count - 1)),
-            Message::Previous => return self.go_to(|page, _| page.saturating_sub(1)),
-            Message::First => return self.go_to(|_, _| 0),
-            Message::Last => return self.go_to(|_, count| count - 1),
+            Message::GoTo(index) => return self.go_to(index),
+            Message::Next => return self.step_page(1),
+            Message::Previous => return self.step_page(-1),
+            Message::First => return self.go_to(0),
+            Message::Last => {
+                let last = self.doc.as_ref().map_or(0, |d| d.len().saturating_sub(1));
+                return self.go_to(last);
+            }
             Message::PageInput(value) => {
                 self.page_input = value.chars().filter(char::is_ascii_digit).take(6).collect();
             }
             Message::PageSubmit => {
-                let target = self.page_input.parse::<u32>().ok();
-                let task = match target {
-                    Some(n) if n >= 1 => self.go_to(|_, count| (n - 1).min(count - 1)),
+                let task = match self.page_input.parse::<usize>() {
+                    Ok(n) if n >= 1 => self.go_to(n - 1),
                     _ => Task::none(),
                 };
                 self.sync_page_input();
@@ -358,8 +312,7 @@ impl App {
                 return self.rerender_if_fitting();
             }
             Message::ToggleTheme => {
-                let dark = self.theme().extended_palette().is_dark;
-                self.appearance = if dark {
+                self.appearance = if self.is_dark() {
                     Appearance::Light
                 } else {
                     Appearance::Dark
@@ -374,19 +327,23 @@ impl App {
                 self.page_image = Some(r.into_image());
             }
             Message::Rendered(Err(e)) => {
-                self.status = Some(format!("Couldn’t render this page: {e}"))
+                self.error = Some(format!("Couldn’t render this page: {e}"));
             }
-            Message::Thumbnail(id, page, result) => {
-                let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == id) else {
-                    return Task::none(); // document was closed meanwhile
+            Message::Thumbnail(doc_id, key, rotation, result) => {
+                let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
+                    return Task::none(); // the document was closed meanwhile
                 };
-                if let (Ok(r), Some(slot)) = (result, doc.thumbnails.get_mut(page as usize)) {
-                    *slot = Some(r.into_image());
+                doc.thumbnail_busy = false;
+                if let Ok(r) = result {
+                    doc.thumbnails.insert(
+                        key,
+                        Thumbnail {
+                            rotation,
+                            image: r.into_image(),
+                        },
+                    );
                 }
-                let next = page + 1;
-                if (next as usize) < doc.thumbnails.len() {
-                    return self.render_thumbnail(id, next);
-                }
+                return self.next_thumbnail();
             }
             Message::WindowOpened(Some(id)) => {
                 self.window = Some(id);
@@ -406,15 +363,188 @@ impl App {
                 self.window_size = size;
                 return self.rerender_if_fitting();
             }
+            Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
             Message::DragWindow => {
                 if let Some(id) = self.window {
                     return window::drag(id);
                 }
             }
-            Message::DismissStatus => self.status = None,
+            Message::DismissStatus => {
+                self.error = None;
+                self.notice = None;
+            }
             Message::Print => return self.print(),
+            Message::PrintReady(Ok(path)) => {
+                self.busy = None;
+                return self.print_file(path);
+            }
+            Message::PrintReady(Err(e)) => {
+                self.busy = None;
+                self.error = Some(format!("Couldn’t prepare the document for printing: {e}"));
+            }
             Message::Printed(Ok(_)) => {}
-            Message::Printed(Err(e)) => self.status = Some(format!("Couldn’t print: {e}")),
+            Message::Printed(Err(e)) => self.error = Some(format!("Couldn’t print: {e}")),
+            Message::ThumbnailClicked(key) => {
+                let click = if self.modifiers.shift() {
+                    Click::Extend
+                } else if self.modifiers.command() {
+                    Click::Toggle
+                } else {
+                    Click::Replace
+                };
+                if let Some(doc) = &mut self.doc {
+                    doc.click(key, click);
+                }
+                self.sync_page_input();
+                return self.render();
+            }
+            Message::Rotate(by) => {
+                let Some(doc) = self.editable() else {
+                    return Task::none();
+                };
+                let keys = doc.targets();
+                let label = pages_label("Rotate", keys.len());
+                return self.apply(Edit::Rotate { keys, by }, label);
+            }
+            Message::Delete => {
+                let Some(doc) = self.editable() else {
+                    return Task::none();
+                };
+                let keys = doc.targets();
+                let label = pages_label("Delete", keys.len());
+                return self.apply(Edit::Remove { keys }, label);
+            }
+            Message::Move { earlier } => {
+                let Some(doc) = self.editable() else {
+                    return Task::none();
+                };
+                let keys = doc.targets();
+                let positions: Vec<usize> =
+                    keys.iter().filter_map(|k| doc.pages.position(*k)).collect();
+                let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
+                    return Task::none();
+                };
+                // Positions are counted in the list without the moved pages.
+                let to = if earlier {
+                    first.checked_sub(1)
+                } else {
+                    (last + 1 < doc.len()).then(|| last + 2 - keys.len())
+                };
+                let Some(to) = to else { return Task::none() };
+                match doc.pages.move_edit(&keys, to) {
+                    Ok(edit) => {
+                        let label = pages_label("Move", keys.len());
+                        return self.apply(edit, label);
+                    }
+                    Err(e) => self.error = Some(e.to_string()),
+                }
+            }
+            Message::InsertDialog => {
+                if !self.can_edit() {
+                    return Task::none();
+                }
+                return Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Insert Pages From")
+                        .add_filter("PDF documents", &["pdf"])
+                        .pick_file(),
+                    |file| {
+                        file.map_or(Message::DialogClosed, |f| {
+                            Message::Insert(f.path().to_path_buf())
+                        })
+                    },
+                );
+            }
+            Message::Insert(path) => {
+                let Ok(engine) = self.engine.clone() else {
+                    return Task::none();
+                };
+                return Task::perform(
+                    async move {
+                        let source = DocSource::Path(path.clone());
+                        let result = flatten(engine.call(move |e| e.open(source, None)).await);
+                        (path, result)
+                    },
+                    |(path, result)| Message::Inserted(path, result),
+                );
+            }
+            Message::Inserted(path, Ok(info)) => return self.inserted(path, info),
+            Message::Inserted(path, Err(e)) => {
+                self.error = Some(format!("Couldn’t insert “{}”: {e}", file_name(&path)));
+            }
+            Message::Undo => {
+                if self.can_edit()
+                    && let Some(doc) = &mut self.doc
+                    && let Some(label) = doc.undo()
+                {
+                    self.notice = Some(format!("Undid {label}"));
+                    return self.after_edit();
+                }
+            }
+            Message::Redo => {
+                if self.can_edit()
+                    && let Some(doc) = &mut self.doc
+                    && let Some(label) = doc.redo()
+                {
+                    self.notice = Some(format!("Redid {label}"));
+                    return self.after_edit();
+                }
+            }
+            Message::Save => {
+                if let Some(doc) = &self.doc
+                    && doc.is_dirty()
+                {
+                    let path = doc.path.clone();
+                    return self.save_to(path);
+                }
+            }
+            Message::SaveAs => {
+                let Some(doc) = self.doc.as_ref().filter(|_| self.busy.is_none()) else {
+                    return Task::none();
+                };
+                let mut dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Save As")
+                    .add_filter("PDF documents", &["pdf"])
+                    .set_file_name(file_name(&doc.path));
+                if let Some(dir) = doc.path.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                return Task::perform(dialog.save_file(), |file| {
+                    Message::SaveAsPicked(file.map(|f| f.path().to_path_buf()))
+                });
+            }
+            Message::SaveAsPicked(Some(path)) => return self.save_to(path),
+            Message::SaveAsPicked(None) => self.after_save = None,
+            Message::Saved(Ok(path)) => {
+                self.busy = None;
+                self.notice = Some(format!("Saved “{}”", file_name(&path)));
+                if let Some(next) = self.after_save.take() {
+                    return self.proceed(next);
+                }
+                // Reload what is now on disk; the edit history starts over from it.
+                self.reopen_at = self.doc.as_ref().map(|d| d.current);
+                return self.open(path);
+            }
+            Message::Saved(Err(e)) => {
+                self.busy = None;
+                self.after_save = None;
+                self.error = Some(format!("Couldn’t save: {e}"));
+            }
+            Message::CloseRequested => return self.guard(Proceed::Quit),
+            Message::Confirmed(choice) => {
+                let Some(next) = self.confirm.take() else {
+                    return Task::none();
+                };
+                match choice {
+                    Choice::Save => {
+                        self.after_save = Some(next);
+                        return self.update(Message::Save);
+                    }
+                    Choice::Discard => return self.proceed(next),
+                    Choice::Cancel => {}
+                }
+            }
+            Message::Escape => self.confirm = None,
         }
         Task::none()
     }
@@ -422,12 +552,16 @@ impl App {
     pub(crate) fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             system::theme_changes().map(Message::SystemTheme),
+            window::close_requests().map(|_| Message::CloseRequested),
             event::listen_with(|event, status, _window| match event {
                 Event::Window(window::Event::FileDropped(path)) => Some(Message::Open(path)),
                 Event::Window(window::Event::Rescaled(factor)) => {
                     Some(Message::ScaleFactor(factor))
                 }
                 Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
+                Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                    Some(Message::ModifiersChanged(modifiers))
+                }
                 Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                     if status == event::Status::Ignored =>
                 {
@@ -438,400 +572,277 @@ impl App {
         ])
     }
 
-    // ── View ──────────────────────────────────────────────────────────────────
+    // ── Documents ─────────────────────────────────────────────────────────────
 
-    pub(crate) fn view(&self) -> Element<'_, Message> {
-        let main: Element<'_, Message> = match (&self.doc, &self.page_image) {
-            (None, _) => self.empty_state(),
-            (Some(_), Some(page)) => self.page_view(page),
-            (Some(_), None) => container(muted("Loading…", 13.0))
-                .center(Length::Fill)
-                .style(theme::canvas)
-                .into(),
-        };
-
-        let body: Element<'_, Message> = match &self.doc {
-            Some(doc) if self.sidebar => {
-                row![self.sidebar_view(doc), vertical_divider(), main].into()
-            }
-            _ => main,
-        };
-
-        column![
-            self.toolbar(),
-            horizontal_divider(),
-            container(body).height(Length::Fill),
-            horizontal_divider(),
-            self.status_bar(),
-        ]
-        .into()
+    /// Runs `next` now, or first asks what to do with unsaved changes.
+    fn guard(&mut self, next: Proceed) -> Task<Message> {
+        if self.busy.is_some() {
+            return Task::none();
+        }
+        if self.doc.as_ref().is_some_and(Document::is_dirty) {
+            self.confirm = Some(next);
+            return Task::none();
+        }
+        self.proceed(next)
     }
 
-    fn toolbar(&self) -> Element<'_, Message> {
-        let doc = self.doc.as_ref().filter(|d| d.info.page_count > 0);
-        let (page, count) = doc.map_or((0, 0), |d| (d.page.0, d.info.page_count));
-        let has_doc = doc.is_some();
-
-        let title: Element<'_, Message> = match &self.doc {
-            Some(doc) => text(doc_name(doc))
-                .size(13)
-                .font(SEMIBOLD)
-                .wrapping(text::Wrapping::None)
-                .into(),
-            None => text("Ferrix").size(13).font(SEMIBOLD).into(),
-        };
-        let left = row![
-            Space::new().width(TRAFFIC_LIGHTS),
-            icon_button(
-                Icon::PanelLeft,
-                "Toggle sidebar",
-                has_doc.then_some(Message::ToggleSidebar),
-                self.sidebar && has_doc
-            ),
-            icon_button(
-                Icon::FolderOpen,
-                "Open… (⌘O)",
-                Some(Message::OpenDialog),
-                false
-            ),
-            icon_button(
-                Icon::Printer,
-                "Print… (⌘P)",
-                has_doc.then_some(Message::Print),
-                false
-            ),
-            Space::new().width(6),
-            title,
-        ]
-        .spacing(2)
-        .align_y(Alignment::Center);
-
-        let page_field = text_input("", if has_doc { &self.page_input } else { "" })
-            .on_input_maybe(has_doc.then_some(Message::PageInput))
-            .on_submit(Message::PageSubmit)
-            .size(13)
-            .width(46)
-            .padding([4, 6])
-            .align_x(Alignment::Center)
-            .style(theme::input);
-        let center = row![
-            icon_button(
-                Icon::ChevronLeft,
-                "Previous page",
-                (has_doc && page > 0).then_some(Message::Previous),
-                false
-            ),
-            page_field,
-            muted(
-                if has_doc {
-                    format!("of {count}")
-                } else {
-                    "of –".into()
+    fn proceed(&mut self, next: Proceed) -> Task<Message> {
+        match next {
+            Proceed::OpenDialog => Task::perform(
+                rfd::AsyncFileDialog::new()
+                    .add_filter("PDF documents", &["pdf"])
+                    .pick_file(),
+                |file| {
+                    file.map_or(Message::DialogClosed, |f| {
+                        Message::Open(f.path().to_path_buf())
+                    })
                 },
-                13.0
             ),
-            icon_button(
-                Icon::ChevronRight,
-                "Next page",
-                (has_doc && page + 1 < count).then_some(Message::Next),
-                false
-            ),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-
-        let zoom = doc.and_then(|d| d.shown).map(|(_, z)| z);
-        let zoom_label = zoom.map(|z| ZoomChoice::Percent((z * 100.0).round() as u16));
-        let theme_icon = if self.theme().extended_palette().is_dark {
-            Icon::Sun
-        } else {
-            Icon::Moon
-        };
-        let right = row![
-            icon_button(
-                Icon::ZoomOut,
-                "Zoom out (⌘−)",
-                (has_doc && zoom.is_some_and(|z| z > MIN_ZOOM + 0.001)).then_some(Message::ZoomOut),
-                false
-            ),
-            pick_list(ZOOM_CHOICES, zoom_label, Message::ZoomPicked)
-                .placeholder("–")
-                .text_size(13)
-                .padding([4, 8])
-                .width(92)
-                .style(theme::select)
-                .menu_style(theme::select_menu),
-            icon_button(
-                Icon::ZoomIn,
-                "Zoom in (⌘+)",
-                (has_doc && zoom.is_some_and(|z| z < MAX_ZOOM - 0.001)).then_some(Message::ZoomIn),
-                false
-            ),
-            toolbar_separator(),
-            icon_button(
-                Icon::FitWidth,
-                "Fit width",
-                has_doc.then_some(Message::FitWidth),
-                has_doc && self.zoom == Zoom::FitWidth
-            ),
-            icon_button(
-                Icon::FitPage,
-                "Fit page",
-                has_doc.then_some(Message::FitPage),
-                has_doc && self.zoom == Zoom::FitPage
-            ),
-            toolbar_separator(),
-            icon_button(
-                theme_icon,
-                "Toggle light/dark",
-                Some(Message::ToggleTheme),
-                false
-            ),
-        ]
-        .spacing(2)
-        .align_y(Alignment::Center);
-
-        let bar = container(
-            row![
-                container(left).width(Length::Fill),
-                center,
-                container(right).width(Length::Fill).align_x(Alignment::End),
-            ]
-            .align_y(Alignment::Center),
-        )
-        .height(TOOLBAR_HEIGHT)
-        .padding([0, 8])
-        .center_y(TOOLBAR_HEIGHT)
-        .style(theme::chrome);
-
-        // With the macOS title bar merged into the toolbar, the toolbar must move the window.
-        if cfg!(target_os = "macos") {
-            mouse_area(bar).on_press(Message::DragWindow).into()
-        } else {
-            bar.into()
+            // Unsaved changes were already dealt with, so open directly.
+            Proceed::Open(path) => self.open(path),
+            Proceed::Quit => iced::exit(),
         }
     }
 
-    fn sidebar_view<'a>(&'a self, doc: &'a OpenDoc) -> Element<'a, Message> {
-        let thumbs = doc.thumbnails.iter().enumerate().map(|(i, thumb)| {
-            let selected = i as u32 == doc.page.0;
-            let paper: Element<'_, Message> = match thumb {
-                Some(t) => tiles(t),
-                None => Space::new()
-                    .width(THUMB_WIDTH)
-                    .height(THUMB_WIDTH * 1.3)
-                    .into(),
-            };
-            let label = text((i + 1).to_string())
-                .size(12)
-                .style(move |theme: &Theme| {
-                    let t = theme::tokens(theme);
-                    text::Style {
-                        color: Some(if selected { t.accent } else { t.text_muted }),
-                    }
-                });
-            let ring = container(container(paper).style(theme::page))
-                .padding(4)
-                .style(move |theme| theme::thumbnail_ring(theme, selected));
-            button(column![ring, label].spacing(6).align_x(Alignment::Center))
-                .on_press(Message::GoTo(i as u32))
-                .padding(0)
-                .style(theme::plain)
-                .into()
-        });
-
-        let list = column(thumbs)
-            .spacing(14)
-            .padding([16, 0])
-            .width(Length::Fill)
-            .align_x(Alignment::Center);
-        container(
-            scrollable(list)
-                .direction(scrollable::Direction::Vertical(thin_scrollbar()))
-                .id(sidebar_scroll_id())
-                .height(Length::Fill)
-                .style(theme::scrollbar),
+    fn open(&mut self, path: PathBuf) -> Task<Message> {
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        self.error = None;
+        Task::perform(
+            async move {
+                let source = DocSource::Path(path.clone());
+                let result = flatten(engine.call(move |e| e.open(source, None)).await);
+                (path, result)
+            },
+            |(path, result)| Message::Opened(path, result),
         )
-        .width(SIDEBAR_WIDTH)
-        .height(Length::Fill)
-        .style(theme::chrome)
-        .into()
     }
 
-    fn page_view<'a>(&self, page: &'a PageImage) -> Element<'a, Message> {
-        let paper = container(tiles(page)).style(theme::page);
-        let canvas = self.canvas_size();
-        let fits_x = page.logical.width <= canvas.width + SCROLLBAR_ALLOWANCE;
-        let fits_y = page.logical.height <= canvas.height;
-
-        let view: Element<'a, Message> = if fits_x && fits_y {
-            container(paper).center(Length::Fill).into()
+    fn opened(&mut self, path: PathBuf, info: DocInfo) -> Task<Message> {
+        let close = self.close_document();
+        if info.page_count == 0 {
+            self.error = Some("This document has no pages".into());
+            return close;
+        }
+        let mut doc = Document::new(path, info);
+        if let Some(at) = self.reopen_at.take() {
+            let at = at.min(doc.len() - 1);
+            doc.current = at;
+            if let Some(key) = doc.key_at(at) {
+                doc.select_only(key);
+            }
         } else {
-            let content = container(paper).padding(PAGE_MARGIN);
-            let scroll = if fits_x {
-                scrollable(content.center_x(Length::Fill))
-                    .direction(scrollable::Direction::Vertical(thin_scrollbar()))
-            } else {
-                scrollable(content).direction(scrollable::Direction::Both {
-                    vertical: thin_scrollbar(),
-                    horizontal: thin_scrollbar(),
+            self.notice = None;
+        }
+        self.doc = Some(doc);
+        self.sync_page_input();
+        Task::batch([close, self.render(), self.next_thumbnail()])
+    }
+
+    /// Closes the current document and its inserted sources on the engine thread.
+    fn close_document(&mut self) -> Task<Message> {
+        self.page_image = None;
+        let (Some(doc), Ok(engine)) = (self.doc.take(), self.engine.clone()) else {
+            return Task::none();
+        };
+        let ids = doc.engine_docs();
+        Task::future(async move {
+            engine
+                .call(move |e| ids.into_iter().for_each(|id| e.close(id)))
+                .await
+        })
+        .discard()
+    }
+
+    // ── Editing ───────────────────────────────────────────────────────────────
+
+    fn editable(&mut self) -> Option<&mut Document> {
+        if self.can_edit() {
+            self.doc.as_mut()
+        } else {
+            None
+        }
+    }
+
+    fn apply(&mut self, edit: Edit, label: String) -> Task<Message> {
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        match doc.edit(edit, label) {
+            Ok(()) => {
+                self.notice = None;
+                self.after_edit()
+            }
+            Err(e) => {
+                self.error = Some(e.to_string());
+                Task::none()
+            }
+        }
+    }
+
+    fn after_edit(&mut self) -> Task<Message> {
+        self.sync_page_input();
+        Task::batch([self.render(), self.next_thumbnail()])
+    }
+
+    fn inserted(&mut self, path: PathBuf, info: DocInfo) -> Task<Message> {
+        let Some(doc) = self.editable() else {
+            return Task::none();
+        };
+        let source = ferrix_core::SourceId(doc.sources.len() as u32);
+        doc.sources
+            .push(crate::document::Source { path, doc: info.id });
+        let entries = doc
+            .pages
+            .new_entries(source, (0..info.page_count).map(ferrix_types::PageIndex));
+        let at = doc.current + 1;
+        let count = entries.len();
+        let pages = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (at + i, e))
+            .collect();
+        let task = self.apply(Edit::Insert { pages }, pages_label("Insert", count));
+        // Show the first inserted page.
+        Task::batch([task, self.go_to(at)])
+    }
+
+    // ── Saving ────────────────────────────────────────────────────────────────
+
+    fn save_to(&mut self, target: PathBuf) -> Task<Message> {
+        let Some(export) = self.export_job() else {
+            return Task::none();
+        };
+        self.busy = Some("Saving…");
+        self.error = None;
+        Task::perform(
+            async move {
+                let bytes = export.run().await?;
+                let destination = target.clone();
+                blocking(move || {
+                    ferrix_io::write_atomic(&destination, &bytes).map_err(|e| e.to_string())
                 })
-            };
-            scroll
-                .id(page_scroll_id())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::scrollbar)
-                .into()
-        };
-        container(view).style(theme::canvas).into()
+                .await?;
+                Ok(target)
+            },
+            Message::Saved,
+        )
     }
 
-    fn empty_state(&self) -> Element<'_, Message> {
-        let failed = self.engine.is_err();
-        let (icon, heading, body) = if failed {
-            (
-                Icon::Alert,
-                "The PDF engine couldn’t start",
-                "Ferrix needs the PDFium library. In a development checkout, run \
-                 `cargo xtask fetch-pdfium`.",
-            )
-        } else {
-            (
-                Icon::FileText,
-                "No document open",
-                "Open a PDF to start reading, or drop a file anywhere in this window.",
-            )
+    fn export_job(&self) -> Option<Export> {
+        let (Ok(engine), Some(doc)) = (self.engine.clone(), &self.doc) else {
+            return None;
         };
-        let badge = container(
-            svg(icon.handle())
-                .width(34)
-                .height(34)
-                .style(theme::icon_colored(if failed {
-                    |t: &Tokens| t.danger
-                } else {
-                    |t: &Tokens| t.accent
-                })),
-        )
-        .padding(21)
-        .style(theme::badge);
-
-        let open = button(
-            row![
-                svg(Icon::FolderOpen.handle())
-                    .width(16)
-                    .height(16)
-                    .style(theme::icon_colored(|t| t.on_accent)),
-                text("Open PDF…").size(14).font(SEMIBOLD),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .padding([9, 18])
-        .style(theme::primary)
-        .on_press_maybe((!failed).then_some(Message::OpenDialog));
-
-        let shortcut_hint = row![
-            kbd(if cfg!(target_os = "macos") {
-                "⌘"
-            } else {
-                "Ctrl"
-            }),
-            kbd("O"),
-        ]
-        .spacing(4);
-
-        let content = column![
-            badge,
-            Space::new().height(4),
-            text(heading).size(20).font(SEMIBOLD),
-            container(muted(body, 14.0).align_x(Alignment::Center)).max_width(380),
-            Space::new().height(6),
-            open,
-            shortcut_hint,
-        ]
-        .spacing(10)
-        .align_x(Alignment::Center);
-
-        container(content)
-            .center(Length::Fill)
-            .style(theme::canvas)
-            .into()
+        if self.busy.is_some() {
+            return None;
+        }
+        Some(Export {
+            engine,
+            base: doc.path.clone(),
+            stamp: doc.stamp,
+            imports: doc.import_paths(),
+            layout: doc.layout(),
+        })
     }
 
-    fn status_bar(&self) -> Element<'_, Message> {
-        let left: Element<'_, Message> = match (&self.status, &self.doc) {
-            (Some(status), _) => button(
-                row![
-                    svg(Icon::Alert.handle())
-                        .width(14)
-                        .height(14)
-                        .style(theme::icon_colored(|t| t.danger)),
-                    text(status).size(12).style(|theme: &Theme| text::Style {
-                        color: Some(theme::tokens(theme).danger),
-                    }),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            )
-            .padding(0)
-            .style(theme::plain)
-            .on_press(Message::DismissStatus)
-            .into(),
-            (None, Some(doc)) => {
-                let mut parts = vec![format!(
-                    "{} page{}",
-                    doc.info.page_count,
-                    if doc.info.page_count == 1 { "" } else { "s" }
-                )];
-                if let Some(version) = &doc.info.pdf_version {
-                    parts.push(format!("PDF {version}"));
-                }
-                if let Some((size, _)) = doc.shown {
-                    parts.push(format!("{:.0} × {:.0} pt", size.width, size.height));
-                }
-                muted(parts.join("  ·  "), 12.0).into()
-            }
-            (None, None) => muted("Ready", 12.0).into(),
+    // ── Printing ──────────────────────────────────────────────────────────────
+
+    /// Prints the document as shown: unsaved edits are exported to a temporary file first.
+    fn print(&mut self) -> Task<Message> {
+        let Some(doc) = &self.doc else {
+            return Task::none();
         };
-        let right = match &self.doc {
-            Some(doc) if doc.info.page_count > 0 => {
-                format!("Page {} of {}", doc.page.number(), doc.info.page_count)
-            }
-            _ => String::new(),
+        if !doc.is_dirty() {
+            let path = doc.path.clone();
+            return self.print_file(path);
+        }
+        let Some(export) = self.export_job() else {
+            return Task::none();
         };
-        container(
-            row![container(left).width(Length::Fill), muted(right, 12.0)]
-                .align_y(Alignment::Center),
+        let temp = std::env::temp_dir().join(format!(
+            "ferrix-print-{}-{}",
+            std::process::id(),
+            file_name(&doc.path)
+        ));
+        self.busy = Some("Preparing to print…");
+        Task::perform(
+            async move {
+                let bytes = export.run().await?;
+                let destination = temp.clone();
+                blocking(move || std::fs::write(&destination, bytes).map_err(|e| e.to_string()))
+                    .await?;
+                Ok(temp)
+            },
+            Message::PrintReady,
         )
-        .height(STATUS_HEIGHT)
-        .padding([0, 12])
-        .center_y(STATUS_HEIGHT)
-        .style(theme::chrome)
-        .into()
     }
 
-    // ── Commands ──────────────────────────────────────────────────────────────
+    fn print_file(&mut self, path: PathBuf) -> Task<Message> {
+        let (Some(doc), Some(window)) = (&self.doc, self.window) else {
+            return Task::none();
+        };
+        let job = PrintJob {
+            title: doc.name(),
+            path,
+            page_count: doc.len() as u32,
+        };
+        self.error = None;
+        self.platform_print(window, job)
+    }
+
+    /// macOS: a print sheet on our window, opened on the main thread.
+    #[cfg(target_os = "macos")]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        window::run(window, move |w| {
+            ferrix_print::print_with_sheet(w, &job).map_err(|e| e.to_string())
+        })
+        .map(Message::Printed)
+    }
+
+    /// Linux/BSD: the desktop portal's print dialog.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
+            let job = job.clone();
+            Task::perform(
+                async move {
+                    ferrix_print::print_with_portal(parent, &job)
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                Message::Printed,
+            )
+        })
+    }
+
+    /// Windows: the common print dialog, with pages rendered by our engine on a spool thread.
+    #[cfg(windows)]
+    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
+            let (job, engine) = (job.clone(), engine.clone());
+            Task::perform(
+                blocking(move || crate::print::print_on_windows(engine, parent, &job)),
+                Message::Printed,
+            )
+        })
+    }
+
+    // ── Navigation and rendering ──────────────────────────────────────────────
 
     /// Logical size available to a page inside the canvas.
-    fn canvas_size(&self) -> iced::Size {
-        let sidebar = if self.sidebar && self.doc.is_some() {
-            SIDEBAR_WIDTH + 1.0
-        } else {
-            0.0
-        };
-        iced::Size::new(
-            (self.window_size.width - sidebar - 2.0 * PAGE_MARGIN - SCROLLBAR_ALLOWANCE).max(64.0),
-            (self.window_size.height - TOOLBAR_HEIGHT - STATUS_HEIGHT - 2.0 - 2.0 * PAGE_MARGIN)
-                .max(64.0),
-        )
+    pub(crate) fn canvas_size(&self) -> iced::Size {
+        crate::view::canvas_size(self.window_size, self.sidebar && self.doc.is_some())
     }
 
     fn sync_page_input(&mut self) {
         self.page_input = self
             .doc
             .as_ref()
-            .map(|d| d.page.number().to_string())
+            .map(|d| (d.current + 1).to_string())
             .unwrap_or_default();
     }
 
@@ -871,17 +882,28 @@ impl App {
         }
     }
 
-    fn go_to(&mut self, target: impl FnOnce(u32, u32) -> u32) -> Task<Message> {
-        let Some(doc) = self.doc.as_mut().filter(|d| d.info.page_count > 0) else {
+    fn step_page(&mut self, delta: isize) -> Task<Message> {
+        let Some(doc) = &self.doc else {
             return Task::none();
         };
-        let page = PageIndex(target(doc.page.0, doc.info.page_count));
-        if page == doc.page {
+        let target = doc.current.saturating_add_signed(delta).min(doc.len() - 1);
+        self.go_to(target)
+    }
+
+    fn go_to(&mut self, index: usize) -> Task<Message> {
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let index = index.min(doc.len().saturating_sub(1));
+        if let Some(key) = doc.key_at(index) {
+            doc.select_only(key);
+        }
+        if index == doc.current {
             return Task::none();
         }
-        doc.page = page;
-        let follow = if doc.info.page_count > 1 {
-            page.0 as f32 / (doc.info.page_count - 1) as f32
+        doc.current = index;
+        let follow = if doc.len() > 1 {
+            index as f32 / (doc.len() - 1) as f32
         } else {
             0.0
         };
@@ -896,110 +918,17 @@ impl App {
         ])
     }
 
-    fn open(&mut self, path: PathBuf) -> Task<Message> {
-        let Ok(engine) = self.engine.clone() else {
-            return Task::none();
-        };
-        self.status = None;
-        Task::perform(
-            async move {
-                let source = DocSource::Path(path.clone());
-                let result = engine.call(move |e| e.open(source, None)).await;
-                (path, flatten(result))
-            },
-            |(path, result)| Message::Opened(path, result),
-        )
-    }
-
-    /// Prints the document as saved on disk through the platform's print system (ADR-0006).
-    fn print(&mut self) -> Task<Message> {
-        let (Some(doc), Some(window)) = (
-            self.doc.as_ref().filter(|d| d.info.page_count > 0),
-            self.window,
+    /// Requests the current page at the current zoom and display scale.
+    fn render(&mut self) -> Task<Message> {
+        let (Ok(engine), Some(page)) = (
+            self.engine.clone(),
+            self.doc.as_ref().and_then(Document::current_page),
         ) else {
             return Task::none();
         };
-        let job = PrintJob {
-            title: doc_name(doc),
-            path: doc.path.clone(),
-            page_count: doc.info.page_count,
-        };
-        self.status = None;
-        self.platform_print(window, job)
-    }
-
-    /// macOS: a print sheet on our window, opened on the main thread.
-    #[cfg(target_os = "macos")]
-    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
-        window::run(window, move |w| {
-            ferrix_print::print_with_sheet(w, &job).map_err(|e| e.to_string())
-        })
-        .map(Message::Printed)
-    }
-
-    /// Linux/BSD: the desktop portal's print dialog.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
-        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
-            let job = job.clone();
-            Task::perform(
-                async move {
-                    ferrix_print::print_with_portal(parent, &job)
-                        .await
-                        .map_err(|e| e.to_string())
-                },
-                Message::Printed,
-            )
-        })
-    }
-
-    /// Windows: the common print dialog, with pages rendered by our engine on a spool thread.
-    #[cfg(windows)]
-    fn platform_print(&self, window: window::Id, job: PrintJob) -> Task<Message> {
-        let (Ok(engine), Some(doc)) = (self.engine.clone(), &self.doc) else {
-            return Task::none();
-        };
-        let doc = doc.info.id;
-        window::run(window, |w| ferrix_print::Parent::of(w)).then(move |parent| {
-            let (job, engine) = (job.clone(), engine.clone());
-            Task::perform(
-                async move {
-                    let (tx, rx) = iced::futures::channel::oneshot::channel();
-                    std::thread::spawn(move || {
-                        let mut pages = EnginePages { engine, doc };
-                        let result = ferrix_print::print_with_dialog(parent, &job, &mut pages);
-                        let _ = tx.send(result.map_err(|e| e.to_string()));
-                    });
-                    rx.await
-                        .unwrap_or_else(|_| Err("printing stopped unexpectedly".into()))
-                },
-                Message::Printed,
-            )
-        })
-    }
-
-    /// Closes the current document on the engine thread, without waiting for it.
-    fn close_document(&mut self) -> Task<Message> {
-        self.page_image = None;
-        let (Some(doc), Ok(engine)) = (self.doc.take(), self.engine.clone()) else {
-            return Task::none();
-        };
-        let id = doc.info.id;
-        Task::future(async move { engine.call(move |e| e.close(id)).await }).discard()
-    }
-
-    /// Requests the current page at the current zoom and display scale.
-    fn render(&mut self) -> Task<Message> {
-        let (Ok(engine), Some(doc)) = (self.engine.clone(), &self.doc) else {
-            return Task::none();
-        };
-        if doc.info.page_count == 0 {
-            return Task::none();
-        }
         let generation = self.latest_render.fetch_add(1, Ordering::Relaxed) + 1;
         let latest = Arc::clone(&self.latest_render);
-        let (id, page, zoom_mode) = (doc.info.id, doc.page, self.zoom);
-        let (canvas, scale_factor) = (self.canvas_size(), self.scale_factor);
+        let (zoom_mode, canvas, scale_factor) = (self.zoom, self.canvas_size(), self.scale_factor);
 
         Task::perform(
             async move {
@@ -1008,10 +937,10 @@ impl App {
                         if latest.load(Ordering::Relaxed) != generation {
                             return Ok(None);
                         }
-                        let size = e.page_info(id, page)?.size;
+                        let size = crate::render::page_size(e, page)?;
                         let zoom = zoom_mode.resolve(size, canvas);
-                        let logical_scale = zoom * LOGICAL_PX_PER_POINT;
-                        render_page(e, id, page, size, logical_scale, scale_factor, zoom).map(Some)
+                        render_page(e, page, zoom * LOGICAL_PX_PER_POINT, scale_factor, zoom)
+                            .map(Some)
                     })
                     .await;
                 flatten(result)
@@ -1020,273 +949,138 @@ impl App {
         )
     }
 
-    fn render_thumbnail(&self, id: DocId, page: u32) -> Task<Message> {
+    /// Renders the next missing thumbnail; each result schedules the one after it.
+    fn next_thumbnail(&mut self) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
+        let Some(doc) = self.doc.as_mut().filter(|d| !d.thumbnail_busy) else {
+            return Task::none();
+        };
+        let Some((key, page)) = doc.next_thumbnail() else {
+            return Task::none();
+        };
+        doc.thumbnail_busy = true;
+        let doc_id = doc.info.id;
         let scale_factor = self.scale_factor.max(2.0);
         Task::perform(
             async move {
                 let result = engine
-                    .call(move |e| {
-                        let size = e.page_info(id, PageIndex(page))?.size;
-                        let logical_scale = THUMB_WIDTH / size.width;
-                        render_page(
-                            e,
-                            id,
-                            PageIndex(page),
-                            size,
-                            logical_scale,
-                            scale_factor,
-                            0.0,
-                        )
-                    })
+                    .call(move |e| render_thumbnail(e, page, scale_factor))
                     .await;
                 flatten(result)
             },
-            move |result| Message::Thumbnail(id, page, result),
+            move |result| Message::Thumbnail(doc_id, key, page.rotation, result),
         )
     }
 }
 
-/// Page images for raster printing, rendered synchronously on the print thread.
-#[cfg(windows)]
-struct EnginePages {
-    engine: Worker,
-    doc: DocId,
-}
-
-#[cfg(windows)]
-impl ferrix_print::PageSource for EnginePages {
-    fn page_size(&mut self, page: u32) -> Result<(f32, f32), String> {
-        let doc = self.doc;
-        let info = iced::futures::executor::block_on(
-            self.engine.call(move |e| e.page_info(doc, PageIndex(page))),
-        );
-        flatten(info).map(|info| (info.size.width, info.size.height))
-    }
-
-    fn render(
-        &mut self,
-        page: u32,
-        scale: f32,
-        rotate: bool,
-    ) -> Result<ferrix_print::Bitmap, String> {
-        let doc = self.doc;
-        let tile = iced::futures::executor::block_on(self.engine.call(move |e| {
-            let size = e.page_info(doc, PageIndex(page))?.size;
-            let (mut width, mut height) = size.to_pixels(scale);
-            if rotate {
-                std::mem::swap(&mut width, &mut height);
-            }
-            e.render_tile(&TileRequest {
-                doc,
-                page: PageIndex(page),
-                scale,
-                rotation: if rotate { Rotation::R90 } else { Rotation::R0 },
-                region: PixelRect::new(0, 0, width, height),
-                flags: RenderFlags::default(),
-            })
-        }));
-        flatten(tile).map(|tile| ferrix_print::Bitmap {
-            width: tile.region.width,
-            height: tile.region.height,
-            rgba: tile.pixels,
-        })
-    }
-}
-
-/// Renders a whole page at `logical_scale` logical px per point on a `scale_factor` display.
-fn render_page(
+fn render_thumbnail(
     engine: &mut PdfiumEngine,
-    doc: DocId,
-    page: PageIndex,
-    size: Size,
-    logical_scale: f32,
+    page: PageRef,
     scale_factor: f32,
-    zoom: f32,
-) -> Result<Rendered, EngineError> {
-    let wanted = logical_scale * scale_factor;
-    let longest = size.width.max(size.height) * wanted;
-    let scale = wanted * (MAX_RENDER_EDGE / longest).min(1.0);
-    let (width, height) = size.to_pixels(scale);
-    // One engine call for the whole page (PDFium re-interprets the page per call), then slice.
-    let page_pixels = engine.render_tile(&TileRequest {
-        doc,
-        page,
-        scale,
-        rotation: Rotation::R0,
-        region: PixelRect::new(0, 0, width, height),
-        flags: RenderFlags::default(),
-    })?;
-    let (width, height) = (page_pixels.region.width, page_pixels.region.height);
-    Ok(Rendered {
-        width,
-        rows: slice_tiles(&page_pixels.pixels, width, height),
-        logical: iced::Size::new(size.width * logical_scale, size.height * logical_scale),
-        page_size: size,
-        zoom,
-    })
+) -> Result<Rendered, ferrix_engine::EngineError> {
+    let size = crate::render::page_size(engine, page)?;
+    // Fit a box THUMB_WIDTH wide, and not much taller, whatever the orientation.
+    let scale = (THUMB_WIDTH / size.width).min(THUMB_WIDTH * 1.4 / size.height);
+    render_page(engine, page, scale, scale_factor, 0.0)
 }
 
-/// Splits a tightly packed RGBA image into rows of tiles of at most [`TILE_EDGE`] pixels.
-fn slice_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<Vec<RawTile>> {
-    let stride = width as usize * 4;
-    (0..height)
-        .step_by(TILE_EDGE as usize)
-        .map(|y| {
-            let tile_h = TILE_EDGE.min(height - y);
-            (0..width)
-                .step_by(TILE_EDGE as usize)
-                .map(|x| {
-                    let tile_w = TILE_EDGE.min(width - x);
-                    let mut tile = Vec::with_capacity(tile_w as usize * tile_h as usize * 4);
-                    for row in y..y + tile_h {
-                        let start = row as usize * stride + x as usize * 4;
-                        tile.extend_from_slice(&pixels[start..start + tile_w as usize * 4]);
-                    }
-                    RawTile {
-                        width: tile_w,
-                        height: tile_h,
-                        pixels: tile,
-                    }
-                })
-                .collect()
+/// Everything needed to write the edited document, gathered on the UI thread.
+#[derive(Debug)]
+struct Export {
+    engine: Worker,
+    base: PathBuf,
+    stamp: Option<FileStamp>,
+    imports: Vec<PathBuf>,
+    layout: Vec<LayoutPage>,
+}
+
+impl Export {
+    /// Writes the edited document to bytes and checks them with the rendering engine.
+    async fn run(self) -> Result<Vec<u8>, String> {
+        let expected = self.layout.len();
+        let Self {
+            engine,
+            base,
+            stamp,
+            imports,
+            layout,
+        } = self;
+        let bytes = blocking(move || {
+            if stamp.is_some() && FileStamp::of(&base).ok() != stamp {
+                return Err(format!(
+                    "“{}” was changed by another app after it was opened",
+                    file_name(&base)
+                ));
+            }
+            let read = |path: &PathBuf| {
+                std::fs::read(path).map_err(|e| format!("{}: {e}", file_name(path)))
+            };
+            let base_bytes = read(&base)?;
+            let import_bytes = imports.iter().map(read).collect::<Result<Vec<_>, _>>()?;
+            let sources: Vec<PdfSource<'_>> =
+                import_bytes.iter().map(|b| PdfSource::new(b)).collect();
+            ferrix_pdf::write_page_layout(PdfSource::new(&base_bytes), &sources, &layout)
+                .map_err(|e| e.to_string())
         })
-        .collect()
-}
+        .await?;
 
-// ── Small widgets ─────────────────────────────────────────────────────────────
-
-fn thin_scrollbar() -> scrollable::Scrollbar {
-    scrollable::Scrollbar::new()
-        .width(8)
-        .scroller_width(6)
-        .margin(2)
-}
-
-/// Lays out a page's tiles edge to edge.
-fn tiles(page: &PageImage) -> Element<'_, Message> {
-    column(page.rows.iter().map(|tiles| {
-        row(tiles.iter().map(|(handle, size)| {
-            image(handle.clone())
-                .width(size.width)
-                .height(size.height)
-                .into()
-        }))
-        .into()
-    }))
-    .width(page.logical.width)
-    .height(page.logical.height)
-    .into()
-}
-
-fn icon_button<'a>(
-    icon: Icon,
-    label: &'a str,
-    on_press: Option<Message>,
-    active: bool,
-) -> Element<'a, Message> {
-    let status = if on_press.is_some() {
-        button::Status::Active
-    } else {
-        button::Status::Disabled
-    };
-    let glyph = svg(icon.handle())
-        .width(17)
-        .height(17)
-        .style(theme::icon_for(status, active));
-    let button = button(container(glyph).center(30))
-        .padding(0)
-        .on_press_maybe(on_press)
-        .style(if active {
-            theme::ghost_active
-        } else {
-            theme::ghost
-        });
-    tooltip(
-        button,
-        container(text(label).size(12))
-            .padding([4, 8])
-            .style(theme::tooltip),
-        tooltip::Position::Bottom,
-    )
-    .gap(4)
-    .into()
-}
-
-fn muted<'a>(content: impl text::IntoFragment<'a>, size: f32) -> text::Text<'a> {
-    text(content).size(size).style(|theme: &Theme| text::Style {
-        color: Some(theme::tokens(theme).text_muted),
-    })
-}
-
-fn kbd(key: &str) -> Element<'_, Message> {
-    container(text(key).size(11))
-        .padding([2, 6])
-        .style(theme::kbd)
-        .into()
-}
-
-fn horizontal_divider<'a>() -> Element<'a, Message> {
-    container(Space::new().width(Length::Fill).height(1))
-        .style(theme::divider)
-        .into()
-}
-
-fn vertical_divider<'a>() -> Element<'a, Message> {
-    container(Space::new().width(1).height(Length::Fill))
-        .style(theme::divider)
-        .into()
-}
-
-fn toolbar_separator<'a>() -> Element<'a, Message> {
-    container(container(Space::new().width(1).height(18)).style(theme::divider))
-        .padding([0, 6])
-        .into()
-}
-
-fn doc_name(doc: &OpenDoc) -> String {
-    doc.info
-        .metadata
-        .title
-        .clone()
-        .unwrap_or_else(|| file_name(&doc.path))
-}
-
-fn file_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+        // Never replace a file with something our own engine can't open.
+        let check = bytes.clone();
+        let pages = flatten(
+            engine
+                .call(move |e| {
+                    let info = e.open(DocSource::Bytes(check), None)?;
+                    e.close(info.id);
+                    Ok(info.page_count)
+                })
+                .await,
+        )
+        .map_err(|e| format!("verification failed: {e}"))?;
+        if pages as usize != expected {
+            return Err(format!(
+                "verification failed: {pages} pages written, {expected} expected"
+            ));
+        }
+        Ok(bytes)
+    }
 }
 
 fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     use keyboard::Key;
     match key.as_ref() {
+        Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::Move { earlier: true }),
+        Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::Move { earlier: false }),
         Key::Named(Named::ArrowRight | Named::PageDown) => Some(Message::Next),
         Key::Named(Named::ArrowLeft | Named::PageUp) => Some(Message::Previous),
         Key::Named(Named::Home) => Some(Message::First),
         Key::Named(Named::End) => Some(Message::Last),
-        Key::Character(c) if modifiers.command() => match c {
-            "o" => Some(Message::OpenDialog),
-            "p" => Some(Message::Print),
-            "=" | "+" => Some(Message::ZoomIn),
-            "-" => Some(Message::ZoomOut),
-            "0" => Some(Message::ZoomPicked(ZoomChoice::Percent(100))),
-            "1" => Some(Message::FitPage),
-            "2" => Some(Message::FitWidth),
-            "\\" => Some(Message::ToggleSidebar),
-            _ => None,
-        },
+        Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
+        Key::Named(Named::Escape) => Some(Message::Escape),
+        Key::Character(c) if modifiers.command() => {
+            let shift = modifiers.shift();
+            match c.to_ascii_lowercase().as_str() {
+                "o" => Some(Message::OpenDialog),
+                "p" => Some(Message::Print),
+                "s" if shift => Some(Message::SaveAs),
+                "s" => Some(Message::Save),
+                "z" if shift => Some(Message::Redo),
+                "z" => Some(Message::Undo),
+                "y" => Some(Message::Redo),
+                "r" => Some(Message::Rotate(Rotation::R90)),
+                "l" => Some(Message::Rotate(Rotation::R270)),
+                "q" => Some(Message::CloseRequested),
+                "=" | "+" => Some(Message::ZoomIn),
+                "-" => Some(Message::ZoomOut),
+                "0" => Some(Message::ZoomPicked(ZoomChoice::Percent(100))),
+                "1" => Some(Message::FitPage),
+                "2" => Some(Message::FitWidth),
+                "\\" => Some(Message::ToggleSidebar),
+                _ => None,
+            }
+        }
         _ => None,
-    }
-}
-
-fn flatten<T>(result: Result<Result<T, EngineError>, EngineUnavailable>) -> Result<T, String> {
-    match result {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -1305,26 +1099,157 @@ mod tests {
     }
 
     #[test]
-    fn tiles_cover_the_image_exactly() {
-        let (w, h) = (1100, 600);
-        let pixels: Vec<u8> = (0..w * h).flat_map(u32::to_le_bytes).collect();
-        let rows = slice_tiles(&pixels, w, h);
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0].iter().map(|t| t.width).collect::<Vec<_>>(),
-            [512, 512, 76]
-        );
-        assert_eq!(rows[1][0].height, 88);
-        // The first pixel of tile (1, 2) is image pixel (1024, 512).
-        let first = u32::from_le_bytes(rows[1][2].pixels[..4].try_into().expect("4 bytes"));
-        assert_eq!(first, 512 * w + 1024);
-    }
-
-    #[test]
     fn auto_zoom_never_enlarges_past_the_cap() {
         let huge = iced::Size::new(4000.0, 4000.0);
         assert_eq!(Zoom::Auto.resolve(LETTER, huge), MAX_AUTO_ZOOM);
         assert_eq!(Zoom::Fixed(9.0).resolve(LETTER, huge), MAX_ZOOM);
+    }
+
+    #[test]
+    fn shortcuts_respect_shift_and_case() {
+        let cmd = keyboard::Modifiers::COMMAND;
+        let cmd_shift = cmd | keyboard::Modifiers::SHIFT;
+        let z = keyboard::Key::Character("z".into());
+        let big_z = keyboard::Key::Character("Z".into());
+        assert!(matches!(shortcut(&z, cmd), Some(Message::Undo)));
+        assert!(matches!(shortcut(&big_z, cmd_shift), Some(Message::Redo)));
+        assert!(matches!(
+            shortcut(&keyboard::Key::Character("s".into()), cmd_shift),
+            Some(Message::SaveAs)
+        ));
+    }
+
+    /// A minimal PDF whose pages read "Page 1", "Page 2", ….
+    fn fixture(pages: u32) -> Vec<u8> {
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            String::new(), // page tree, filled in below
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut kids = Vec::new();
+        for n in 1..=pages {
+            let content = format!("BT /F1 24 Tf 72 700 Td (Page {n}) Tj ET");
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ));
+            let page_id = objects.len() + 1;
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                 /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                page_id - 1
+            ));
+            kids.push(format!("{page_id} 0 R"));
+        }
+        objects[1] = format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        );
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).into_bytes());
+        }
+        let xref = out.len();
+        out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).into_bytes());
+        for offset in offsets {
+            out.extend(format!("{offset:010} 00000 n \n").into_bytes());
+        }
+        out.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .into_bytes(),
+        );
+        out
+    }
+
+    fn worker() -> Option<Worker> {
+        match PdfiumEngine::new() {
+            Ok(engine) => Some(EngineWorker::spawn(engine).expect("engine thread")),
+            Err(e) if std::env::var_os("CI").is_none() => {
+                eprintln!("skipping: {e}");
+                None
+            }
+            Err(e) => panic!("PDFium is required on CI: {e}"),
+        }
+    }
+
+    fn open_fixture(worker: &Worker, name: &str, pages: u32) -> Document {
+        let dir = std::env::temp_dir().join(format!("ferrix-app-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, fixture(pages)).expect("write fixture");
+        let source = DocSource::Path(path.clone());
+        let info = flatten(iced::futures::executor::block_on(
+            worker.call(move |e| e.open(source, None)),
+        ))
+        .expect("opens");
+        Document::new(path, info)
+    }
+
+    fn export(worker: &Worker, doc: &Document) -> Result<Vec<u8>, String> {
+        iced::futures::executor::block_on(
+            Export {
+                engine: worker.clone(),
+                base: doc.path.clone(),
+                stamp: doc.stamp,
+                imports: doc.import_paths(),
+                layout: doc.layout(),
+            }
+            .run(),
+        )
+    }
+
+    #[test]
+    fn export_writes_the_edited_page_list() {
+        let Some(worker) = worker() else { return };
+        let mut doc = open_fixture(&worker, "export.pdf", 4);
+        let keys: Vec<PageKey> = (0..4).filter_map(|i| doc.key_at(i)).collect();
+        doc.edit(
+            Edit::Remove {
+                keys: vec![keys[1]],
+            },
+            "Delete".into(),
+        )
+        .expect("delete");
+        let to_front = doc.pages.move_edit(&[keys[3]], 0).expect("move");
+        doc.edit(to_front, "Move".into()).expect("move");
+        doc.edit(
+            Edit::Rotate {
+                keys: vec![keys[0]],
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        )
+        .expect("rotate");
+
+        let bytes = export(&worker, &doc).expect("export");
+        let (texts, first_rotation) =
+            flatten(iced::futures::executor::block_on(worker.call(move |e| {
+                let info = e.open(DocSource::Bytes(bytes), None)?;
+                let texts = (0..info.page_count)
+                    .map(|i| {
+                        e.text_page(info.id, ferrix_types::PageIndex(i))
+                            .map(|t| t.text().trim().to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let rotation = e.page_info(info.id, ferrix_types::PageIndex(1))?.rotation;
+                Ok((texts, rotation))
+            })))
+            .expect("reads back");
+        assert_eq!(texts, ["Page 4", "Page 1", "Page 3"]);
+        assert_eq!(first_rotation, Rotation::R90);
+    }
+
+    #[test]
+    fn export_refuses_a_file_changed_by_another_app() {
+        let Some(worker) = worker() else { return };
+        let doc = open_fixture(&worker, "changed.pdf", 2);
+        std::fs::write(&doc.path, fixture(3)).expect("external change");
+        let error = export(&worker, &doc).expect_err("must refuse");
+        assert!(error.contains("changed by another app"), "{error}");
     }
 }

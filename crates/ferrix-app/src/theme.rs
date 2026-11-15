@@ -195,6 +195,32 @@ pub fn badge(theme: &Theme) -> container::Style {
     }
 }
 
+/// Dims the window behind a dialog.
+pub fn backdrop(theme: &Theme) -> container::Style {
+    let shade = if theme.extended_palette().is_dark {
+        0.5
+    } else {
+        0.25
+    };
+    container::Style::default().background(Color::BLACK.scale_alpha(shade))
+}
+
+/// A raised dialog surface.
+pub fn card(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(Background::Color(t.surface)),
+        text_color: Some(t.text),
+        border: border(t.border, 1.0, 10.0),
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.25),
+            offset: Vector::new(0.0, 8.0),
+            blur_radius: 28.0,
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn kbd(theme: &Theme) -> container::Style {
     let t = tokens(theme);
     container::Style {
@@ -257,6 +283,22 @@ pub fn primary(theme: &Theme, status: button::Status) -> button::Style {
             offset: Vector::new(0.0, 1.0),
             blur_radius: 2.0,
         },
+        ..button::Style::default()
+    }
+}
+
+/// A bordered neutral button, for the non-default choices in dialogs.
+pub fn secondary(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let background = match status {
+        button::Status::Hovered => t.hover,
+        button::Status::Pressed => t.pressed,
+        button::Status::Active | button::Status::Disabled => Color::TRANSPARENT,
+    };
+    button::Style {
+        background: Some(Background::Color(background)),
+        text_color: t.text,
+        border: border(t.border_strong, 1.0, RADIUS),
         ..button::Style::default()
     }
 }

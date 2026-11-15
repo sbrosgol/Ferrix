@@ -13,8 +13,11 @@ publish = false
 
 [workspace.dependencies]
 ferrix-types = { path = "crates/ferrix-types" }
+ferrix-core = { path = "crates/ferrix-core" }
 ferrix-engine = { path = "crates/ferrix-engine" }
 ferrix-engine-pdfium = { path = "crates/ferrix-engine-pdfium" }
+ferrix-io = { path = "crates/ferrix-io" }
+ferrix-pdf = { path = "crates/ferrix-pdf" }
 ferrix-print = { path = "crates/ferrix-print" }
 
 anyhow = "1.0.104"
@@ -22,6 +25,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 flate2 = "1.1.11"
 iced = { version = "0.14.0", features = ["image", "svg", "tokio"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+lopdf = { version = "=0.46.0", default-features = false }
 pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_8125", "thread_safe"] }
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -1,0 +1,654 @@
+//! Layout: toolbar, page sidebar, canvas, status bar and dialogs.
+
+use ferrix_types::Rotation;
+use iced::{
+    Alignment, Element, Font, Length, Theme, font,
+    widget::{
+        Space, button, column, container, image, mouse_area, opaque, pick_list, row, scrollable,
+        stack, svg, text, text_input, tooltip,
+    },
+};
+
+use crate::{
+    app::{
+        App, Choice, MAX_ZOOM, MIN_ZOOM, Message, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice,
+        page_scroll_id, sidebar_scroll_id,
+    },
+    document::{Document, MAX_THUMBNAILS},
+    icon::Icon,
+    render::PageImage,
+    theme::{self, Tokens},
+};
+
+const TOOLBAR_HEIGHT: f32 = 46.0;
+const STATUS_HEIGHT: f32 = 26.0;
+const SIDEBAR_WIDTH: f32 = 188.0;
+const PAGE_MARGIN: f32 = 28.0;
+const SCROLLBAR_ALLOWANCE: f32 = 12.0;
+/// Space for the macOS traffic lights, which sit over our toolbar.
+const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
+
+const SEMIBOLD: Font = Font {
+    weight: font::Weight::Semibold,
+    ..Font::DEFAULT
+};
+
+/// Logical size available to a page inside the canvas.
+pub(crate) fn canvas_size(window: iced::Size, sidebar: bool) -> iced::Size {
+    let sidebar = if sidebar { SIDEBAR_WIDTH + 1.0 } else { 0.0 };
+    iced::Size::new(
+        (window.width - sidebar - 2.0 * PAGE_MARGIN - SCROLLBAR_ALLOWANCE).max(64.0),
+        (window.height - TOOLBAR_HEIGHT - STATUS_HEIGHT - 2.0 - 2.0 * PAGE_MARGIN).max(64.0),
+    )
+}
+
+impl App {
+    pub(crate) fn view(&self) -> Element<'_, Message> {
+        let main: Element<'_, Message> = match (&self.doc, &self.page_image) {
+            (None, _) => self.empty_state(),
+            (Some(_), Some(page)) => self.page_view(page),
+            (Some(_), None) => container(muted("Loading…", 13.0))
+                .center(Length::Fill)
+                .style(theme::canvas)
+                .into(),
+        };
+
+        let body: Element<'_, Message> = match &self.doc {
+            Some(doc) if self.sidebar => {
+                row![self.sidebar_view(doc), vertical_divider(), main].into()
+            }
+            _ => main,
+        };
+
+        let window = column![
+            self.toolbar(),
+            horizontal_divider(),
+            container(body).height(Length::Fill),
+            horizontal_divider(),
+            self.status_bar(),
+        ];
+        match (&self.confirm, &self.doc) {
+            (Some(_), Some(doc)) => stack![window, save_changes_dialog(doc)].into(),
+            _ => window.into(),
+        }
+    }
+
+    fn toolbar(&self) -> Element<'_, Message> {
+        let doc = self.doc.as_ref();
+        let has_doc = doc.is_some();
+        let (page, count) = doc.map_or((0, 0), |d| (d.current, d.len()));
+        let editable = self.can_edit();
+        let dirty = doc.is_some_and(Document::is_dirty);
+
+        let title: Element<'_, Message> = match doc {
+            Some(doc) => row![
+                text(doc.name())
+                    .size(13)
+                    .font(SEMIBOLD)
+                    .wrapping(text::Wrapping::None),
+                muted(if dirty { "Edited" } else { "" }, 12.0),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            None => text("Ferrix").size(13).font(SEMIBOLD).into(),
+        };
+        let undo_tip = doc
+            .and_then(|d| d.history.undo_label())
+            .map_or_else(|| "Undo (⌘Z)".to_owned(), |l| format!("Undo {l} (⌘Z)"));
+        let redo_tip = doc
+            .and_then(|d| d.history.redo_label())
+            .map_or_else(|| "Redo (⇧⌘Z)".to_owned(), |l| format!("Redo {l} (⇧⌘Z)"));
+        let left = row![
+            Space::new().width(TRAFFIC_LIGHTS),
+            icon_button(
+                Icon::PanelLeft,
+                "Toggle sidebar (⌘\\)",
+                has_doc.then_some(Message::ToggleSidebar),
+                self.sidebar && has_doc,
+            ),
+            icon_button(
+                Icon::FolderOpen,
+                "Open… (⌘O)",
+                Some(Message::OpenDialog),
+                false
+            ),
+            icon_button(
+                Icon::Save,
+                "Save (⌘S)",
+                (dirty && editable).then_some(Message::Save),
+                false,
+            ),
+            icon_button(
+                Icon::Printer,
+                "Print… (⌘P)",
+                (has_doc && self.busy.is_none()).then_some(Message::Print),
+                false,
+            ),
+            toolbar_separator(),
+            icon_button(
+                Icon::Undo,
+                undo_tip,
+                (editable && doc.is_some_and(|d| d.history.undo_label().is_some()))
+                    .then_some(Message::Undo),
+                false,
+            ),
+            icon_button(
+                Icon::Redo,
+                redo_tip,
+                (editable && doc.is_some_and(|d| d.history.redo_label().is_some()))
+                    .then_some(Message::Redo),
+                false,
+            ),
+            Space::new().width(8),
+            title,
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center);
+
+        let page_field = text_input("", if has_doc { &self.page_input } else { "" })
+            .on_input_maybe(has_doc.then_some(Message::PageInput))
+            .on_submit(Message::PageSubmit)
+            .size(13)
+            .width(46)
+            .padding([4, 6])
+            .align_x(Alignment::Center)
+            .style(theme::input);
+        let center = row![
+            icon_button(
+                Icon::ChevronLeft,
+                "Previous page",
+                (has_doc && page > 0).then_some(Message::Previous),
+                false,
+            ),
+            page_field,
+            muted(
+                if has_doc {
+                    format!("of {count}")
+                } else {
+                    "of –".into()
+                },
+                13.0
+            ),
+            icon_button(
+                Icon::ChevronRight,
+                "Next page",
+                (has_doc && page + 1 < count).then_some(Message::Next),
+                false,
+            ),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+
+        let zoom = doc.and_then(|d| d.shown).map(|(_, z)| z);
+        let zoom_label = zoom.map(|z| ZoomChoice::Percent((z * 100.0).round() as u16));
+        let theme_icon = if self.is_dark() {
+            Icon::Sun
+        } else {
+            Icon::Moon
+        };
+        let right = row![
+            icon_button(
+                Icon::ZoomOut,
+                "Zoom out (⌘−)",
+                zoom.filter(|z| *z > MIN_ZOOM + 0.001)
+                    .map(|_| Message::ZoomOut),
+                false,
+            ),
+            pick_list(ZOOM_CHOICES, zoom_label, Message::ZoomPicked)
+                .placeholder("–")
+                .text_size(13)
+                .padding([4, 8])
+                .width(92)
+                .style(theme::select)
+                .menu_style(theme::select_menu),
+            icon_button(
+                Icon::ZoomIn,
+                "Zoom in (⌘+)",
+                zoom.filter(|z| *z < MAX_ZOOM - 0.001)
+                    .map(|_| Message::ZoomIn),
+                false,
+            ),
+            toolbar_separator(),
+            icon_button(
+                Icon::FitWidth,
+                "Fit width (⌘2)",
+                has_doc.then_some(Message::FitWidth),
+                has_doc && self.zoom == Zoom::FitWidth,
+            ),
+            icon_button(
+                Icon::FitPage,
+                "Fit page (⌘1)",
+                has_doc.then_some(Message::FitPage),
+                has_doc && self.zoom == Zoom::FitPage,
+            ),
+            toolbar_separator(),
+            icon_button(
+                theme_icon,
+                "Toggle light/dark",
+                Some(Message::ToggleTheme),
+                false
+            ),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center);
+
+        let bar = container(
+            row![
+                container(left).width(Length::Fill),
+                center,
+                container(right).width(Length::Fill).align_x(Alignment::End),
+            ]
+            .align_y(Alignment::Center),
+        )
+        .height(TOOLBAR_HEIGHT)
+        .padding([0, 8])
+        .center_y(TOOLBAR_HEIGHT)
+        .style(theme::chrome);
+
+        // With the macOS title bar merged into the toolbar, the toolbar must move the window.
+        if cfg!(target_os = "macos") {
+            mouse_area(bar).on_press(Message::DragWindow).into()
+        } else {
+            bar.into()
+        }
+    }
+
+    fn sidebar_view<'a>(&'a self, doc: &'a Document) -> Element<'a, Message> {
+        let editable = self.can_edit();
+        let targets = doc.targets();
+        let positions: Vec<usize> = targets
+            .iter()
+            .filter_map(|k| doc.pages.position(*k))
+            .collect();
+        let can_move_up = positions.first().is_some_and(|&p| p > 0);
+        let can_move_down = positions.last().is_some_and(|&p| p + 1 < doc.len());
+        let can_delete = targets.len() < doc.len();
+        let enabled = |ok: bool, message: Message| (editable && ok).then_some(message);
+
+        let actions = row![
+            icon_button(
+                Icon::RotateLeft,
+                "Rotate left (⌘L)",
+                enabled(true, Message::Rotate(Rotation::R270)),
+                false,
+            ),
+            icon_button(
+                Icon::RotateRight,
+                "Rotate right (⌘R)",
+                enabled(true, Message::Rotate(Rotation::R90)),
+                false,
+            ),
+            icon_button(
+                Icon::MoveUp,
+                "Move earlier (⌥↑)",
+                enabled(can_move_up, Message::Move { earlier: true }),
+                false,
+            ),
+            icon_button(
+                Icon::MoveDown,
+                "Move later (⌥↓)",
+                enabled(can_move_down, Message::Move { earlier: false }),
+                false,
+            ),
+            icon_button(
+                Icon::Delete,
+                "Delete (⌫)",
+                enabled(can_delete, Message::Delete),
+                false,
+            ),
+            icon_button(
+                Icon::InsertPages,
+                "Insert pages from file…",
+                enabled(true, Message::InsertDialog),
+                false,
+            ),
+        ]
+        .spacing(0);
+        let header = container(actions)
+            .width(Length::Fill)
+            .padding([6, 4])
+            .center_x(Length::Fill);
+
+        let thumbs = doc
+            .pages
+            .entries()
+            .iter()
+            .take(MAX_THUMBNAILS)
+            .enumerate()
+            .map(|(i, entry)| {
+                let selected = doc.selection.contains(&entry.key);
+                let current = i == doc.current;
+                let paper: Element<'_, Message> = match doc.thumbnails.get(&entry.key) {
+                    Some(thumb) => tiles(&thumb.image),
+                    None => Space::new()
+                        .width(THUMB_WIDTH)
+                        .height(THUMB_WIDTH * 1.3)
+                        .into(),
+                };
+                let label = text((i + 1).to_string())
+                    .size(12)
+                    .font(if current { SEMIBOLD } else { Font::DEFAULT })
+                    .style(move |theme: &Theme| {
+                        let t = theme::tokens(theme);
+                        text::Style {
+                            color: Some(if selected { t.accent } else { t.text_muted }),
+                        }
+                    });
+                let ring = container(container(paper).style(theme::page))
+                    .padding(4)
+                    .style(move |theme| theme::thumbnail_ring(theme, selected));
+                button(column![ring, label].spacing(6).align_x(Alignment::Center))
+                    .on_press(Message::ThumbnailClicked(entry.key))
+                    .padding(0)
+                    .style(theme::plain)
+                    .into()
+            });
+        let list = column(thumbs)
+            .spacing(14)
+            .padding([12, 0])
+            .width(Length::Fill)
+            .align_x(Alignment::Center);
+
+        container(column![
+            header,
+            horizontal_divider(),
+            scrollable(list)
+                .direction(scrollable::Direction::Vertical(thin_scrollbar()))
+                .id(sidebar_scroll_id())
+                .height(Length::Fill)
+                .style(theme::scrollbar),
+        ])
+        .width(SIDEBAR_WIDTH)
+        .height(Length::Fill)
+        .style(theme::chrome)
+        .into()
+    }
+
+    fn page_view<'a>(&self, page: &'a PageImage) -> Element<'a, Message> {
+        let paper = container(tiles(page)).style(theme::page);
+        let canvas = self.canvas_size();
+        let fits_x = page.logical.width <= canvas.width + SCROLLBAR_ALLOWANCE;
+        let fits_y = page.logical.height <= canvas.height;
+
+        let view: Element<'a, Message> = if fits_x && fits_y {
+            container(paper).center(Length::Fill).into()
+        } else {
+            let content = container(paper).padding(PAGE_MARGIN);
+            let scroll = if fits_x {
+                scrollable(content.center_x(Length::Fill))
+                    .direction(scrollable::Direction::Vertical(thin_scrollbar()))
+            } else {
+                scrollable(content).direction(scrollable::Direction::Both {
+                    vertical: thin_scrollbar(),
+                    horizontal: thin_scrollbar(),
+                })
+            };
+            scroll
+                .id(page_scroll_id())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(theme::scrollbar)
+                .into()
+        };
+        container(view).style(theme::canvas).into()
+    }
+
+    fn empty_state(&self) -> Element<'_, Message> {
+        let failed = self.engine.is_err();
+        let (icon, heading, body) = if failed {
+            (
+                Icon::Alert,
+                "The PDF engine couldn’t start",
+                "Ferrix needs the PDFium library. In a development checkout, run \
+                 `cargo xtask fetch-pdfium`.",
+            )
+        } else {
+            (
+                Icon::FileText,
+                "No document open",
+                "Open a PDF to start reading, or drop a file anywhere in this window.",
+            )
+        };
+        let badge = container(
+            svg(icon.handle())
+                .width(34)
+                .height(34)
+                .style(theme::icon_colored(if failed {
+                    |t: &Tokens| t.danger
+                } else {
+                    |t: &Tokens| t.accent
+                })),
+        )
+        .padding(21)
+        .style(theme::badge);
+
+        let open = button(
+            row![
+                svg(Icon::FolderOpen.handle())
+                    .width(16)
+                    .height(16)
+                    .style(theme::icon_colored(|t| t.on_accent)),
+                text("Open PDF…").size(14).font(SEMIBOLD),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([9, 18])
+        .style(theme::primary)
+        .on_press_maybe((!failed).then_some(Message::OpenDialog));
+
+        let shortcut_hint = row![
+            kbd(if cfg!(target_os = "macos") {
+                "⌘"
+            } else {
+                "Ctrl"
+            }),
+            kbd("O"),
+        ]
+        .spacing(4);
+
+        let content = column![
+            badge,
+            Space::new().height(4),
+            text(heading).size(20).font(SEMIBOLD),
+            container(muted(body, 14.0).align_x(Alignment::Center)).max_width(380),
+            Space::new().height(6),
+            open,
+            shortcut_hint,
+        ]
+        .spacing(10)
+        .align_x(Alignment::Center);
+
+        container(content)
+            .center(Length::Fill)
+            .style(theme::canvas)
+            .into()
+    }
+
+    fn status_bar(&self) -> Element<'_, Message> {
+        let left: Element<'_, Message> = if let Some(busy) = self.busy {
+            muted(busy, 12.0).into()
+        } else if let Some(error) = &self.error {
+            dismissible(
+                row![
+                    svg(Icon::Alert.handle())
+                        .width(14)
+                        .height(14)
+                        .style(theme::icon_colored(|t| t.danger)),
+                    text(error).size(12).style(|theme: &Theme| text::Style {
+                        color: Some(theme::tokens(theme).danger),
+                    }),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .into(),
+            )
+        } else if let Some(notice) = &self.notice {
+            dismissible(muted(notice, 12.0).into())
+        } else if let Some(doc) = &self.doc {
+            let count = doc.len();
+            let mut parts = vec![format!("{count} page{}", if count == 1 { "" } else { "s" })];
+            if let Some(version) = &doc.info.pdf_version {
+                parts.push(format!("PDF {version}"));
+            }
+            if let Some((size, _)) = doc.shown {
+                parts.push(format!("{:.0} × {:.0} pt", size.width, size.height));
+            }
+            if doc.selection.len() > 1 {
+                parts.push(format!("{} selected", doc.selection.len()));
+            }
+            muted(parts.join("  ·  "), 12.0).into()
+        } else {
+            muted("Ready", 12.0).into()
+        };
+        let right = match &self.doc {
+            Some(doc) => format!("Page {} of {}", doc.current + 1, doc.len()),
+            None => String::new(),
+        };
+        container(
+            row![container(left).width(Length::Fill), muted(right, 12.0)]
+                .align_y(Alignment::Center),
+        )
+        .height(STATUS_HEIGHT)
+        .padding([0, 12])
+        .center_y(STATUS_HEIGHT)
+        .style(theme::chrome)
+        .into()
+    }
+}
+
+/// "Save changes?" before closing or replacing an edited document.
+fn save_changes_dialog(doc: &Document) -> Element<'_, Message> {
+    let card = column![
+        text(format!("Save changes to “{}”?", doc.name()))
+            .size(15)
+            .font(SEMIBOLD),
+        muted("Your changes will be lost if you don’t save them.", 13.0),
+        Space::new().height(8),
+        row![
+            button(text("Don’t Save").size(13))
+                .padding([6, 14])
+                .style(theme::secondary)
+                .on_press(Message::Confirmed(Choice::Discard)),
+            Space::new().width(Length::Fill),
+            button(text("Cancel").size(13))
+                .padding([6, 14])
+                .style(theme::secondary)
+                .on_press(Message::Confirmed(Choice::Cancel)),
+            button(text("Save").size(13).font(SEMIBOLD))
+                .padding([6, 18])
+                .style(theme::primary)
+                .on_press(Message::Confirmed(Choice::Save)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(6)
+    .padding(20)
+    .width(420);
+    opaque(
+        container(container(card).style(theme::card))
+            .center(Length::Fill)
+            .style(theme::backdrop),
+    )
+}
+
+// ── Small widgets ─────────────────────────────────────────────────────────────
+
+fn thin_scrollbar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(8)
+        .scroller_width(6)
+        .margin(2)
+}
+
+/// Lays out a page's tiles edge to edge.
+fn tiles(page: &PageImage) -> Element<'_, Message> {
+    column(page.rows.iter().map(|tiles| {
+        row(tiles.iter().map(|(handle, size)| {
+            image(handle.clone())
+                .width(size.width)
+                .height(size.height)
+                .into()
+        }))
+        .into()
+    }))
+    .width(page.logical.width)
+    .height(page.logical.height)
+    .into()
+}
+
+fn icon_button<'a>(
+    icon: Icon,
+    label: impl text::IntoFragment<'a>,
+    on_press: Option<Message>,
+    active: bool,
+) -> Element<'a, Message> {
+    let status = if on_press.is_some() {
+        button::Status::Active
+    } else {
+        button::Status::Disabled
+    };
+    let glyph = svg(icon.handle())
+        .width(17)
+        .height(17)
+        .style(theme::icon_for(status, active));
+    let button = button(container(glyph).center(30))
+        .padding(0)
+        .on_press_maybe(on_press)
+        .style(if active {
+            theme::ghost_active
+        } else {
+            theme::ghost
+        });
+    tooltip(
+        button,
+        container(text(label).size(12))
+            .padding([4, 8])
+            .style(theme::tooltip),
+        tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .into()
+}
+
+/// Status-bar content that clears when clicked.
+fn dismissible(content: Element<'_, Message>) -> Element<'_, Message> {
+    button(content)
+        .padding(0)
+        .style(theme::plain)
+        .on_press(Message::DismissStatus)
+        .into()
+}
+
+fn muted<'a>(content: impl text::IntoFragment<'a>, size: f32) -> text::Text<'a> {
+    text(content).size(size).style(|theme: &Theme| text::Style {
+        color: Some(theme::tokens(theme).text_muted),
+    })
+}
+
+fn kbd(key: &str) -> Element<'_, Message> {
+    container(text(key).size(11))
+        .padding([2, 6])
+        .style(theme::kbd)
+        .into()
+}
+
+fn horizontal_divider<'a>() -> Element<'a, Message> {
+    container(Space::new().width(Length::Fill).height(1))
+        .style(theme::divider)
+        .into()
+}
+
+fn vertical_divider<'a>() -> Element<'a, Message> {
+    container(Space::new().width(1).height(Length::Fill))
+        .style(theme::divider)
+        .into()
+}
+
+fn toolbar_separator<'a>() -> Element<'a, Message> {
+    container(container(Space::new().width(1).height(18)).style(theme::divider))
+        .padding([0, 6])
+        .into()
+}

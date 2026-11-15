@@ -19,8 +19,11 @@ path = "src/main.rs"
 name = "screenshot"
 
 [dependencies]
+ferrix-core.workspace = true
 ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
+ferrix-io.workspace = true
+ferrix-pdf.workspace = true
 ferrix-print.workspace = true
 ferrix-types.workspace = true
 iced.workspace = true

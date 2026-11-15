@@ -22,6 +22,15 @@ pub(crate) enum Icon {
     Moon,
     FileText,
     Alert,
+    Save,
+    Undo,
+    Redo,
+    RotateLeft,
+    RotateRight,
+    MoveUp,
+    MoveDown,
+    Delete,
+    InsertPages,
 }
 
 macro_rules! icons {
@@ -56,6 +65,15 @@ icons! {
     Moon => "moon",
     FileText => "file-text",
     Alert => "circle-alert",
+    Save => "save",
+    Undo => "undo-2",
+    Redo => "redo-2",
+    RotateLeft => "rotate-ccw",
+    RotateRight => "rotate-cw",
+    MoveUp => "arrow-up",
+    MoveDown => "arrow-down",
+    Delete => "trash-2",
+    InsertPages => "file-plus",
 }
 
 fn load(source: &str) -> svg::Handle {
