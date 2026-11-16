@@ -213,6 +213,11 @@ fn bundle(release: bool, open: bool, files: &[PathBuf]) -> Result<()> {
     // The engine looks for PDFium in the bundle's Frameworks directory first.
     fs::copy(&pdfium, contents.join("Frameworks/libpdfium.dylib")).context("cannot copy PDFium")?;
     fs::write(contents.join("Info.plist"), info_plist())?;
+    make_icns(
+        &root.join("crates/ferrix-app/assets/app-icon.svg"),
+        &out.join("Ferrix.iconset"),
+        &contents.join("Resources/Ferrix.icns"),
+    )?;
 
     // Ad-hoc signature, so the copied binary and library run as one app on Apple silicon.
     let signed = Command::new("codesign")
@@ -237,6 +242,46 @@ fn bundle(release: bool, open: bool, files: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// Renders the SVG app icon at every size macOS asks for and packs them with `iconutil`.
+fn make_icns(svg: &Path, iconset: &Path, icns: &Path) -> Result<()> {
+    use resvg::{tiny_skia, usvg};
+
+    let data = fs::read(svg).with_context(|| format!("cannot read {}", svg.display()))?;
+    let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
+        .with_context(|| format!("cannot parse {}", svg.display()))?;
+    if iconset.exists() {
+        fs::remove_dir_all(iconset)?;
+    }
+    fs::create_dir_all(iconset)?;
+    for points in [16, 32, 128, 256, 512] {
+        for (scale, suffix) in [(1, ""), (2, "@2x")] {
+            let pixels = points * scale;
+            let mut pixmap =
+                tiny_skia::Pixmap::new(pixels, pixels).context("icon size out of range")?;
+            let zoom = pixels as f32 / tree.size().width();
+            resvg::render(
+                &tree,
+                tiny_skia::Transform::from_scale(zoom, zoom),
+                &mut pixmap.as_mut(),
+            );
+            pixmap
+                .save_png(iconset.join(format!("icon_{points}x{points}{suffix}.png")))
+                .context("cannot write icon PNG")?;
+        }
+    }
+    let packed = Command::new("iconutil")
+        .args(["--convert", "icns", "--output"])
+        .arg(icns)
+        .arg(iconset)
+        .status()
+        .context("cannot run iconutil")?;
+    if !packed.success() {
+        bail!("iconutil failed");
+    }
+    fs::remove_dir_all(iconset)?;
+    Ok(())
+}
+
 fn info_plist() -> String {
     let version = env!("CARGO_PKG_VERSION");
     format!(
@@ -247,6 +292,8 @@ fn info_plist() -> String {
     <key>CFBundleName</key>
     <string>Ferrix</string>
     <key>CFBundleDisplayName</key>
+    <string>Ferrix</string>
+    <key>CFBundleIconFile</key>
     <string>Ferrix</string>
     <key>CFBundleExecutable</key>
     <string>Ferrix</string>
