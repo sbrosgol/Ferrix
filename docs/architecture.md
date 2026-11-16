@@ -346,6 +346,9 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 - **macOS:** universal `.app` in signed, notarized `.dmg`; Homebrew cask.
 - **Windows:** MSIX + MSI, Authenticode signed; winget.
 - **Linux:** Flatpak (Flathub) primary, AppImage secondary, `.deb`/`.rpm` from CI.
+  Today the release `.tar.gz` carries `install.sh`, which puts the app, its desktop entry
+  (`dist/linux/io.github.sbrosgol.ferrix.desktop`) and icon under `~/.local`; the window's
+  app id is the same reverse-DNS name, so desktops match windows to the entry.
 - PDFium shipped as a pinned prebuilt dynamic library (bblanchon/pdfium-binaries `chromium/8125`,
   matching the `pdfium_8125` feature of `pdfium-render`; bump both together), SHA-256-verified
   by `xtask fetch-pdfium`, loaded at runtime from the bundle.

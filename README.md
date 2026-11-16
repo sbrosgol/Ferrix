@@ -50,6 +50,9 @@ cargo run -p ferrix-cli -- render document.pdf --pages 1-3 --dpi 144 -o out/
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
+On Linux, run `./install.sh` from an unpacked release to add Ferrix to your applications menu
+and offer it for PDFs (it installs into `~/.local`; `./install.sh --uninstall` removes it).
+
 ## License
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.

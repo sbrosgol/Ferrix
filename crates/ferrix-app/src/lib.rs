@@ -67,6 +67,13 @@ fn window_settings() -> window::Settings {
             titlebar_transparent: true,
             fullsize_content_view: true,
         },
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            // Wayland's app id and X11's WM_CLASS: desktops match the window to
+            // `dist/linux/io.github.sbrosgol.ferrix.desktop` by it, for its name and icon.
+            application_id: "io.github.sbrosgol.ferrix".to_owned(),
+            ..window::settings::PlatformSpecific::default()
+        },
         ..window::Settings::default()
     }
 }
