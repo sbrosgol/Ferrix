@@ -73,6 +73,11 @@ enum Task {
         /// Documents to open with `--open`.
         files: Vec<PathBuf>,
     },
+    /// Render the app icon into a macOS `.icns` file (used by `dist/package.sh`).
+    Icns {
+        /// Where to write the `.icns` file.
+        out: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -89,6 +94,11 @@ fn main() -> Result<()> {
             open,
             files,
         } => bundle(release, open, &files),
+        Task::Icns { out } => make_icns(
+            &workspace_root().join("crates/ferrix-app/assets/app-icon.svg"),
+            &out.with_extension("iconset"),
+            &out,
+        ),
     }
 }
 
