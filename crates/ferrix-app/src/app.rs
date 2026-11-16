@@ -593,9 +593,9 @@ impl App {
                         );
                     }
                     Err(e) => {
-                        self.error = Some(format!("Couldn’t render this page: {e}"));
-                        // Don't retry a page that can't be rendered; show it blank.
-                        return Task::none();
+                        let page = doc.pages.position(key).map_or(0, |i| i + 1);
+                        self.error = Some(format!("Couldn’t show page {page}: {e}"));
+                        doc.render_failed.insert(key);
                     }
                 }
                 return self.render_pages();
@@ -2182,6 +2182,9 @@ impl App {
             .filter(|i| near.contains(i))
             .find_map(|i| {
                 let entry = doc.pages.get(i)?;
+                if doc.render_failed.contains(&entry.key) {
+                    return None;
+                }
                 let fresh = doc.images.get(&entry.key).is_some_and(|s| {
                     s.rotation == entry.rotation && s.zoom == zoom && s.scale_factor == scale_factor
                 });
