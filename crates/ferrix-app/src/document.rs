@@ -12,10 +12,18 @@ use ferrix_io::FileStamp;
 use ferrix_pdf::LayoutPage;
 use ferrix_types::{DocId, Rotation, Size};
 
-use crate::render::{PageImage, PageRef};
+use crate::{
+    render::{PageImage, PageRef},
+    strip::Strip,
+};
 
 /// Thumbnails beyond this are not rendered until the virtualized sidebar lands in M1.
 pub(crate) const MAX_THUMBNAILS: usize = 500;
+/// Assumed for pages not measured yet (US Letter), so the layout has something to show.
+const UNMEASURED: Size = Size {
+    width: 612.0,
+    height: 792.0,
+};
 
 /// Where a document's bytes come from.
 #[derive(Debug, Clone)]
@@ -77,6 +85,18 @@ impl Origin {
 pub(crate) struct Source {
     pub(crate) origin: Origin,
     pub(crate) doc: DocId,
+    /// Size of each page in points, without extra rotation; empty until measured.
+    pub(crate) sizes: Vec<Size>,
+}
+
+impl Source {
+    pub(crate) fn new(origin: Origin, doc: DocId) -> Self {
+        Self {
+            origin,
+            doc,
+            sizes: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -86,6 +106,15 @@ pub(crate) struct Thumbnail {
 }
 
 /// How a thumbnail click changes the selection.
+/// A page rendered for the main view.
+#[derive(Debug)]
+pub(crate) struct Shown {
+    pub(crate) rotation: Rotation,
+    pub(crate) zoom: f32,
+    pub(crate) scale_factor: f32,
+    pub(crate) image: PageImage,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Click {
     Replace,
@@ -102,12 +131,20 @@ pub(crate) struct Document {
     pub(crate) sources: Vec<Source>,
     pub(crate) pages: PageList,
     pub(crate) history: History,
-    /// Index of the page on screen.
+    /// Index of the page on screen: the one filling most of the view.
     pub(crate) current: usize,
     pub(crate) selection: BTreeSet<PageKey>,
     anchor: Option<PageKey>,
-    /// Displayed size and zoom of the page on screen.
-    pub(crate) shown: Option<(Size, f32)>,
+    /// Every page stacked for scrolling, at the current zoom.
+    pub(crate) strip: Strip,
+    /// Vertical scroll position of the page view, in logical pixels.
+    pub(crate) scroll: f32,
+    /// How far down the current page the view starts, as a fraction of its height; kept
+    /// when zoom or the pages change so the view stays on the same spot.
+    pub(crate) scroll_within: f32,
+    /// Rendered pages near the view.
+    pub(crate) images: HashMap<PageKey, Shown>,
+    pub(crate) render_busy: bool,
     pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
     pub(crate) thumbnail_busy: bool,
 }
@@ -117,10 +154,7 @@ impl Document {
         let pages = PageList::identity(info.page_count);
         let mut doc = Self {
             stamp: origin.path().and_then(|p| FileStamp::of(p).ok()),
-            sources: vec![Source {
-                origin: origin.clone(),
-                doc: info.id,
-            }],
+            sources: vec![Source::new(origin.clone(), info.id)],
             origin,
             info,
             pages,
@@ -128,7 +162,11 @@ impl Document {
             current: 0,
             selection: BTreeSet::new(),
             anchor: None,
-            shown: None,
+            strip: Strip::default(),
+            scroll: 0.0,
+            scroll_within: 0.0,
+            images: HashMap::new(),
+            render_busy: false,
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
         };
@@ -190,8 +228,37 @@ impl Document {
         })
     }
 
-    pub(crate) fn current_page(&self) -> Option<PageRef> {
-        self.pages.get(self.current).and_then(|e| self.page_ref(e))
+    /// Whether the document's own pages have been measured, so they can be laid out.
+    pub(crate) fn is_measured(&self) -> bool {
+        self.sources.first().is_some_and(|s| !s.sizes.is_empty())
+    }
+
+    /// Displayed size of a page in points, extra rotation included.
+    pub(crate) fn page_size(&self, entry: &PageEntry) -> Size {
+        let size = self
+            .sources
+            .get(entry.source.0 as usize)
+            .and_then(|s| s.sizes.get(entry.page.0 as usize))
+            .copied()
+            .unwrap_or(UNMEASURED);
+        if entry.rotation.is_sideways() {
+            Size::new(size.height, size.width)
+        } else {
+            size
+        }
+    }
+
+    pub(crate) fn page_sizes(&self) -> Vec<Size> {
+        self.pages
+            .entries()
+            .iter()
+            .map(|e| self.page_size(e))
+            .collect()
+    }
+
+    /// Size of the current page in points, as displayed.
+    pub(crate) fn current_size(&self) -> Option<Size> {
+        self.pages.get(self.current).map(|e| self.page_size(e))
     }
 
     /// The pages an action applies to: the selection in document order, or the current page.
@@ -272,6 +339,7 @@ impl Document {
         let present: BTreeSet<PageKey> = self.pages.entries().iter().map(|e| e.key).collect();
         self.selection.retain(|k| present.contains(k));
         self.thumbnails.retain(|k, _| present.contains(k));
+        self.images.retain(|k, _| present.contains(k));
         if self.selection.is_empty()
             && let Some(key) = self.key_at(self.current)
         {

@@ -44,3 +44,13 @@ Use **iced** (MIT) for `ferrix-app`, without a comparative trial.
   if needed), since iced does not provide them.
 - iced makes breaking releases; we pin a minor version and upgrade deliberately.
 - The toolkit stays confined to `ferrix-app`, so changing it later only touches that crate.
+
+## Implementation notes
+- **Continuous page view (interim, before `ferrix-render`).** PDF pages are stacked in one iced
+  `scrollable` (`ferrix-app/src/strip.rs` lays them out; `App::render_pages` renders). Page sizes
+  are measured once per source on open or insert. Only pages in view and one either side are
+  rendered, one at a time on the engine thread, and images further away are dropped; pages
+  rendered at an old zoom are drawn scaled until the new rendering arrives. The current page is
+  the one filling most of the view, updated from `on_scroll`, which iced sends only for user
+  scrolling, so programmatic `scroll_to` jumps never feed back. Zoom, resize and page edits
+  keep the view on the same fraction of the current page. "Fit" zooms fit the largest page.
