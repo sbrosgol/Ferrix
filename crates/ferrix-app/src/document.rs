@@ -145,6 +145,9 @@ pub(crate) struct Document {
     /// Rendered pages near the view.
     pub(crate) images: HashMap<PageKey, Shown>,
     pub(crate) render_busy: bool,
+    /// Pages the engine couldn't render; shown blank and not tried again, so the error
+    /// appears once rather than every time the page scrolls into view.
+    pub(crate) render_failed: BTreeSet<PageKey>,
     pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
     pub(crate) thumbnail_busy: bool,
 }
@@ -167,6 +170,7 @@ impl Document {
             scroll_within: 0.0,
             images: HashMap::new(),
             render_busy: false,
+            render_failed: BTreeSet::new(),
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
         };
@@ -340,6 +344,7 @@ impl Document {
         self.selection.retain(|k| present.contains(k));
         self.thumbnails.retain(|k, _| present.contains(k));
         self.images.retain(|k, _| present.contains(k));
+        self.render_failed.retain(|k| present.contains(k));
         if self.selection.is_empty()
             && let Some(key) = self.key_at(self.current)
         {
@@ -455,6 +460,16 @@ mod tests {
         doc.undo();
         assert!(!doc.is_dirty());
         assert_eq!(doc.len(), 3);
+    }
+
+    #[test]
+    fn a_failed_page_is_forgotten_once_deleted() {
+        let mut doc = document(3);
+        let (k0, k1) = (doc.key_at(0).expect("page"), doc.key_at(1).expect("page"));
+        doc.render_failed.extend([k0, k1]);
+        doc.edit(Edit::Remove { keys: vec![k1] }, pages_label("Delete", 1))
+            .expect("applies");
+        assert_eq!(doc.render_failed, BTreeSet::from([k0]));
     }
 
     #[test]
