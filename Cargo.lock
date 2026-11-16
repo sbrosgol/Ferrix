@@ -6171,6 +6171,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "resvg",
  "sha2 0.11.1",
  "tar",
  "ureq",
