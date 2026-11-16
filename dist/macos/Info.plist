@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>Ferrix</string>
+	<key>CFBundleIconFile</key>
+	<string>Ferrix</string>
 	<key>CFBundleExecutable</key>
 	<string>ferrix-app</string>
 	<key>CFBundleIdentifier</key>

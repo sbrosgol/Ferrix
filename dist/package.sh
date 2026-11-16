@@ -51,6 +51,7 @@ package_macos() {
   done
   lipo -create -output "$app/Contents/Frameworks/libpdfium.dylib" "$work"/libpdfium-mac-*.dylib
   sed "s/@VERSION@/$version/g" dist/macos/Info.plist >"$app/Contents/Info.plist"
+  cargo xtask icns "$app/Contents/Resources/Ferrix.icns"
   legal "$app/Contents/Resources"
 
   # Ad-hoc signature: Apple silicon refuses to run unsigned code. Not a Developer ID
