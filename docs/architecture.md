@@ -119,7 +119,7 @@ ferrix/
 │  ├─ ferrix-compose/         # documents written from scratch: model, edits, layout, export (ADR-0008)
 │  ├─ ferrix-app/             # bin: desktop UI
 │  └─ ferrix-cli/             # bin: headless ops (render, merge, split, annotate, diff)
-├─ xtask/                     # cargo xtask: fetch-pdfium, corpus, bundle, release
+├─ xtask/                     # cargo xtask: fetch-pdfium, corpus, bundle, icns, release
 ├─ tests/corpus/              # manifest of test PDFs (files fetched, not committed)
 ├─ fuzz/                      # cargo-fuzz targets
 └─ docs/
