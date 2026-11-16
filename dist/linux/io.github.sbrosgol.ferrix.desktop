@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Ferrix
+GenericName=PDF Reader and Editor
+Comment=Read, organize and write PDF documents
+Icon=io.github.sbrosgol.ferrix
+Exec=ferrix-app %f
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+Keywords=PDF;document;viewer;editor;pages;
+StartupNotify=true
+StartupWMClass=io.github.sbrosgol.ferrix

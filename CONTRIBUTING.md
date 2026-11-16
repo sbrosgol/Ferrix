@@ -35,6 +35,8 @@ Any editor with rust-analyzer works; RustRover opens the workspace from the root
    `SHA256SUMS` and build-provenance attestations. Review the draft on GitHub and publish it.
 
 `dist/package.sh <version>` builds the same package for the host OS into `out/`.
+The Linux `.tar.gz` includes `install.sh` (desktop entry, icon, `application/pdf` handler);
+test it with `desktop-file-validate` when changing `dist/linux/`.
 
 ## Licensing
 

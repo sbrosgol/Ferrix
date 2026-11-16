@@ -92,6 +92,9 @@ package_linux() {
   local dest=$work/$name
   mkdir -p "$dest"
   cp target/release/ferrix-app target/release/ferrix vendor/pdfium/lib/libpdfium.so "$dest/"
+  # The desktop entry and icon, and the script that installs them with the app.
+  cp dist/linux/install.sh dist/linux/io.github.sbrosgol.ferrix.desktop "$dest/"
+  cp crates/ferrix-app/assets/app-icon.svg "$dest/io.github.sbrosgol.ferrix.svg"
   legal "$dest"
   tar -C "$work" -czf "$out/$name.tar.gz" "$name"
   echo "$out/$name.tar.gz"
