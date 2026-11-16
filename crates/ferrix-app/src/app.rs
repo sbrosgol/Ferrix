@@ -1,13 +1,6 @@
 //! Application state and update logic. Layout lives in `view.rs`.
 
-use std::{
-    fmt,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc};
 
 use ferrix_convert::{Converter, Kind};
 use ferrix_core::{Edit, PageKey};
@@ -16,7 +9,7 @@ use ferrix_engine_pdfium::PdfiumEngine;
 use ferrix_io::FileStamp;
 use ferrix_pdf::{LayoutPage, PaperSize, Source as PdfSource};
 use ferrix_print::{PrintJob, PrintOutcome};
-use ferrix_types::{DocId, Rotation, Size};
+use ferrix_types::{DocId, PageIndex, Rotation, Size};
 use iced::{
     Event, Subscription, Task, Theme, event, keyboard,
     keyboard::key::Named,
@@ -30,9 +23,12 @@ use ferrix_convert::kind_of;
 use ferrix_compose::{Editor, Fonts, Opened, PageSetup};
 
 use crate::{
-    document::{Click, Document, Origin, Thumbnail, file_name, pages_fit, pages_label},
+    document::{
+        Click, Document, Origin, Shown, Source, Thumbnail, file_name, pages_fit, pages_label,
+    },
     recovery::{Journal, Recoverable, WriterJournal},
     render::{LOGICAL_PX_PER_POINT, PageRef, Rendered, render_page},
+    strip::Strip,
     worker::{EngineWorker, blocking, flatten},
     writer::{Action as WriteAction, KeyCommand, MarginChoice, Writer},
 };
@@ -273,8 +269,6 @@ pub enum Choice {
 #[derive(Debug)]
 pub struct App {
     pub(crate) engine: Result<Worker, String>,
-    /// Generation of the newest page render; the engine thread skips older queued requests.
-    latest_render: Arc<AtomicU64>,
     window: Option<window::Id>,
     pub(crate) window_size: iced::Size,
     scale_factor: f32,
@@ -284,7 +278,6 @@ pub struct App {
     pub(crate) zoom: Zoom,
     pub(crate) doc: Option<Document>,
     pub(crate) page_input: String,
-    pub(crate) page_image: Option<crate::render::PageImage>,
     pub(crate) error: Option<String>,
     pub(crate) notice: Option<String>,
     /// Set while a save or export runs; editing is paused until it finishes.
@@ -339,7 +332,9 @@ pub enum Message {
     ToggleSidebar,
     ToggleTheme,
     SystemTheme(iced::theme::Mode),
-    Rendered(Result<Option<Rendered>, String>),
+    Measured(DocId, Result<Vec<Size>, String>),
+    Rendered(DocId, PageKey, Rotation, f32, Result<Rendered, String>),
+    PageScrolled(f32),
     Thumbnail(DocId, PageKey, Rotation, Result<Rendered, String>),
     WindowOpened(Option<window::Id>),
     ScaleFactor(f32),
@@ -425,7 +420,6 @@ impl App {
         let error = engine.as_ref().err().cloned();
         let app = Self {
             engine,
-            latest_render: Arc::new(AtomicU64::new(0)),
             window: None,
             window_size: iced::Size::new(1180.0, 860.0),
             scale_factor: 1.0,
@@ -435,7 +429,6 @@ impl App {
             zoom: Zoom::Auto,
             doc: None,
             page_input: String::new(),
-            page_image: None,
             error,
             notice: None,
             busy: None,
@@ -569,16 +562,45 @@ impl App {
                 };
             }
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
-            Message::Rendered(Ok(None)) => {} // superseded by a newer request
-            Message::Rendered(Ok(Some(r))) => {
-                if let Some(doc) = &mut self.doc {
-                    doc.shown = Some((r.page_size, r.zoom));
+            Message::Measured(doc_id, result) => {
+                let Some(doc) = self.doc.as_mut() else {
+                    return Task::none();
+                };
+                let Some(source) = doc.sources.iter_mut().find(|s| s.doc == doc_id) else {
+                    return Task::none(); // the document was closed meanwhile
+                };
+                match result {
+                    Ok(sizes) => source.sizes = sizes,
+                    Err(e) => self.error = Some(format!("Couldn’t read the page sizes: {e}")),
                 }
-                self.page_image = Some(r.into_image());
+                return self.render();
             }
-            Message::Rendered(Err(e)) => {
-                self.error = Some(format!("Couldn’t render this page: {e}"));
+            Message::Rendered(doc_id, key, rotation, scale_factor, result) => {
+                let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
+                    return Task::none();
+                };
+                doc.render_busy = false;
+                match result {
+                    Ok(r) => {
+                        doc.images.insert(
+                            key,
+                            Shown {
+                                rotation,
+                                zoom: r.zoom,
+                                scale_factor,
+                                image: r.into_image(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let page = doc.pages.position(key).map_or(0, |i| i + 1);
+                        self.error = Some(format!("Couldn’t show page {page}: {e}"));
+                        doc.render_failed.insert(key);
+                    }
+                }
+                return self.render_pages();
             }
+            Message::PageScrolled(top) => return self.page_scrolled(top),
             Message::Thumbnail(doc_id, key, rotation, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none(); // the document was closed meanwhile
@@ -642,11 +664,18 @@ impl App {
                 } else {
                     Click::Replace
                 };
-                if let Some(doc) = &mut self.doc {
-                    doc.click(key, click);
-                }
+                let Some(doc) = &mut self.doc else {
+                    return Task::none();
+                };
+                let before = doc.current;
+                doc.click(key, click);
+                let index = doc.current;
                 self.sync_page_input();
-                return self.render();
+                return if index == before {
+                    Task::none()
+                } else {
+                    self.show_page(index)
+                };
             }
             Message::Rotate(by) => {
                 let Some(doc) = self.editable() else {
@@ -1321,10 +1350,11 @@ impl App {
         } else {
             self.notice = self.open_notice.take();
         }
+        let measure = self.measure(doc.info.id, doc.info.page_count);
         self.doc = Some(doc);
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([close, self.render(), self.next_thumbnail()])
+        Task::batch([close, measure, self.next_thumbnail()])
     }
 
     /// Opens the documents behind the first recoverable session.
@@ -1401,6 +1431,9 @@ impl App {
             return Task::none();
         }
         let close = self.close_document();
+        let base_and_sources: Vec<(DocId, u32)> =
+            infos.iter().map(|i| (i.id, i.page_count)).collect();
+        let base_and_sources = base_and_sources.into_iter();
         let mut infos = infos.into_iter();
         let Some(base_info) = infos.next() else {
             return close;
@@ -1410,10 +1443,7 @@ impl App {
             .iter()
             .cloned()
             .zip(infos)
-            .map(|(origin, info)| crate::document::Source {
-                origin,
-                doc: info.id,
-            })
+            .map(|(origin, info)| Source::new(origin, info.id))
             .collect();
         let name = found.name();
         self.doc = Some(Document::recovered(
@@ -1430,7 +1460,8 @@ impl App {
         self.recoveries.retain(|r| r.journal != found.journal);
         self.notice = Some(format!("Recovered unsaved changes to “{name}”"));
         self.sync_page_input();
-        Task::batch([close, self.render(), self.next_thumbnail()])
+        let measure = Task::batch(base_and_sources.map(|(id, count)| self.measure(id, count)));
+        Task::batch([close, measure, self.next_thumbnail()])
     }
 
     /// Keeps the recovery journal in step with the document: started on the first unsaved
@@ -1455,7 +1486,6 @@ impl App {
 
     /// Closes the current document and its inserted sources on the engine thread.
     fn close_document(&mut self) -> Task<Message> {
-        self.page_image = None;
         if let Some(journal) = self.journal.take() {
             journal.discard();
         }
@@ -1516,10 +1546,7 @@ impl App {
             return Task::none();
         };
         let source = ferrix_core::SourceId(doc.sources.len() as u32);
-        doc.sources.push(crate::document::Source {
-            origin,
-            doc: info.id,
-        });
+        doc.sources.push(Source::new(origin, info.id));
         let entries = doc
             .pages
             .new_entries(source, (0..info.page_count).map(ferrix_types::PageIndex));
@@ -1530,9 +1557,10 @@ impl App {
             .enumerate()
             .map(|(i, e)| (at + i, e))
             .collect();
+        let measure = self.measure(info.id, info.page_count);
         let task = self.apply(Edit::Insert { pages }, pages_label("Insert", count));
         // Show the first inserted page.
-        Task::batch([task, self.go_to(at)])
+        Task::batch([measure, task, self.go_to(at)])
     }
 
     // ── Writing ───────────────────────────────────────────────────────────────
@@ -1964,7 +1992,11 @@ impl App {
     fn step_zoom(&mut self, up: bool) -> Task<Message> {
         let shown = match &self.writer {
             Some(w) => Some(w.zoom / LOGICAL_PX_PER_POINT),
-            None => self.doc.as_ref().and_then(|d| d.shown).map(|(_, z)| z),
+            None => self
+                .doc
+                .as_ref()
+                .filter(|d| d.is_measured())
+                .map(|d| d.strip.zoom),
         };
         let Some(current) = shown else {
             return Task::none();
@@ -1987,10 +2019,16 @@ impl App {
     }
 
     fn rerender_if_fitting(&mut self) -> Task<Message> {
+        // A fixed zoom keeps the layout, but a different window shows different pages.
         match self.zoom {
-            Zoom::Fixed(_) => Task::none(),
+            Zoom::Fixed(_) => self.render_pages(),
             Zoom::Auto | Zoom::FitWidth | Zoom::FitPage => self.render(),
         }
+    }
+
+    /// Height of the scrolled page view, in logical pixels.
+    fn viewport_height(&self) -> f32 {
+        crate::view::page_view_height(self.window_size)
     }
 
     fn step_page(&mut self, delta: isize) -> Task<Message> {
@@ -2009,58 +2047,188 @@ impl App {
         if let Some(key) = doc.key_at(index) {
             doc.select_only(key);
         }
-        if index == doc.current {
-            return Task::none();
-        }
         doc.current = index;
-        let follow = if doc.len() > 1 {
-            index as f32 / (doc.len() - 1) as f32
-        } else {
-            0.0
-        };
         self.sync_page_input();
+        self.show_page(index)
+    }
+
+    /// Scrolls the page view to the top of page `index`, and the sidebar to its thumbnail.
+    fn show_page(&mut self, index: usize) -> Task<Message> {
+        let height = self.viewport_height();
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        doc.current = index;
+        let top = doc.strip.offset_of(index, height);
+        doc.scroll_within = doc.strip.fraction(index, top);
         Task::batch([
-            self.render(),
-            operation::snap_to(page_scroll_id(), scrollable::RelativeOffset::START),
-            operation::snap_to(
-                sidebar_scroll_id(),
-                scrollable::RelativeOffset { x: 0.0, y: follow },
-            ),
+            self.scroll_pages_to(top),
+            self.follow_in_sidebar(),
+            self.render_pages(),
         ])
     }
 
-    /// Requests the current page at the current zoom and display scale.
+    fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
+        if let Some(doc) = &mut self.doc {
+            doc.scroll = top;
+        }
+        operation::scroll_to(
+            page_scroll_id(),
+            scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(top),
+            },
+        )
+    }
+
+    /// Keeps the current page's thumbnail in view.
+    fn follow_in_sidebar(&self) -> Task<Message> {
+        let Some(doc) = &self.doc else {
+            return Task::none();
+        };
+        let follow = if doc.len() > 1 {
+            doc.current as f32 / (doc.len() - 1) as f32
+        } else {
+            0.0
+        };
+        operation::snap_to(
+            sidebar_scroll_id(),
+            scrollable::RelativeOffset { x: 0.0, y: follow },
+        )
+    }
+
+    /// The user scrolled the pages: the page filling most of the view becomes current.
+    fn page_scrolled(&mut self, top: f32) -> Task<Message> {
+        let height = self.viewport_height();
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        doc.scroll = top;
+        let Some(index) = doc.strip.current(top, height) else {
+            return self.render_pages();
+        };
+        doc.scroll_within = doc.strip.fraction(index, top);
+        if index == doc.current {
+            return self.render_pages();
+        }
+        doc.current = index;
+        // A single selected page follows the view; a multiple selection is left alone.
+        if doc.selection.len() <= 1
+            && let Some(key) = doc.key_at(index)
+        {
+            doc.select_only(key);
+        }
+        self.sync_page_input();
+        Task::batch([self.follow_in_sidebar(), self.render_pages()])
+    }
+
+    /// Lays the pages out for the current zoom and window, keeping the view on the same spot
+    /// of the current page, then renders the pages in view.
     fn render(&mut self) -> Task<Message> {
         if self.writer.is_some() {
             self.refresh_writer();
             return Task::none();
         }
-        let (Ok(engine), Some(page)) = (
-            self.engine.clone(),
-            self.doc.as_ref().and_then(Document::current_page),
-        ) else {
+        let (zoom, canvas, height) = (self.zoom, self.canvas_size(), self.viewport_height());
+        let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
             return Task::none();
         };
-        let generation = self.latest_render.fetch_add(1, Ordering::Relaxed) + 1;
-        let latest = Arc::clone(&self.latest_render);
-        let (zoom_mode, canvas, scale_factor) = (self.zoom, self.canvas_size(), self.scale_factor);
+        let sizes = doc.page_sizes();
+        // Fitting the largest page makes every page fit.
+        let largest = sizes.iter().fold(Size::new(0.0, 0.0), |m, s| {
+            Size::new(m.width.max(s.width), m.height.max(s.height))
+        });
+        let strip = Strip::new(&sizes, zoom.resolve(largest, canvas));
+        let first = doc.strip.len() == 0;
+        let top = if first {
+            let top = strip.offset_of(doc.current, height);
+            doc.scroll_within = strip.fraction(doc.current, top);
+            top
+        } else {
+            strip.at_fraction(doc.current, doc.scroll_within, height)
+        };
+        doc.strip = strip;
+        let scroll = if first || (top - doc.scroll).abs() > 0.5 {
+            self.scroll_pages_to(top)
+        } else {
+            Task::none()
+        };
+        Task::batch([scroll, self.render_pages()])
+    }
 
+    /// Renders the next page in or next to the view that is missing or out of date; each
+    /// result schedules the one after it. Pages further away are dropped.
+    fn render_pages(&mut self) -> Task<Message> {
+        let (height, scale_factor) = (self.viewport_height(), self.scale_factor);
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
+            return Task::none();
+        };
+        let visible = doc.strip.visible(doc.scroll, height);
+        // One page either side, so a short scroll finds it ready.
+        let near = visible.start.saturating_sub(1)..(visible.end + 1).min(doc.len());
+        let keep: HashSet<PageKey> = near.clone().filter_map(|i| doc.key_at(i)).collect();
+        doc.images.retain(|k, _| keep.contains(k));
+        if doc.render_busy {
+            return Task::none();
+        }
+        let zoom = doc.strip.zoom;
+        // The current page first, then the rest of the view, then its neighbours.
+        let next = std::iter::once(doc.current)
+            .chain(visible)
+            .chain(near.clone())
+            .filter(|i| near.contains(i))
+            .find_map(|i| {
+                let entry = doc.pages.get(i)?;
+                if doc.render_failed.contains(&entry.key) {
+                    return None;
+                }
+                let fresh = doc.images.get(&entry.key).is_some_and(|s| {
+                    s.rotation == entry.rotation && s.zoom == zoom && s.scale_factor == scale_factor
+                });
+                if fresh {
+                    None
+                } else {
+                    Some((entry.key, doc.page_ref(entry)?))
+                }
+            });
+        let Some((key, page)) = next else {
+            return Task::none();
+        };
+        doc.render_busy = true;
+        let doc_id = doc.info.id;
         Task::perform(
             async move {
                 let result = engine
                     .call(move |e| {
-                        if latest.load(Ordering::Relaxed) != generation {
-                            return Ok(None);
-                        }
-                        let size = crate::render::page_size(e, page)?;
-                        let zoom = zoom_mode.resolve(size, canvas);
                         render_page(e, page, zoom * LOGICAL_PX_PER_POINT, scale_factor, zoom)
-                            .map(Some)
                     })
                     .await;
                 flatten(result)
             },
-            Message::Rendered,
+            move |result| Message::Rendered(doc_id, key, page.rotation, scale_factor, result),
+        )
+    }
+
+    /// Reads the size of every page of an engine document in the background.
+    fn measure(&self, doc: DocId, pages: u32) -> Task<Message> {
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let result = engine
+                    .call(move |e| {
+                        (0..pages)
+                            .map(|i| e.page_info(doc, PageIndex(i)).map(|p| p.size))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .await;
+                flatten(result)
+            },
+            move |result| Message::Measured(doc, result),
         )
     }
 

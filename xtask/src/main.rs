@@ -1,9 +1,10 @@
 //! Build automation for Ferrix. Run with `cargo xtask <task>`.
 
 use std::{
-    fs,
+    env, fs,
     io::Read,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result, bail};
@@ -61,6 +62,17 @@ enum Task {
         #[arg(long)]
         force: bool,
     },
+    /// Build the desktop app as `Ferrix.app` (macOS), so it carries its name and PDFium.
+    Bundle {
+        /// Build with the release profile.
+        #[arg(long)]
+        release: bool,
+        /// Launch the bundle once built.
+        #[arg(long)]
+        open: bool,
+        /// Documents to open with `--open`.
+        files: Vec<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -72,6 +84,11 @@ fn main() -> Result<()> {
             };
             fetch_pdfium(&platform, force)
         }
+        Task::Bundle {
+            release,
+            open,
+            files,
+        } => bundle(release, open, &files),
     }
 }
 
@@ -157,6 +174,147 @@ fn fetch_pdfium(platform: &str, force: bool) -> Result<()> {
         dest.display()
     );
     Ok(())
+}
+
+/// Assembles `target/<profile>/Ferrix.app`. Run unbundled, macOS names the app after its
+/// executable (`ferrix-app`) in the menu bar and Dock; a bundle names it from its Info.plist.
+fn bundle(release: bool, open: bool, files: &[PathBuf]) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("bundling is only implemented for macOS so far");
+    }
+    let root = workspace_root();
+    let pdfium = root.join("vendor/pdfium/lib/libpdfium.dylib");
+    if !pdfium.exists() {
+        bail!("PDFium is missing; run `cargo xtask fetch-pdfium` first");
+    }
+
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut build = Command::new(cargo);
+    build.current_dir(&root).args(["build", "-p", "ferrix-app"]);
+    if release {
+        build.arg("--release");
+    }
+    if !build.status().context("cannot run cargo")?.success() {
+        bail!("cargo build failed");
+    }
+
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let out = target.join(if release { "release" } else { "debug" });
+    let app = out.join("Ferrix.app");
+    if app.exists() {
+        fs::remove_dir_all(&app).with_context(|| format!("cannot clear {}", app.display()))?;
+    }
+    let contents = app.join("Contents");
+    for dir in ["MacOS", "Frameworks", "Resources"] {
+        fs::create_dir_all(contents.join(dir))?;
+    }
+    fs::copy(out.join("ferrix-app"), contents.join("MacOS/Ferrix"))
+        .context("cannot copy the ferrix-app binary")?;
+    // The engine looks for PDFium in the bundle's Frameworks directory first.
+    fs::copy(&pdfium, contents.join("Frameworks/libpdfium.dylib")).context("cannot copy PDFium")?;
+    fs::write(contents.join("Info.plist"), info_plist())?;
+    make_icns(
+        &root.join("crates/ferrix-app/assets/app-icon.svg"),
+        &out.join("Ferrix.iconset"),
+        &contents.join("Resources/Ferrix.icns"),
+    )?;
+
+    // Ad-hoc signature, so the copied binary and library run as one app on Apple silicon.
+    let signed = Command::new("codesign")
+        .args(["--force", "--deep", "--sign", "-"])
+        .arg(&app)
+        .status();
+    if !signed.is_ok_and(|s| s.success()) {
+        println!("warning: ad-hoc signing failed; the bundle may not launch");
+    }
+    println!("Built {}", app.display());
+
+    if open {
+        let mut launch = Command::new("open");
+        launch.arg("-n").arg(&app);
+        if !files.is_empty() {
+            launch.arg("--args").args(files);
+        }
+        if !launch.status().context("cannot run open")?.success() {
+            bail!("couldn't launch {}", app.display());
+        }
+    }
+    Ok(())
+}
+
+/// Renders the SVG app icon at every size macOS asks for and packs them with `iconutil`.
+fn make_icns(svg: &Path, iconset: &Path, icns: &Path) -> Result<()> {
+    use resvg::{tiny_skia, usvg};
+
+    let data = fs::read(svg).with_context(|| format!("cannot read {}", svg.display()))?;
+    let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
+        .with_context(|| format!("cannot parse {}", svg.display()))?;
+    if iconset.exists() {
+        fs::remove_dir_all(iconset)?;
+    }
+    fs::create_dir_all(iconset)?;
+    for points in [16, 32, 128, 256, 512] {
+        for (scale, suffix) in [(1, ""), (2, "@2x")] {
+            let pixels = points * scale;
+            let mut pixmap =
+                tiny_skia::Pixmap::new(pixels, pixels).context("icon size out of range")?;
+            let zoom = pixels as f32 / tree.size().width();
+            resvg::render(
+                &tree,
+                tiny_skia::Transform::from_scale(zoom, zoom),
+                &mut pixmap.as_mut(),
+            );
+            pixmap
+                .save_png(iconset.join(format!("icon_{points}x{points}{suffix}.png")))
+                .context("cannot write icon PNG")?;
+        }
+    }
+    let packed = Command::new("iconutil")
+        .args(["--convert", "icns", "--output"])
+        .arg(icns)
+        .arg(iconset)
+        .status()
+        .context("cannot run iconutil")?;
+    if !packed.success() {
+        bail!("iconutil failed");
+    }
+    fs::remove_dir_all(iconset)?;
+    Ok(())
+}
+
+fn info_plist() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Ferrix</string>
+    <key>CFBundleDisplayName</key>
+    <string>Ferrix</string>
+    <key>CFBundleIconFile</key>
+    <string>Ferrix</string>
+    <key>CFBundleExecutable</key>
+    <string>Ferrix</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.sbrosgol.ferrix</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>{version}</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+"#
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -9,6 +9,7 @@ relevant ADR before changing a subsystem, and add implementation notes to it whe
 ```sh
 cargo xtask fetch-pdfium                 # once per checkout: PDFium into vendor/pdfium (git-ignored)
 cargo run -p ferrix-app [-- file.pdf]    # desktop app
+cargo xtask bundle [--release] [--open]  # macOS: target/<profile>/Ferrix.app, named “Ferrix” in the menu bar
 cargo run -p ferrix-cli -- --help        # `ferrix`: info, render, text, outline, organize, compose, source
 cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace
 ```

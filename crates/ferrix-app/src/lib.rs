@@ -8,6 +8,7 @@ mod icon;
 mod print;
 mod recovery;
 mod render;
+mod strip;
 pub mod theme;
 mod view;
 mod worker;
@@ -53,6 +54,12 @@ fn window_settings() -> window::Settings {
         size: iced::Size::new(1180.0, 860.0),
         min_size: Some(iced::Size::new(720.0, 480.0)),
         position: window::Position::Centered,
+        // macOS takes the icon from the app bundle (`cargo xtask bundle`) and ignores this.
+        icon: if cfg!(target_os = "macos") {
+            None
+        } else {
+            window_icon()
+        },
         #[cfg(target_os = "macos")]
         platform_specific: window::settings::PlatformSpecific {
             // Merge the title bar into our toolbar, like native document apps.
@@ -64,8 +71,68 @@ fn window_settings() -> window::Settings {
     }
 }
 
+/// Edge of the rendered window icon; the window manager or taskbar scales it down.
+const ICON_EDGE: u32 = 256;
+
+/// The app icon (the same SVG the macOS bundle uses) for the title bar and taskbar.
+fn window_icon() -> Option<window::Icon> {
+    let (rgba, edge) = render_icon(ICON_EDGE)?;
+    window::icon::from_rgba(rgba, edge, edge)
+        .inspect_err(|e| tracing::warn!("window icon: {e}"))
+        .ok()
+}
+
+/// Renders the app icon to straight-alpha RGBA pixels, `edge` pixels square.
+fn render_icon(edge: u32) -> Option<(Vec<u8>, u32)> {
+    use resvg::{tiny_skia, usvg};
+
+    let svg = include_bytes!("../assets/app-icon.svg");
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default())
+        .inspect_err(|e| tracing::warn!("window icon: {e}"))
+        .ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(edge, edge)?;
+    let zoom = edge as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(zoom, zoom),
+        &mut pixmap.as_mut(),
+    );
+    // tiny-skia keeps premultiplied alpha; window icons take it straight.
+    let rgba = pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect();
+    Some((rgba, edge))
+}
+
 /// A paragraph style for scripts and tests: 0 Normal, 1 Title, 2–4 Heading 1–3.
 #[doc(hidden)]
 pub fn writer_style(index: usize) -> writer::StyleChoice {
     writer::STYLES[index.min(writer::STYLES.len() - 1)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_icon_renders_with_a_transparent_margin_and_a_white_page() {
+        let (rgba, edge) = render_icon(64).expect("icon renders");
+        assert_eq!(rgba.len(), (edge * edge * 4) as usize);
+        let pixel = |x: u32, y: u32| {
+            let i = ((y * edge + x) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+        };
+        assert_eq!(pixel(0, 0)[3], 0, "corner outside the tile is transparent");
+        assert_eq!(
+            pixel(32, 48),
+            [255, 255, 255, 255],
+            "the page is opaque white"
+        );
+        assert!(window_icon().is_some());
+    }
 }

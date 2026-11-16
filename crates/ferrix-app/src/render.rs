@@ -36,8 +36,6 @@ pub struct Rendered {
     width: u32,
     rows: Vec<Vec<RawTile>>,
     logical: iced::Size,
-    /// Displayed page size in points, rotation included.
-    pub(crate) page_size: Size,
     pub(crate) zoom: f32,
 }
 
@@ -110,7 +108,6 @@ pub(crate) fn render_page(
         width,
         rows: slice_tiles(&pixels.pixels, width, height),
         logical: iced::Size::new(size.width * logical_scale, size.height * logical_scale),
-        page_size: size,
         zoom,
     })
 }
@@ -126,10 +123,6 @@ pub(crate) fn tiled_image(
         rows: slice_tiles(pixels, width, height),
         width,
         logical,
-        page_size: Size {
-            width: logical.width,
-            height: logical.height,
-        },
         zoom: 1.0,
     }
     .into_image()

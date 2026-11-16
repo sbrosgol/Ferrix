@@ -43,6 +43,7 @@ and spell check in written documents.
 ```sh
 cargo xtask fetch-pdfium
 cargo run -p ferrix-app
+cargo xtask bundle --open    # macOS: build and launch Ferrix.app (named “Ferrix” in the menu bar)
 cargo run -p ferrix-cli -- info document.pdf
 cargo run -p ferrix-cli -- render document.pdf --pages 1-3 --dpi 144 -o out/
 ```
