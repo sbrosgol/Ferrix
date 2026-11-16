@@ -22,6 +22,7 @@ use crate::{
     recovery::{Recoverable, describe},
     render::LOGICAL_PX_PER_POINT,
     render::PageImage,
+    strip::{PAGE_GAP, PAGE_MARGIN},
     theme::{self, Tokens},
     writer::{
         Action, COLORS, MARGINS, SIZES, SPACINGS, STYLES, SizeChoice, SpacingChoice, StyleChoice,
@@ -33,7 +34,6 @@ use crate::{
 const TOOLBAR_HEIGHT: f32 = 46.0;
 const STATUS_HEIGHT: f32 = 26.0;
 const SIDEBAR_WIDTH: f32 = 188.0;
-const PAGE_MARGIN: f32 = 28.0;
 const SCROLLBAR_ALLOWANCE: f32 = 12.0;
 /// Space for the macOS traffic lights, which sit over our toolbar.
 const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
@@ -48,17 +48,22 @@ pub(crate) fn canvas_size(window: iced::Size, sidebar: bool) -> iced::Size {
     let sidebar = if sidebar { SIDEBAR_WIDTH + 1.0 } else { 0.0 };
     iced::Size::new(
         (window.width - sidebar - 2.0 * PAGE_MARGIN - SCROLLBAR_ALLOWANCE).max(64.0),
-        (window.height - TOOLBAR_HEIGHT - STATUS_HEIGHT - 2.0 - 2.0 * PAGE_MARGIN).max(64.0),
+        (page_view_height(window) - 2.0 * PAGE_MARGIN).max(64.0),
     )
+}
+
+/// Logical height of the scrolled page view, between the toolbar and the status bar.
+pub(crate) fn page_view_height(window: iced::Size) -> f32 {
+    window.height - TOOLBAR_HEIGHT - STATUS_HEIGHT - 2.0
 }
 
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        let main: Element<'_, Message> = match (&self.doc, &self.page_image) {
+        let main: Element<'_, Message> = match &self.doc {
             _ if self.writer.is_some() => self.writer_view(),
-            (None, _) => self.empty_state(),
-            (Some(_), Some(page)) => self.page_view(page),
-            (Some(_), None) => container(muted("Loading…", 13.0))
+            None => self.empty_state(),
+            Some(doc) if doc.is_measured() && doc.strip.len() == doc.len() => self.page_view(doc),
+            Some(_) => container(muted("Loading…", 13.0))
                 .center(Length::Fill)
                 .style(theme::canvas)
                 .into(),
@@ -243,7 +248,7 @@ impl App {
 
         let zoom = match writer {
             Some(w) => Some(w.zoom / LOGICAL_PX_PER_POINT),
-            None => doc.and_then(|d| d.shown).map(|(_, z)| z),
+            None => doc.filter(|d| d.is_measured()).map(|d| d.strip.zoom),
         };
         let zoom_label = zoom.map(|z| ZoomChoice::Percent((z * 100.0).round() as u16));
         let theme_icon = if self.is_dark() {
@@ -429,33 +434,44 @@ impl App {
         .into()
     }
 
-    fn page_view<'a>(&self, page: &'a PageImage) -> Element<'a, Message> {
-        let paper = container(tiles(page)).style(theme::page);
-        let canvas = self.canvas_size();
-        let fits_x = page.logical.width <= canvas.width + SCROLLBAR_ALLOWANCE;
-        let fits_y = page.logical.height <= canvas.height;
+    /// Every page in one scrolled column. Pages not rendered yet are blank paper; pages
+    /// rendered at another zoom are scaled until their new rendering arrives.
+    fn page_view<'a>(&self, doc: &'a Document) -> Element<'a, Message> {
+        let strip = &doc.strip;
+        let pages = doc
+            .pages
+            .entries()
+            .iter()
+            .zip(&strip.sizes)
+            .map(|(entry, &size)| {
+                let paper: Element<'a, Message> = match doc.images.get(&entry.key) {
+                    Some(shown) if shown.rotation == entry.rotation => tiles_at(&shown.image, size),
+                    _ => Space::new().width(size.width).height(size.height).into(),
+                };
+                container(paper).style(theme::page).into()
+            });
+        let column = column(pages)
+            .spacing(PAGE_GAP)
+            .padding(PAGE_MARGIN)
+            .align_x(Alignment::Center);
 
-        let view: Element<'a, Message> = if fits_x && fits_y {
-            container(paper).center(Length::Fill).into()
+        let fits_x = strip.content.width <= self.canvas_size().width + 2.0 * PAGE_MARGIN;
+        let scroll = if fits_x {
+            scrollable(container(column).center_x(Length::Fill))
+                .direction(scrollable::Direction::Vertical(thin_scrollbar()))
         } else {
-            let content = container(paper).padding(PAGE_MARGIN);
-            let scroll = if fits_x {
-                scrollable(content.center_x(Length::Fill))
-                    .direction(scrollable::Direction::Vertical(thin_scrollbar()))
-            } else {
-                scrollable(content).direction(scrollable::Direction::Both {
-                    vertical: thin_scrollbar(),
-                    horizontal: thin_scrollbar(),
-                })
-            };
-            scroll
-                .id(page_scroll_id())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(theme::scrollbar)
-                .into()
+            scrollable(column).direction(scrollable::Direction::Both {
+                vertical: thin_scrollbar(),
+                horizontal: thin_scrollbar(),
+            })
         };
-        container(view).style(theme::canvas).into()
+        let scroll = scroll
+            .id(page_scroll_id())
+            .on_scroll(|viewport| Message::PageScrolled(viewport.absolute_offset().y))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::scrollbar);
+        container(scroll).style(theme::canvas).into()
     }
 
     fn empty_state(&self) -> Element<'_, Message> {
@@ -578,7 +594,7 @@ impl App {
             if let Some(version) = &doc.info.pdf_version {
                 parts.push(format!("PDF {version}"));
             }
-            if let Some((size, _)) = doc.shown {
+            if let Some(size) = doc.current_size().filter(|_| doc.is_measured()) {
                 parts.push(format!("{:.0} × {:.0} pt", size.width, size.height));
             }
             if doc.selection.len() > 1 {
@@ -1277,6 +1293,26 @@ fn thin_scrollbar() -> scrollable::Scrollbar {
 }
 
 /// Lays out a page's tiles edge to edge.
+/// A page image drawn at `size`, which differs from its own while a new zoom renders.
+fn tiles_at(page: &PageImage, size: iced::Size) -> Element<'_, Message> {
+    let (sx, sy) = (
+        size.width / page.logical.width,
+        size.height / page.logical.height,
+    );
+    column(page.rows.iter().map(|tiles| {
+        row(tiles.iter().map(|(handle, tile)| {
+            image(handle.clone())
+                .width(tile.width * sx)
+                .height(tile.height * sy)
+                .into()
+        }))
+        .into()
+    }))
+    .width(size.width)
+    .height(size.height)
+    .into()
+}
+
 fn tiles(page: &PageImage) -> Element<'_, Message> {
     column(page.rows.iter().map(|tiles| {
         row(tiles.iter().map(|(handle, size)| {

@@ -8,6 +8,7 @@ mod icon;
 mod print;
 mod recovery;
 mod render;
+mod strip;
 pub mod theme;
 mod view;
 mod worker;

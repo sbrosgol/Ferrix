@@ -18,7 +18,7 @@ Then Read `$S/shot.png`.
 
 Flags: `--dark`, `--new` (New Document dialog), `--rotate`, `--recover`, `--write` (types a
 formatted letter), `--features` (lists, picture, page break, table, footer, find bar),
-`--fit-page`, `--fit-width`, `--zoom-in`. A tall `SHOT_SIZE` (e.g. `760x1700`) shows several
+`--fit-page`, `--fit-width`, `--zoom-in`, `--next` (three pages forward). A tall `SHOT_SIZE` (e.g. `760x1700`) shows several
 pages. Increase `SHOT_SECS` for long scripts (each scripted step waits a little).
 
 To script something new, add a flag and a `Vec<Message>` builder next to `writing_script()` /

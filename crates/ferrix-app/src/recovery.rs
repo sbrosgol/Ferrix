@@ -431,10 +431,10 @@ mod tests {
         let path = dir.join("report.pdf");
         std::fs::write(&path, b"%PDF-1.7 stand-in").expect("write base");
         let mut doc = Document::new(Origin::File(path), info(1, 3));
-        doc.sources.push(Source {
-            origin: Origin::untitled("scan.pdf".into(), None, b"%PDF converted".to_vec()),
-            doc: DocId(2),
-        });
+        doc.sources.push(Source::new(
+            Origin::untitled("scan.pdf".into(), None, b"%PDF converted".to_vec()),
+            DocId(2),
+        ));
         let inserted = doc.pages.new_entries(SourceId(1), [PageIndex(0)]);
         doc.edit(
             Edit::Insert {

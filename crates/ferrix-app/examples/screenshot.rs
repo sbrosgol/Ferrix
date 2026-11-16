@@ -54,6 +54,9 @@ fn main() {
     if flag(&mut args, "--fit-width") {
         script.push(Message::FitWidth);
     }
+    if flag(&mut args, "--next") {
+        script.extend([Message::Next, Message::Next, Message::Next]);
+    }
     if flag(&mut args, "--zoom-in") {
         script.extend([Message::ZoomIn, Message::ZoomIn, Message::ZoomIn]);
     }
