@@ -10,6 +10,7 @@ mod recovery;
 mod render;
 mod strip;
 pub mod theme;
+mod titlebar;
 mod view;
 mod worker;
 pub mod writer;
@@ -22,6 +23,7 @@ pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
 pub use recovery::Recoverable;
+pub use titlebar::TitleBarAction;
 use worker::EngineWorker;
 pub use writer::{Action as WriteAction, KeyCommand};
 

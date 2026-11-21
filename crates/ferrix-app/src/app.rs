@@ -358,6 +358,9 @@ pub enum Message {
     Resized(iced::Size),
     ModifiersChanged(keyboard::Modifiers),
     DragWindow,
+    /// The title bar (the toolbar on macOS) was double-clicked.
+    TitleBarDoubleClick,
+    TitleBarAction(crate::titlebar::TitleBarAction),
     DismissStatus,
     Print,
     PrintReady(Result<PathBuf, String>),
@@ -365,7 +368,9 @@ pub enum Message {
     ThumbnailClicked(PageKey),
     Rotate(Rotation),
     Delete,
-    Move { earlier: bool },
+    Move {
+        earlier: bool,
+    },
     InsertDialog,
     Insert(PathBuf),
     Inserted(Origin, Result<DocInfo, String>),
@@ -665,6 +670,24 @@ impl App {
             Message::DragWindow => {
                 if let Some(id) = self.window {
                     return window::drag(id);
+                }
+            }
+            // Read the system setting each time, off the UI thread, so a change in System
+            // Settings applies without restarting.
+            Message::TitleBarDoubleClick => {
+                return Task::perform(
+                    crate::worker::blocking(|| Ok(crate::titlebar::preference())),
+                    |action| Message::TitleBarAction(action.unwrap_or_default()),
+                );
+            }
+            Message::TitleBarAction(action) => {
+                use crate::titlebar::TitleBarAction;
+                if let Some(id) = self.window {
+                    return match action {
+                        TitleBarAction::Zoom => window::toggle_maximize(id),
+                        TitleBarAction::Minimize => window::minimize(id, true),
+                        TitleBarAction::Nothing => Task::none(),
+                    };
                 }
             }
             Message::DismissStatus => {

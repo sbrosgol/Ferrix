@@ -345,7 +345,11 @@ impl App {
 
         // With the macOS title bar merged into the toolbar, the toolbar must move the window.
         if cfg!(target_os = "macos") {
-            mouse_area(bar).on_press(Message::DragWindow).into()
+            mouse_area(bar)
+                .on_press(Message::DragWindow)
+                // The system title bar zooms (or minimizes) on double-click; ours must too.
+                .on_double_click(Message::TitleBarDoubleClick)
+                .into()
         } else {
             bar.into()
         }
