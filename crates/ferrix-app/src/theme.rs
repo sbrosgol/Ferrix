@@ -32,6 +32,8 @@ pub struct Tokens {
     pub accent_hover: Color,
     pub on_accent: Color,
     pub accent_soft: Color,
+    /// Accent used as text or icon colour; meets 4.5:1 on `surface` and `chrome`.
+    pub accent_text: Color,
     pub danger: Color,
     pub page_shadow: Color,
 }
@@ -53,6 +55,7 @@ pub const LIGHT: Tokens = Tokens {
     accent_hover: rgb(0x4A74EE),
     on_accent: rgb(0xFFFFFF),
     accent_soft: rgba(0x3563E9, 0.12),
+    accent_text: rgb(0x3563E9),
     danger: rgb(0xD23B3B),
     page_shadow: rgba(0x0B1424, 0.20),
 };
@@ -69,13 +72,18 @@ pub const DARK: Tokens = Tokens {
     text_faint: rgb(0x62666E),
     hover: rgba(0xFFFFFF, 0.07),
     pressed: rgba(0xFFFFFF, 0.12),
-    accent: rgb(0x5B7CFA),
-    accent_hover: rgb(0x7391FB),
+    // Fill: white text on it is 4.6:1. Text and icons use the lighter `accent_text` (6:1).
+    accent: rgb(0x3D6BF0),
+    accent_hover: rgb(0x5580F4),
     on_accent: rgb(0xFFFFFF),
     accent_soft: rgba(0x5B7CFA, 0.22),
+    accent_text: rgb(0x8DA6FF),
     danger: rgb(0xF06A6A),
     page_shadow: rgba(0x000000, 0.55),
 };
+
+/// The UI typeface, bundled with the app (Regular and SemiBold).
+pub const UI_FONT: iced::Font = iced::Font::with_name("Inter");
 
 /// Controls.
 pub const RADIUS: f32 = 6.0;
@@ -170,7 +178,21 @@ pub fn page(theme: &Theme) -> container::Style {
 pub fn thumbnail_paper(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color::WHITE)),
-        border: border(tokens(theme).border_strong, 1.0, 2.0),
+        // A translucent edge reads on both the light and the dark sidebar.
+        border: border(
+            if theme.extended_palette().is_dark {
+                Color::TRANSPARENT
+            } else {
+                Color::BLACK.scale_alpha(0.14)
+            },
+            1.0,
+            0.0,
+        ),
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.12),
+            offset: Vector::new(0.0, 1.0),
+            blur_radius: 2.0,
+        },
         ..container::Style::default()
     }
 }
@@ -304,7 +326,7 @@ pub fn menu_item(checked: bool) -> impl Fn(&Theme, button::Status) -> button::St
         };
         button::Style {
             background,
-            text_color: if checked { t.accent } else { t.text },
+            text_color: if checked { t.accent_text } else { t.text },
             border: border(Color::TRANSPARENT, 0.0, RADIUS),
             ..button::Style::default()
         }
@@ -340,7 +362,7 @@ pub fn ghost_active(theme: &Theme, status: button::Status) -> button::Style {
         } else {
             t.accent_soft
         })),
-        text_color: t.accent,
+        text_color: t.accent_text,
         ..ghost(theme, status)
     }
 }
@@ -397,7 +419,7 @@ pub fn icon_for(
         let t = tokens(theme);
         let color = match (status, active) {
             (button::Status::Disabled, _) => t.text_faint,
-            (_, true) => t.accent,
+            (_, true) => t.accent_text,
             _ => t.text,
         };
         svg::Style { color: Some(color) }

@@ -33,7 +33,7 @@ use crate::{
 
 const TOOLBAR_HEIGHT: f32 = 48.0;
 const STATUS_HEIGHT: f32 = 28.0;
-const SIDEBAR_WIDTH: f32 = 208.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
 /// Space between groups of toolbar controls (design system: 12).
 const CLUSTER_GAP: f32 = 12.0;
 const SCROLLBAR_ALLOWANCE: f32 = 12.0;
@@ -42,7 +42,7 @@ const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
 
 const SEMIBOLD: Font = Font {
     weight: font::Weight::Semibold,
-    ..Font::DEFAULT
+    ..theme::UI_FONT
 };
 
 /// Logical size available to a page inside the canvas.
@@ -89,9 +89,16 @@ impl App {
                     .push(horizontal_divider());
             }
         }
-        let window = window
-            .push(container(body).height(Length::Fill))
-            .extend([horizontal_divider(), self.status_bar()]);
+        let mut window = window.push(container(body).height(Length::Fill));
+        // With nothing open and nothing to report, the status bar would be an empty band.
+        if self.doc.is_some()
+            || self.writer.is_some()
+            || self.busy.is_some()
+            || self.error.is_some()
+            || self.notice.is_some()
+        {
+            window = window.extend([horizontal_divider(), self.status_bar()]);
+        }
         if self.confirm.is_some() {
             let name = match (&self.writer, &self.doc) {
                 (Some(w), _) => Some(w.name.clone()),
@@ -176,7 +183,26 @@ impl App {
                 self.sidebar,
             ));
         }
-        let left = left.push(Space::new().width(6)).push(title);
+        let mut left = left.push(Space::new().width(6)).push(title);
+        if open {
+            // History sits with the document it belongs to, as in Pages and Word.
+            left = left
+                .push(Space::new().width(CLUSTER_GAP - 2.0))
+                .push(cluster([
+                    icon_button(
+                        Icon::Undo,
+                        undo_tip,
+                        (editable && undo_label.is_some()).then_some(Message::Undo),
+                        false,
+                    ),
+                    icon_button(
+                        Icon::Redo,
+                        redo_tip,
+                        (editable && redo_label.is_some()).then_some(Message::Redo),
+                        false,
+                    ),
+                ]));
+        }
 
         // The page navigator: only for PDFs (a written document shows its page in the status bar).
         let center: Element<'_, Message> = match doc {
@@ -224,72 +250,51 @@ impl App {
         let zoom_label = zoom.map(|z| ZoomChoice::Percent((z * 100.0).round() as u16));
 
         let mut right = row![].spacing(CLUSTER_GAP).align_y(Alignment::Center);
+        let fit_in_menu = is_narrow(self.window_size.width);
         if open {
-            right = right.push(cluster([
+            let mut zoom_row = row![
                 icon_button(
-                    Icon::Undo,
-                    undo_tip,
-                    (editable && undo_label.is_some()).then_some(Message::Undo),
+                    Icon::ZoomOut,
+                    "Zoom out (⌘−)",
+                    zoom.filter(|z| *z > MIN_ZOOM + 0.001)
+                        .map(|_| Message::ZoomOut),
                     false,
                 ),
+                pick_list(ZOOM_CHOICES, zoom_label, Message::ZoomPicked)
+                    .placeholder("–")
+                    .text_size(13)
+                    .padding([5, 6])
+                    .width(76)
+                    .handle(small_chevron())
+                    .style(theme::select_flat)
+                    .menu_style(theme::select_menu),
                 icon_button(
-                    Icon::Redo,
-                    redo_tip,
-                    (editable && redo_label.is_some()).then_some(Message::Redo),
+                    Icon::ZoomIn,
+                    "Zoom in (⌘+)",
+                    zoom.filter(|z| *z < MAX_ZOOM - 0.001)
+                        .map(|_| Message::ZoomIn),
                     false,
                 ),
-            ]));
-            let zoom_pill = container(
-                row![
-                    icon_button(
-                        Icon::ZoomOut,
-                        "Zoom out (⌘−)",
-                        zoom.filter(|z| *z > MIN_ZOOM + 0.001)
-                            .map(|_| Message::ZoomOut),
-                        false,
-                    ),
-                    pick_list(ZOOM_CHOICES, zoom_label, Message::ZoomPicked)
-                        .placeholder("–")
-                        .text_size(13)
-                        .padding([5, 6])
-                        .width(76)
-                        .handle(small_chevron())
-                        .style(theme::select_flat)
-                        .menu_style(theme::select_menu),
-                    icon_button(
-                        Icon::ZoomIn,
-                        "Zoom in (⌘+)",
-                        zoom.filter(|z| *z < MAX_ZOOM - 0.001)
-                            .map(|_| Message::ZoomIn),
-                        false,
-                    ),
-                ]
-                .spacing(0)
-                .align_y(Alignment::Center),
-            )
-            .padding(2)
-            .style(theme::pill);
-            right = right.push(
-                row![
-                    zoom_pill,
-                    cluster([
-                        icon_button(
-                            Icon::FitWidth,
-                            "Fit width (⌘2)",
-                            Some(Message::FitWidth),
-                            self.zoom == Zoom::FitWidth,
-                        ),
-                        icon_button(
-                            Icon::FitPage,
-                            "Fit page (⌘1)",
-                            Some(Message::FitPage),
-                            self.zoom == Zoom::FitPage,
-                        ),
-                    ]),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center),
-            );
+            ]
+            .spacing(0)
+            .align_y(Alignment::Center);
+            if !fit_in_menu {
+                zoom_row = zoom_row
+                    .push(Space::new().width(4))
+                    .push(icon_button(
+                        Icon::FitWidth,
+                        "Fit width (⌘2)",
+                        Some(Message::FitWidth),
+                        self.zoom == Zoom::FitWidth,
+                    ))
+                    .push(icon_button(
+                        Icon::FitPage,
+                        "Fit page (⌘1)",
+                        Some(Message::FitPage),
+                        self.zoom == Zoom::FitPage,
+                    ));
+            }
+            right = right.push(container(zoom_row).padding(2).style(theme::pill));
         }
         // In a narrow window New, Open and Print move into the `⋯` menu (see `overflow_menu`).
         let compact = is_compact(self.window_size.width);
@@ -315,14 +320,7 @@ impl App {
                 (can_save && editable).then_some(Message::Save),
                 false,
             ));
-            if !compact {
-                file.push(icon_button(
-                    Icon::Printer,
-                    "Print… (⌘P)",
-                    self.busy.is_none().then_some(Message::Print),
-                    false,
-                ));
-            }
+            // Print is occasional; it lives in `⋯` (and ⌘P).
         }
         let right = right.push(cluster(file)).push(icon_button(
             Icon::More,
@@ -361,7 +359,7 @@ impl App {
                 svg(Icon::Check.handle())
                     .width(14)
                     .height(14)
-                    .style(theme::icon_colored(|t| t.accent))
+                    .style(theme::icon_colored(|t| t.accent_text))
                     .into()
             } else {
                 Space::new().width(14).into()
@@ -378,14 +376,30 @@ impl App {
             .into()
         };
         let mut items = column![].spacing(1);
-        if is_compact(self.window_size.width) {
-            let open = self.doc.is_some() || self.writer.is_some();
+        let open = self.doc.is_some() || self.writer.is_some();
+        let width = self.window_size.width;
+        if is_compact(width) {
             items = items
                 .push(item("New Document…", false, Message::NewDialog))
                 .push(item("Open…", false, Message::OpenDialog));
-            if open && self.busy.is_none() {
-                items = items.push(item("Print…", false, Message::Print));
-            }
+        }
+        if open && self.busy.is_none() {
+            items = items.push(item("Print…", false, Message::Print));
+        }
+        if open && is_narrow(width) {
+            items = items
+                .push(item(
+                    "Fit Width",
+                    self.zoom == Zoom::FitWidth,
+                    Message::FitWidth,
+                ))
+                .push(item(
+                    "Fit Page",
+                    self.zoom == Zoom::FitPage,
+                    Message::FitPage,
+                ));
+        }
+        if is_compact(width) || open {
             items = items.push(container(horizontal_divider()).padding([4, 0]));
         }
         items = items.push(
@@ -438,45 +452,52 @@ impl App {
         let can_delete = targets.len() < doc.len();
         let enabled = |ok: bool, message: Message| (editable && ok).then_some(message);
 
+        // Grouped by kind of change; the destructive action comes last.
         let actions = row![
-            icon_button(
-                Icon::RotateLeft,
-                "Rotate left (⌘L)",
-                enabled(true, Message::Rotate(Rotation::R270)),
-                false,
-            ),
-            icon_button(
-                Icon::RotateRight,
-                "Rotate right (⌘R)",
-                enabled(true, Message::Rotate(Rotation::R90)),
-                false,
-            ),
-            icon_button(
-                Icon::MoveUp,
-                "Move earlier (⌥↑)",
-                enabled(can_move_up, Message::Move { earlier: true }),
-                false,
-            ),
-            icon_button(
-                Icon::MoveDown,
-                "Move later (⌥↓)",
-                enabled(can_move_down, Message::Move { earlier: false }),
-                false,
-            ),
-            icon_button(
-                Icon::Delete,
-                "Delete (⌫)",
-                enabled(can_delete, Message::Delete),
-                false,
-            ),
-            icon_button(
-                Icon::InsertPages,
-                "Insert pages from a PDF, document or image…",
-                enabled(true, Message::InsertDialog),
-                false,
-            ),
+            cluster([
+                icon_button(
+                    Icon::RotateLeft,
+                    "Rotate left (⌘L)",
+                    enabled(true, Message::Rotate(Rotation::R270)),
+                    false,
+                ),
+                icon_button(
+                    Icon::RotateRight,
+                    "Rotate right (⌘R)",
+                    enabled(true, Message::Rotate(Rotation::R90)),
+                    false,
+                ),
+            ]),
+            cluster([
+                icon_button(
+                    Icon::MoveUp,
+                    "Move earlier (⌥↑)",
+                    enabled(can_move_up, Message::Move { earlier: true }),
+                    false,
+                ),
+                icon_button(
+                    Icon::MoveDown,
+                    "Move later (⌥↓)",
+                    enabled(can_move_down, Message::Move { earlier: false }),
+                    false,
+                ),
+            ]),
+            cluster([
+                icon_button(
+                    Icon::InsertPages,
+                    "Insert pages from a PDF, document or image…",
+                    enabled(true, Message::InsertDialog),
+                    false,
+                ),
+                icon_button(
+                    Icon::Delete,
+                    "Delete page (⌫)",
+                    enabled(can_delete, Message::Delete),
+                    false,
+                ),
+            ]),
         ]
-        .spacing(0)
+        .spacing(8)
         .align_y(Alignment::Center);
         let count = doc.len();
         let header = container(
@@ -488,25 +509,18 @@ impl App {
             .align_y(Alignment::Center),
         )
         .padding([12, 14]);
-        let selected = doc.selection.len();
         let footer = container(
             column![
                 muted(
-                    if selected > 1 {
-                        format!("{selected} pages selected")
-                    } else {
-                        "Selected page".to_owned()
-                    },
-                    11.0,
+                    selection_label(doc.selection.len(), positions.first().copied()),
+                    12.0
                 ),
                 actions,
             ]
-            .spacing(4)
-            .align_x(Alignment::Center),
+            .spacing(6),
         )
         .width(Length::Fill)
-        .padding([8, 4])
-        .center_x(Length::Fill);
+        .padding([10, 12]);
 
         let thumbs = doc
             .pages
@@ -527,7 +541,7 @@ impl App {
                 let label = container(text((i + 1).to_string()).size(11).font(if current {
                     SEMIBOLD
                 } else {
-                    Font::DEFAULT
+                    theme::UI_FONT
                 }))
                 .padding([1, 7])
                 .style(move |theme| theme::page_badge(theme, current));
@@ -631,7 +645,7 @@ impl App {
                 .style(theme::icon_colored(if failed {
                     |t: &Tokens| t.danger
                 } else {
-                    |t: &Tokens| t.accent
+                    |t: &Tokens| t.accent_text
                 })),
         )
         .padding(21)
@@ -857,7 +871,7 @@ impl App {
     fn new_document_dialog<'a>(&'a self, form: &'a NewForm) -> Element<'a, Message> {
         let field_label = |label: &'a str| muted(label, 12.0);
         let write = column![
-            text("Write a document").size(13).font(SEMIBOLD),
+            text("Write a document").size(15).font(SEMIBOLD),
             row![
                 muted(
                     "A letter, report or form you type and format here, saved as a PDF you can \
@@ -875,7 +889,7 @@ impl App {
         ]
         .spacing(8);
         let blank = column![
-            text("Blank pages").size(13).font(SEMIBOLD),
+            text("Blank pages").size(15).font(SEMIBOLD),
             row![
                 column![
                     field_label("Paper size"),
@@ -941,7 +955,7 @@ impl App {
             )
         };
         let convert = column![
-            text("From other files").size(13).font(SEMIBOLD),
+            text("From other files").size(15).font(SEMIBOLD),
             row![
                 muted(
                     "Turn a Word document, spreadsheet or presentation into a PDF, or \
@@ -972,14 +986,11 @@ impl App {
                 ),
             ]
             .align_y(Alignment::Center),
-            Space::new().height(2),
             write,
-            horizontal_divider(),
             blank,
-            horizontal_divider(),
             convert,
         ]
-        .spacing(18)
+        .spacing(24)
         .padding(24)
         .width(560);
         opaque(
@@ -1082,7 +1093,7 @@ impl App {
         .padding([4, 8])
         .width(120)
         .handle(small_chevron())
-        .style(theme::select)
+        .style(theme::select_flat)
         .menu_style(theme::select_menu);
         let family = pick_list(families, Some(format.family.clone()), |f| {
             Message::Write(Action::Family(f))
@@ -1091,7 +1102,7 @@ impl App {
         .padding([4, 8])
         .width(170)
         .handle(small_chevron())
-        .style(theme::select)
+        .style(theme::select_flat)
         .menu_style(theme::select_menu);
         let size = pick_list(SIZES, Some(size_choice), |c| {
             Message::Write(Action::Size(c))
@@ -1100,7 +1111,7 @@ impl App {
         .padding([4, 8])
         .width(64)
         .handle(small_chevron())
-        .style(theme::select)
+        .style(theme::select_flat)
         .menu_style(theme::select_menu);
         let color = pick_list(COLORS, Some(color_choice(format.color)), |c| {
             Message::Write(Action::Color(c))
@@ -1109,7 +1120,7 @@ impl App {
         .padding([4, 8])
         .width(104)
         .handle(small_chevron())
-        .style(theme::select)
+        .style(theme::select_flat)
         .menu_style(theme::select_menu);
         let line_spacing = pick_list(SPACINGS, Some(spacing), |c| {
             Message::Write(Action::Spacing(c))
@@ -1118,94 +1129,101 @@ impl App {
         .padding([4, 8])
         .width(84)
         .handle(small_chevron())
-        .style(theme::select)
+        .style(theme::select_flat)
         .menu_style(theme::select_menu);
 
         let toggle = |icon, tip, t, active| icon_button(icon, tip, act(Action::Toggle(t)), active);
         let align =
             |icon, tip, a: Align| icon_button(icon, tip, act(Action::Align(a)), format.align == a);
+        let table = pick_list(
+            if w.editor.in_table() {
+                &crate::writer::TABLE_EDITS[..]
+            } else {
+                &crate::writer::TABLE_INSERTS[..]
+            },
+            None::<crate::writer::TableChoice>,
+            |c| Message::Write(Action::Table(c)),
+        )
+        .placeholder("Table")
+        .text_size(13)
+        .padding([4, 8])
+        .width(84)
+        .handle(small_chevron())
+        // A menu, not an empty field: its label is full-strength text.
+        .style(|theme: &Theme, status| pick_list::Style {
+            placeholder_color: theme::tokens(theme).text,
+            ..theme::select_flat(theme, status)
+        })
+        .menu_style(theme::select_menu);
         let bar = row![
-            style,
-            family,
-            size,
-            toolbar_separator(),
-            toggle(Icon::Bold, "Bold (⌘B)", Toggle::Bold, format.bold),
-            toggle(Icon::Italic, "Italic (⌘I)", Toggle::Italic, format.italic),
-            toggle(
-                Icon::Underline,
-                "Underline (⌘U)",
-                Toggle::Underline,
-                format.underline
-            ),
-            toggle(
-                Icon::Strikethrough,
-                "Strikethrough",
-                Toggle::Strikethrough,
-                format.strikethrough
-            ),
-            color,
-            toolbar_separator(),
-            align(Icon::AlignLeft, "Align left", Align::Left),
-            align(Icon::AlignCenter, "Centre", Align::Center),
-            align(Icon::AlignRight, "Align right", Align::Right),
-            align(Icon::AlignJustify, "Justify", Align::Justify),
-            line_spacing,
-            toolbar_separator(),
-            icon_button(
-                Icon::BulletList,
-                "Bulleted list",
-                act(Action::List(ListKind::Bullet)),
-                format.list == Some(ListKind::Bullet),
-            ),
-            icon_button(
-                Icon::NumberedList,
-                "Numbered list",
-                act(Action::List(ListKind::Numbered)),
-                format.list == Some(ListKind::Numbered),
-            ),
-            icon_button(
-                Icon::Picture,
-                "Insert picture…",
-                act(Action::InsertImage),
-                false
-            ),
-            icon_button(
-                Icon::PageBreak,
-                "Page break (⌘↩)",
-                act(Action::PageBreak),
-                false
-            ),
-            pick_list(
-                if w.editor.in_table() {
-                    &crate::writer::TABLE_EDITS[..]
-                } else {
-                    &crate::writer::TABLE_INSERTS[..]
-                },
-                None::<crate::writer::TableChoice>,
-                |c| Message::Write(Action::Table(c)),
-            )
-            .placeholder("Table")
-            .text_size(13)
-            .padding([4, 8])
-            .width(84)
-            .handle(small_chevron())
-            .style(theme::select)
-            .menu_style(theme::select_menu),
-            toolbar_separator(),
-            icon_button(
-                Icon::ClearFormatting,
-                "Clear formatting",
-                act(Action::ClearFormatting),
-                false
-            ),
-            icon_button(
-                Icon::PageSetup,
-                "Page setup…",
-                on.then_some(Message::PageSetupDialog),
-                false
-            ),
+            pill(row![style, family, size]),
+            pill(row![
+                toggle(Icon::Bold, "Bold (⌘B)", Toggle::Bold, format.bold),
+                toggle(Icon::Italic, "Italic (⌘I)", Toggle::Italic, format.italic),
+                toggle(
+                    Icon::Underline,
+                    "Underline (⌘U)",
+                    Toggle::Underline,
+                    format.underline
+                ),
+                toggle(
+                    Icon::Strikethrough,
+                    "Strikethrough",
+                    Toggle::Strikethrough,
+                    format.strikethrough
+                ),
+                color,
+            ]),
+            pill(row![
+                align(Icon::AlignLeft, "Align left", Align::Left),
+                align(Icon::AlignCenter, "Centre", Align::Center),
+                align(Icon::AlignRight, "Align right", Align::Right),
+                align(Icon::AlignJustify, "Justify", Align::Justify),
+                line_spacing,
+            ]),
+            pill(row![
+                icon_button(
+                    Icon::BulletList,
+                    "Bulleted list",
+                    act(Action::List(ListKind::Bullet)),
+                    format.list == Some(ListKind::Bullet),
+                ),
+                icon_button(
+                    Icon::NumberedList,
+                    "Numbered list",
+                    act(Action::List(ListKind::Numbered)),
+                    format.list == Some(ListKind::Numbered),
+                ),
+                icon_button(
+                    Icon::Picture,
+                    "Insert picture…",
+                    act(Action::InsertImage),
+                    false
+                ),
+                icon_button(
+                    Icon::PageBreak,
+                    "Page break (⌘↩)",
+                    act(Action::PageBreak),
+                    false
+                ),
+                table,
+            ]),
+            cluster([
+                icon_button(
+                    Icon::ClearFormatting,
+                    "Clear formatting",
+                    act(Action::ClearFormatting),
+                    false
+                ),
+                icon_button(
+                    Icon::PageSetup,
+                    "Page setup…",
+                    on.then_some(Message::PageSetupDialog),
+                    false
+                ),
+            ]),
         ]
-        .spacing(4)
+        .spacing(CLUSTER_GAP)
         .align_y(Alignment::Center);
         container(scrollable(bar).direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::new().width(0).scroller_width(0),
@@ -1570,6 +1588,14 @@ fn small_chevron<T>() -> pick_list::Handle<T> {
     }
 }
 
+/// Controls grouped on one sunken, rounded surface (design system: pills).
+fn pill<'a>(content: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
+    container(content.spacing(2).align_y(Alignment::Center))
+        .padding(2)
+        .style(theme::pill)
+        .into()
+}
+
 /// Toolbar buttons that belong together, 2 px apart.
 fn cluster<'a>(buttons: impl IntoIterator<Item = Element<'a, Message>>) -> Element<'a, Message> {
     row(buttons).spacing(2).align_y(Alignment::Center).into()
@@ -1590,11 +1616,27 @@ fn edited_badge<'a>() -> Element<'a, Message> {
     .into()
 }
 
+/// The sidebar footer's caption: "Page 3 selected" or "4 pages selected".
+pub(crate) fn selection_label(selected: usize, first: Option<usize>) -> String {
+    match (selected, first) {
+        (0 | 1, Some(page)) => format!("Page {} selected", page + 1),
+        (0 | 1, None) => "No page selected".to_owned(),
+        (n, _) => format!("{n} pages selected"),
+    }
+}
+
 /// Below this window width the toolbar folds New, Open and Print into its `⋯` menu.
 const COMPACT_WIDTH: f32 = 980.0;
 
 pub(crate) fn is_compact(window_width: f32) -> bool {
     window_width < COMPACT_WIDTH
+}
+
+/// Below this width the fit toggles move into `⋯` too, so toolbar icons never shrink.
+const NARROW_WIDTH: f32 = 820.0;
+
+pub(crate) fn is_narrow(window_width: f32) -> bool {
+    window_width < NARROW_WIDTH
 }
 
 /// Text for the one-line status bar: line breaks and runs of spaces (as in debug-formatted
@@ -1615,15 +1657,16 @@ pub(crate) fn platform_keys(label: &str) -> String {
         .replace('⌫', "Delete")
 }
 
-fn toolbar_separator<'a>() -> Element<'a, Message> {
-    container(container(Space::new().width(1).height(18)).style(theme::divider))
-        .padding([0, 6])
-        .into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_captions() {
+        assert_eq!(selection_label(1, Some(2)), "Page 3 selected");
+        assert_eq!(selection_label(4, Some(0)), "4 pages selected");
+        assert_eq!(selection_label(0, None), "No page selected");
+    }
 
     #[test]
     fn status_messages_fit_on_one_line() {

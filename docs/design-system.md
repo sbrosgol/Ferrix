@@ -33,7 +33,8 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 | `border` / `border_strong` | hairlines / control outlines |
 | `text` / `text_muted` / `text_faint` | primary / secondary / disabled and placeholder |
 | `hover` / `pressed` | translucent overlays on any surface |
-| `accent` / `accent_hover` / `accent_soft` / `on_accent` | primary action, selection, focus |
+| `accent` / `accent_hover` / `accent_soft` / `on_accent` | fills: primary action, selection, focus |
+| `accent_text` | accent as text or icon colour (4.5:1 on `surface` and `chrome` in both themes) |
 | `danger` | destructive actions, errors |
 | `focus` | focus ring |
 | `page_shadow` | paper shadow |
@@ -42,7 +43,11 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 
 - **Spacing (4-pt grid):** 2, 4, 8, 12, 16, 24, 32. Clusters in a toolbar are 12 apart; buttons
   inside a cluster are 2 apart.
-- **Type (UI font, px):**
+- **UI font:** Inter, Regular and SemiBold, bundled (`crates/ferrix-app/assets/fonts`, SIL
+  OFL 1.1) and set as the default font, so headings and body share one face on every platform.
+  Never rely on a synthesised or fallback weight. Document fonts (Liberation) are never used for
+  chrome.
+- **Type (px):**
   - 11: captions, keycaps
   - 12: status bar, tooltips, thumbnail labels
   - 13: body text and controls
@@ -50,12 +55,15 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - 17: dialog titles (semibold)
   - 22: empty-state headings (semibold)
 - **Radius:** 6 for controls, 8 for groups and menus, 12 for dialogs, 4 for thumbnails.
+- **Contrast:** text on `accent` must reach 4.5:1 in both themes. In dark mode the accent fill is
+  darker (`#3D6BF0`) and accent text lighter (`#8DA6FF`).
 - **Heights:**
   - toolbar 48
   - toolbar controls 30 (icons 16)
   - dialog controls 32
   - status bar 28
   - sidebar 220 wide
+  - writer format bar 42
 - **Elevation:**
   - pages: two-layer shadow, a tight one plus a soft one
   - menus: 0 4 16 at 18%
@@ -66,15 +74,20 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 - **Toolbar, left to right:**
   - the macOS window controls' space
   - sidebar toggle (PDFs only)
-  - document title, with an "Edited" dot when unsaved
+  - document title, with an "Edited" dot when unsaved, then Undo and Redo
   - centre: the page navigator pill, `‹ [ 3 ] / 12 ›` (PDFs; a written document shows its
     page in the status bar)
-  - right: history (Undo, Redo); zoom pill `− 125 % ▾ +` with the fit toggles; file (New,
-    Open, Save, Print); then the overflow menu `⋯`
+  - right: the zoom pill `− 125 % ▾ +` with fit-width and fit-page inside it; file (New,
+    Open, Save); then the overflow menu `⋯`
 
-  The overflow menu holds Appearance (Match System / Light / Dark) and, for written documents,
-  Page Setup…. With no document open, only the title, New, Open and `⋯` show. Below 980 px,
-  New, Open and Print move into `⋯` (`view::is_compact`).
+  The overflow menu holds Print…, Appearance (Match System / Light / Dark) and, for written
+  documents, Page Setup…. With no document open, only the title, New, Open and `⋯` show.
+  Below 980 px New and Open move into `⋯` (`view::is_compact`); below 820 px the fit toggles
+  do too (`view::is_narrow`), so toolbar icons never shrink.
+- **Writer format bar:** one pill per cluster, 12 apart, no rules: Style · Font · Size |
+  B I U S · Colour | alignment · Spacing | lists · picture · page break · Table | Clear
+  formatting, Page setup. Selects inside pills are borderless (`theme::select_flat`); a select
+  used as a menu (Table) shows its label in full `text`, not as a placeholder.
 - **Icon button:** ghost (background only on hover or press), 30×30, icon 16. When toggled on,
   `accent_soft` background with an `accent` icon. Every icon button has a tooltip of the form
   "Name (shortcut)".
@@ -95,9 +108,11 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - header with a segmented switch (Pages | Outline)
   - thumbnails with a 1 px `border`, current page with a 2 px `accent` ring and the page number in
     an accent pill
-  - organizer actions in a compact bar at the bottom, with "N selected"
-- **Status bar:** 12 px `text_muted`. Left: document facts. Right: transient messages. It never
-  repeats what the toolbar already shows.
+  - organizer bar at the bottom under a hairline: "Page 3 selected" / "4 pages selected" in 12
+    `text_muted`, then rotate ×2 | move ×2 | insert, delete (destructive last)
+- **Status bar:** 12 px `text_muted`, one line. Left: document facts, or a transient message.
+  Right: what only it shows (a written document's page). It never repeats the toolbar, and it is
+  hidden when nothing is open and there is nothing to report.
 - **Empty state:**
   - centred icon tile, heading and one sentence
   - primary Open… and secondary New Document…
