@@ -57,6 +57,13 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--find-pdf") {
+        script.extend([
+            Message::FindOpen,
+            Message::FindQuery("energy star".into()),
+            Message::FindNext,
+        ]);
+    }
     if flag(&mut args, "--stamps") {
         script.extend(stamps_script());
     }

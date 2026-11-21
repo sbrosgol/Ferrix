@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 ferrix-engine.workspace = true
 ferrix-types.workspace = true
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true

@@ -93,6 +93,10 @@ impl App {
                     .push(self.find_bar(writer, find))
                     .push(horizontal_divider());
             }
+        } else if let (Some(find), Some(_)) = (&self.find, &self.doc) {
+            window = window
+                .push(self.pdf_find_bar(find))
+                .push(horizontal_divider());
         }
         let mut window = window.push(container(body).height(Length::Fill));
         // With nothing open and nothing to report, the status bar would be an empty band.
@@ -1262,6 +1266,69 @@ impl App {
 
 impl App {
     /// Find and replace, under the formatting bar.
+    /// Find in a PDF: query, match case, previous/next and "3 of 27", streaming while pages
+    /// are searched.
+    fn pdf_find_bar<'a>(&'a self, find: &'a FindState) -> Element<'a, Message> {
+        let search = self.doc.as_ref().and_then(|d| d.search.as_ref());
+        let total = search.map_or(0, |s| s.total());
+        let searching = self.searching();
+        let status = match (search, total, self.match_position()) {
+            (None, _, _) => String::new(),
+            (Some(_), 0, _) if searching => "Searching…".to_owned(),
+            (Some(_), 0, _) => "No matches".to_owned(),
+            (Some(_), n, Some(at)) if !searching => format!("{at} of {n}"),
+            (Some(_), n, Some(at)) => format!("{at} of {n}+"),
+            (Some(_), 1, None) if !searching => "1 match".to_owned(),
+            (Some(_), n, None) if !searching => format!("{n} matches"),
+            (Some(_), n, None) => format!("{n}+ matches"),
+        };
+        let any = total > 0;
+        let bar = row![
+            svg(Icon::Search.handle())
+                .width(16)
+                .height(16)
+                .style(theme::icon_colored(|t| t.text_muted)),
+            text_input("Find in document", &find.query)
+                .id(find_input_id())
+                .on_input(Message::FindQuery)
+                .on_submit(Message::FindNext)
+                .size(13)
+                .padding([4, 8])
+                .width(260)
+                .style(theme::input),
+            icon_button(
+                Icon::MatchCase,
+                "Match case and accents",
+                Some(Message::FindCase(!find.match_case)),
+                find.match_case,
+            ),
+            icon_button(
+                Icon::MoveUp,
+                "Previous match (⇧⌘G)",
+                any.then_some(Message::FindPrevious),
+                false
+            ),
+            icon_button(
+                Icon::MoveDown,
+                "Next match (↩ or ⌘G)",
+                any.then_some(Message::FindNext),
+                false
+            ),
+            muted(status, 12.0).width(120),
+            Space::new().width(Length::Fill),
+            icon_button(Icon::Close, "Close (Esc)", Some(Message::FindClose), false),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        container(bar)
+            .height(40)
+            .padding([0, 10])
+            .center_y(40)
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into()
+    }
+
     fn find_bar<'a>(&'a self, w: &'a Writer, find: &'a FindState) -> Element<'a, Message> {
         let count = w.editor.find_all(&find.query, find.match_case).len();
         let any = count > 0;

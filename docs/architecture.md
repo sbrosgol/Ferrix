@@ -245,6 +245,14 @@ pub trait Command: Serialize + DeserializeOwned {
   (handles rotation/skew), copy with reading-order heuristics and ligature/hyphen normalization.
 - Search: background indexer extracts text page-by-page (low priority), builds an in-memory index
   (Unicode NFKC + case folding, diacritic-insensitive option). Results stream in as found.
+  *Built (2026-11-21):* `ferrix_text::Query` folds query and page alike (NFKD, combining
+  marks dropped and lower case unless "match case"; whitespace runs and line breaks become one
+  space; PDFium's end-of-line hyphen mark joins words) and `PageText::find` returns character
+  ranges, so matches draw and select like selections. There is no separate index yet: the app
+  loads page text one page at a time (visible pages first, then onward from the current page),
+  matches each page as it arrives, and shows the first match at or after the current page as
+  soon as the pages before it are searched. Page texts stay cached per document. Not done:
+  matching across page boundaries, whole-word search, a results list.
 - Also feeds **accessibility**: tagged PDF structure tree when present, otherwise heuristic
   reading order → exposed as an AccessKit subtree of the canvas.
 

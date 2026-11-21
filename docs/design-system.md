@@ -168,6 +168,19 @@ tools appear only when asked for.
   covers (read from the page, in curly quotes, two lines, “…” if cut), both 13 `text_muted`.
   Empty state: "Turn on Markup to add notes, highlights and drawings."
 
+### Find in PDFs
+
+- **Bar:** ⌘F opens a 40-high chrome bar under the toolbar (the writer's find bar without
+  Replace): search icon, a 260-wide field "Find in document" (prefilled with a short selected
+  line), Match case and accents, Previous (⇧⌘G), Next (↩, ⌘G), a status, Close (Esc).
+- **Status:** "Searching…" until a match is found; "3 of 27", with "+" while pages remain to
+  be searched; "No matches" when all are searched.
+- **On the page:** every match in `page_find` (yellow), the current one in `page_find_current`
+  (orange), one quad per line. The first match at or after the current page is shown as soon
+  as it is found; a match already in view doesn't scroll the page, otherwise it is placed a
+  third of the way down.
+- **Closing** leaves the current match selected, so ⌘F, Esc, ⌘C copies it.
+
 ### Text selection (every mode)
 
 - **Pointer:** I-beam over text, arrow elsewhere. Drag selects in text order, across pages;

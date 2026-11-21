@@ -72,9 +72,20 @@ impl App {
             return Task::none();
         };
         let visible = doc.strip.visible(doc.scroll, height);
-        let next = visible
-            .filter_map(|i| doc.state.pages.get(i).copied())
-            .find(|e| !doc.texts.contains_key(&e.key));
+        let missing = |i: usize| {
+            doc.state
+                .pages
+                .get(i)
+                .copied()
+                .filter(|e| !doc.texts.contains_key(&e.key))
+        };
+        // Visible pages first; while searching, then every page from the current one on.
+        let n = doc.state.pages.len();
+        let next = visible.filter_map(missing).next().or_else(|| {
+            doc.search
+                .as_ref()
+                .and_then(|_| (0..n).find_map(|step| missing((doc.current + step) % n)))
+        });
         let Some(entry) = next else {
             return Task::none();
         };
@@ -110,7 +121,7 @@ impl App {
             page,
             result.unwrap_or_else(|_| Arc::new(PageText::default())),
         );
-        self.load_texts()
+        Task::batch([self.search_page(page), self.load_texts()])
     }
 
     /// The caret position under `at` (PDF user space) on `page`.
@@ -202,10 +213,19 @@ impl App {
     /// one per line.
     pub(crate) fn selection_quads(&self) -> Option<(PageKey, Vec<[PdfPoint; 4]>)> {
         let s = self.text_selection?;
-        let t = self.intrinsic_transform(s.page)?;
-        let text = self.page_text(s.page)?;
+        Some((s.page, self.range_quads(s.page, s.sel.range())?))
+    }
+
+    /// Quads of a character range of `page`'s text, in PDF user space; one per line.
+    pub(crate) fn range_quads(
+        &self,
+        page: PageKey,
+        range: std::ops::Range<usize>,
+    ) -> Option<Vec<[PdfPoint; 4]>> {
+        let t = self.intrinsic_transform(page)?;
+        let text = self.page_text(page)?;
         let quads: Vec<[PdfPoint; 4]> = text
-            .boxes(s.sel.range())
+            .boxes(range)
             .into_iter()
             .map(|r| {
                 [
@@ -216,7 +236,7 @@ impl App {
                 ]
             })
             .collect();
-        (!quads.is_empty()).then_some((s.page, quads))
+        (!quads.is_empty()).then_some(quads)
     }
 
     /// Turns the selection into a text-markup annotation of `style` in `color`.

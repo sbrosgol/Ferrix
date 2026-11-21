@@ -7,7 +7,11 @@
 
 #![forbid(unsafe_code)]
 
+mod search;
+
 use std::ops::Range;
+
+pub use search::Query;
 
 use ferrix_engine::TextPage;
 use ferrix_types::{Point, Rect};

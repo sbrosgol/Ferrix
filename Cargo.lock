@@ -1527,6 +1527,7 @@ dependencies = [
  "ferrix-engine",
  "ferrix-engine-pdfium",
  "ferrix-types",
+ "unicode-normalization",
 ]
 
 [[package]]

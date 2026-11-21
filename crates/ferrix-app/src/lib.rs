@@ -8,6 +8,7 @@ mod document;
 mod icon;
 pub mod markup;
 pub mod markup_canvas;
+mod pdf_find;
 #[cfg(windows)]
 mod print;
 mod recovery;

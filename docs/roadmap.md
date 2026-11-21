@@ -21,7 +21,8 @@ demo. Exit criteria are the definition of done, not the feature list.
   (fit width/page, pinch, ctrl+wheel), rotation, HiDPI, memory budget.
 - Thumbnails sidebar, outline/bookmarks, internal & external links (with confirmation).
 - ~~Text selection + copy~~ (done with ADR-0009 phase 3: `ferrix-text`, single page; drag,
-  double/triple click, ⌘A/⌘C); find-in-document with streaming results.
+  double/triple click, ⌘A/⌘C); ~~find-in-document with streaming results~~ (done:
+  `ferrix_text::Query` and `PageText::find`, the app's PDF find bar; see architecture §5.5).
 - Password-protected PDFs, light/dark/system theme, page-inversion reading mode.
 - Keyboard navigation and basic a11y for chrome.
 - `ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom.

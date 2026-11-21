@@ -47,6 +47,9 @@ pub(crate) struct Overlay<'a> {
     pub(crate) text: Option<(&'a ferrix_text::PageText, PageTransform)>,
     /// Selected text on this page, as quads in user space.
     pub(crate) selection_quads: Vec<[PdfPoint; 4]>,
+    /// Find matches on this page, and the current one, as quads in user space.
+    pub(crate) find_quads: Vec<[PdfPoint; 4]>,
+    pub(crate) find_current: Vec<[PdfPoint; 4]>,
 }
 
 #[derive(Debug, Default)]
@@ -247,6 +250,19 @@ impl canvas::Program<Message> for Overlay<'_> {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let t = theme::tokens(theme);
+        let find = self.find_quads.iter().map(|q| (q, t.page_find));
+        let current = self.find_current.iter().map(|q| (q, t.page_find_current));
+        for (quad, color) in find.chain(current) {
+            let [tl, tr, bl, br] = quad.map(|p| self.to_px(p));
+            let path = Path::new(|p| {
+                p.move_to(tl);
+                p.line_to(tr);
+                p.line_to(br);
+                p.line_to(bl);
+                p.close();
+            });
+            frame.fill(&path, color);
+        }
         for quad in &self.selection_quads {
             let [tl, tr, bl, br] = quad.map(|p| self.to_px(p));
             let path = Path::new(|p| {
