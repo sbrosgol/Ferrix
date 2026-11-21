@@ -354,6 +354,10 @@ pub(crate) fn hit(
     tolerance: f32,
 ) -> Option<AnnotId> {
     annots.iter().rev().find_map(|(id, a)| {
+        // Replies share their parent's /Rect but aren't drawn; the parent is what's clicked.
+        if matches!(a.kind, AnnotKind::Reply { .. }) {
+            return None;
+        }
         let near = tolerance + a.props.border_width / 2.0;
         let inside = match &a.kind {
             AnnotKind::Ink { strokes } => strokes.iter().any(|s| polyline_distance(s, p) <= near),
@@ -396,6 +400,7 @@ pub(crate) fn handles(annot: &Annotation) -> Vec<(Handle, PdfPoint)> {
     match &annot.kind {
         // Notes keep their size, text boxes fit their text, text markup follows its text.
         AnnotKind::Note { .. }
+        | AnnotKind::Reply { .. }
         | AnnotKind::FreeText { .. }
         | AnnotKind::Markup { .. }
         | AnnotKind::Other { .. } => Vec::new(),
@@ -538,7 +543,9 @@ fn map_points(annot: &Annotation, f: impl Fn(PdfPoint) -> PdfPoint) -> Annotatio
 
 /// Whether Ferrix may change `annot` at all (as opposed to only deleting it).
 pub(crate) fn editable(annot: &Annotation) -> bool {
-    annot.is_editable() && !annot.props.flags.has(AnnotFlags::READ_ONLY)
+    // Review states are other people's decisions: shown, never changed.
+    let review_state = matches!(annot.kind, AnnotKind::Reply { state: Some(_) });
+    annot.is_editable() && !annot.props.flags.has(AnnotFlags::READ_ONLY) && !review_state
 }
 
 #[cfg(test)]
@@ -741,5 +748,107 @@ mod tests {
         };
         assert_eq!(strokes[0], vec![pt(0.0, 0.0), pt(20.0, 20.0)]);
         assert!(handles(&square).len() == 8 && handles(&m).len() == 8);
+    }
+}
+
+/// Seconds since the Unix epoch for a PDF date (`D:YYYYMMDDHHmmSS` with an optional
+/// `Z`/`+HH'mm'` offset, ISO 32000-2 §7.9.4); `None` if it isn't one.
+pub(crate) fn pdf_date_seconds(date: &str) -> Option<i64> {
+    let s = date.trim().strip_prefix("D:").unwrap_or(date.trim());
+    let digits = |from: usize, len: usize| -> Option<i64> {
+        s.get(from..from + len)
+            .filter(|d| d.bytes().all(|b| b.is_ascii_digit()))?
+            .parse()
+            .ok()
+    };
+    let year = digits(0, 4)?;
+    let month = digits(4, 2).unwrap_or(1).clamp(1, 12);
+    let day = digits(6, 2).unwrap_or(1).clamp(1, 31);
+    let hour = digits(8, 2).unwrap_or(0).min(23);
+    let minute = digits(10, 2).unwrap_or(0).min(59);
+    let second = digits(12, 2).unwrap_or(0).min(59);
+    let offset = match s.get(14..15) {
+        Some(sign @ ("+" | "-")) => {
+            let h = digits(15, 2).unwrap_or(0);
+            let m = s
+                .get(18..20)
+                .and_then(|m| m.parse::<i64>().ok())
+                .unwrap_or(0);
+            let total = (h * 60 + m) * 60;
+            if sign == "+" { total } else { -total }
+        }
+        _ => 0,
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// "Just now", "5 min ago", "3 hours ago", "Yesterday", "4 days ago", or the date
+/// ("21 Nov 2026"), relative to `now` (seconds since the epoch). Dates are in UTC: Ferrix
+/// has no time-zone database yet.
+pub(crate) fn relative_date(date: &str, now: i64) -> String {
+    let Some(then) = pdf_date_seconds(date) else {
+        return String::new();
+    };
+    let ago = now - then;
+    match ago {
+        i64::MIN..=59 => "Just now".into(),
+        60..=3_599 => format!("{} min ago", ago / 60),
+        3_600..=86_399 => {
+            let h = ago / 3600;
+            if h == 1 {
+                "1 hour ago".into()
+            } else {
+                format!("{h} hours ago")
+            }
+        }
+        86_400..=172_799 => "Yesterday".into(),
+        172_800..=604_799 => format!("{} days ago", ago / 86_400),
+        _ => {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let s = date.trim().strip_prefix("D:").unwrap_or(date.trim());
+            let month: usize = s.get(4..6).and_then(|m| m.parse().ok()).unwrap_or(1);
+            let day: u32 = s.get(6..8).and_then(|d| d.parse().ok()).unwrap_or(1);
+            let year = s.get(0..4).unwrap_or("");
+            format!("{day} {} {year}", MONTHS[month.clamp(1, 12) - 1])
+        }
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+
+    #[test]
+    fn parses_pdf_dates_with_offsets() {
+        assert_eq!(pdf_date_seconds("D:19700101000000Z"), Some(0));
+        assert_eq!(pdf_date_seconds("D:19700101010000+01'00'"), Some(0));
+        assert_eq!(
+            pdf_date_seconds("D:2026"),
+            pdf_date_seconds("D:20260101000000")
+        );
+        assert_eq!(pdf_date_seconds("yesterday"), None);
+    }
+
+    #[test]
+    fn describes_dates_relative_to_now() {
+        let now = pdf_date_seconds("D:20261121120000Z").expect("date");
+        assert_eq!(relative_date("D:20261121115930Z", now), "Just now");
+        assert_eq!(relative_date("D:20261121114000Z", now), "20 min ago");
+        assert_eq!(relative_date("D:20261121090000Z", now), "3 hours ago");
+        assert_eq!(relative_date("D:20261120100000Z", now), "Yesterday");
+        assert_eq!(relative_date("D:20261001000000Z", now), "1 Oct 2026");
     }
 }

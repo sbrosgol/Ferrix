@@ -122,6 +122,9 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
         }
         // Text is set by `free_text` when writing; the display list has only the box.
         AnnotKind::FreeText { .. } => (Vec::new(), props.rect),
+        // Replies show in their thread, not on the page: an empty appearance stops PDFium and
+        // Poppler drawing each one as an extra icon (hiding by flag isn't allowed in PDF/A).
+        AnnotKind::Reply { .. } => (Vec::new(), props.rect),
         AnnotKind::Markup { style, quads } => {
             let color = props.color.unwrap_or(Rgb::new(1.0, 0.82, 0.2));
             let items = markup_items(*style, quads, color);

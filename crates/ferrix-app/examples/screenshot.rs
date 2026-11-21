@@ -57,6 +57,9 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--replies") {
+        script.extend(replies_script());
+    }
     if flag(&mut args, "--textbox") {
         script.extend(textbox_script());
     }
@@ -117,6 +120,48 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Adds a note, then reopens it, gives a name and sends two replies.
+fn replies_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_types::PdfPoint;
+    use iced::widget::text_editor::{Action, Edit};
+    let typed = |text: &str, reply: bool| -> Vec<Message> {
+        text.chars()
+            .map(|c| {
+                let action = Action::Edit(Edit::Insert(c));
+                Message::Annot(if reply {
+                    A::ReplyEdit(action)
+                } else {
+                    A::NoteEdit(action)
+                })
+            })
+            .collect()
+    };
+    let at = PdfPoint::new(470.0, 700.0);
+    let mut s = vec![
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::Note)),
+        Message::Annot(A::PointerAt(0, P::Press(at))),
+    ];
+    s.extend(typed("Can we confirm these numbers?", false));
+    s.push(Message::Annot(A::NoteDone));
+    s.push(Message::Annot(A::PointerAt(
+        0,
+        P::Press(PdfPoint::new(480.0, 690.0)),
+    )));
+    s.push(Message::Annot(A::PointerAt(
+        0,
+        P::Release(PdfPoint::new(480.0, 690.0)),
+    )));
+    s.push(Message::Annot(A::AuthorInput("Ana Ruiz".into())));
+    s.push(Message::Annot(A::AuthorSave));
+    s.extend(typed("Checked against the 2019 filing.", true));
+    s.push(Message::Annot(A::ReplySend));
+    s.extend(typed("Thanks!", true));
+    s.push(Message::Annot(A::ReplySend));
+    s
 }
 
 /// Adds a text box, types into it and commits it.

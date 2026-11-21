@@ -76,6 +76,7 @@ fn kind_icon(annot: &Annotation) -> Icon {
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => Icon::ArrowUpRight,
         AnnotKind::Line { .. } => Icon::Minus,
         AnnotKind::FreeText { .. } => Icon::TextBox,
+        AnnotKind::Reply { .. } => Icon::Comments,
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => Icon::Highlighter,
             ferrix_core::MarkupStyle::StrikeOut => Icon::Strikethrough,
@@ -95,6 +96,7 @@ pub(crate) fn kind_name(annot: &Annotation) -> String {
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => "Arrow".into(),
         AnnotKind::Line { .. } => "Line".into(),
         AnnotKind::FreeText { .. } => "Text box".into(),
+        AnnotKind::Reply { .. } => "Reply".into(),
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => "Highlight".into(),
             ferrix_core::MarkupStyle::Underline => "Underline".into(),
@@ -241,15 +243,33 @@ impl App {
             }
         }
         let mut full = row![content].align_y(Alignment::Center);
-        if selected.is_some_and(|(_, a)| a.is_deletable()) {
-            full = full
-                .push(Space::new().width(Length::Fill))
-                .push(icon_button(
-                    Icon::Delete,
-                    "Delete annotation (⌫)",
-                    Some(Message::Annot(AnnotMsg::Delete)),
+        if let Some((id, annot)) = selected {
+            full = full.push(Space::new().width(Length::Fill));
+            // Notes open their thread when clicked; everything else from here.
+            if !matches!(annot.kind, AnnotKind::Note { .. })
+                && let Some((page, _)) = doc.state.annots.get(id)
+            {
+                full = full.push(icon_button(
+                    Icon::Comments,
+                    "Comment and replies",
+                    Some(Message::Annot(AnnotMsg::OpenComment(page, id))),
                     false,
                 ));
+            }
+        }
+        if selected.is_some_and(|(_, a)| a.is_deletable()) {
+            let replies = selected.map_or(0, |(id, _)| doc.state.annots.replies(id).len());
+            let tip = match replies {
+                0 => "Delete annotation (⌫)".to_owned(),
+                1 => "Delete annotation and 1 reply (⌫)".to_owned(),
+                n => format!("Delete annotation and {n} replies (⌫)"),
+            };
+            full = full.push(icon_button(
+                Icon::Delete,
+                tip,
+                Some(Message::Annot(AnnotMsg::Delete)),
+                false,
+            ));
         }
         bar(full.width(Length::Fill).into())
     }
@@ -337,7 +357,9 @@ impl App {
             && let Some((_, annot)) = doc.state.annots.get(note.id)
         {
             let r = annot.props.rect;
-            if let AnnotKind::FreeText { size: font, color } = annot.kind {
+            if let (false, AnnotKind::FreeText { size: font, color }) = (note.popover, &annot.kind)
+            {
+                let (font, color) = (*font, *color);
                 // Text boxes are edited in place, over the box, at the page's zoom.
                 let corner = transform.to_page(r.left, r.top);
                 let (x, y) = (corner.x * scale, corner.y * scale);
@@ -386,7 +408,7 @@ impl App {
                 x
             };
             layers = layers.push(
-                container(opaque(note_editor(note, annot)))
+                container(opaque(self.comment_popover(doc, note, annot)))
                     .width(size.width)
                     .height(size.height)
                     .padding(iced::Padding {
@@ -402,7 +424,14 @@ impl App {
 
     /// The sidebar header: a Pages | Comments switch.
     pub(crate) fn sidebar_switch<'a>(&'a self, doc: &'a Document) -> Element<'a, Message> {
-        let comments = doc.state.annots.len();
+        // Replies are part of their comment's thread, not counted on their own.
+        let comments = doc
+            .state
+            .annots
+            .pages()
+            .flat_map(|(_, list)| list.iter())
+            .filter(|(_, a)| a.reply_to.is_none())
+            .count();
         let tab = |label: String, which: SidebarTab| {
             let active = self.sidebar_tab == which;
             button(
@@ -457,8 +486,16 @@ impl App {
                 )
                 .padding([8, 6]),
             );
-            for (id, annot) in annots {
-                list = list.push(comment_row(entry.key, *id, annot, selected == Some(*id)));
+            // Replies show in their thread, not as rows of their own.
+            for (id, annot) in annots.iter().filter(|(_, a)| a.reply_to.is_none()) {
+                let replies = doc.state.annots.replies(*id).len();
+                list = list.push(comment_row(
+                    entry.key,
+                    *id,
+                    annot,
+                    replies,
+                    selected == Some(*id),
+                ));
             }
         }
         if !any {
@@ -478,6 +515,167 @@ impl App {
         scrollable(list)
             .height(Length::Fill)
             .style(theme::scrollbar)
+            .into()
+    }
+
+    /// The comment popover: the annotation's text, its replies, and a field to reply.
+    fn comment_popover<'a>(
+        &'a self,
+        doc: &'a Document,
+        note: &'a crate::annotate_ui::NoteEditor,
+        annot: &'a Annotation,
+    ) -> Element<'a, Message> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let byline = |a: &'a Annotation, fallback: String| -> Element<'a, Message> {
+            let who = a
+                .props
+                .author
+                .clone()
+                .filter(|a| !a.is_empty())
+                .unwrap_or(fallback);
+            let when = a
+                .props
+                .modified
+                .as_deref()
+                .map(|m| markup::relative_date(m, now))
+                .unwrap_or_default();
+            row![
+                text(who)
+                    .size(13)
+                    .font(SEMIBOLD)
+                    .wrapping(text::Wrapping::None),
+                Space::new().width(Length::Fill),
+                muted(when, 12.0),
+            ]
+            .align_y(Alignment::Center)
+            .into()
+        };
+        let locked = annot
+            .props
+            .flags
+            .has(ferrix_core::AnnotFlags::LOCKED_CONTENTS)
+            || !markup::editable(annot);
+        let mut editor = text_editor(&note.content)
+            .placeholder(if matches!(annot.kind, AnnotKind::Note { .. }) {
+                "Add a note"
+            } else {
+                "Add a comment"
+            })
+            .size(13)
+            .height(Length::Fixed(90.0))
+            .padding(8);
+        if !locked {
+            editor = editor.on_action(|a| Message::Annot(AnnotMsg::NoteEdit(a)));
+        }
+        let mut body = column![byline(annot, kind_name(annot)), editor].spacing(8);
+        if locked {
+            body = body.push(muted("The author locked this text.", 12.0));
+        }
+
+        // The thread, oldest first.
+        let replies = doc.state.annots.replies(note.id);
+        if !replies.is_empty() {
+            let mut thread = column![].spacing(10);
+            for (id, reply) in replies {
+                let mut item = column![byline(reply, "Reply".into())].spacing(2);
+                match &reply.kind {
+                    AnnotKind::Reply { state: Some(state) } => {
+                        let who = reply
+                            .props
+                            .author
+                            .clone()
+                            .unwrap_or_else(|| "Someone".into());
+                        item = item.push(muted(
+                            format!("{who} set the status to {}", state.state),
+                            12.0,
+                        ));
+                    }
+                    _ => {
+                        if let Some(t) = reply.props.contents.as_deref() {
+                            item = item.push(text(t).size(13));
+                        }
+                    }
+                }
+                let delete = reply
+                    .is_deletable()
+                    .then_some(Message::Annot(AnnotMsg::ReplyDelete(id)));
+                thread = thread.push(
+                    row![
+                        container(item).width(Length::Fill),
+                        icon_button(Icon::Delete, "Delete reply", delete, false),
+                    ]
+                    .spacing(4),
+                );
+            }
+            body = body
+                .push(horizontal_rule())
+                .push(container(scrollable(thread).style(theme::scrollbar)).max_height(220));
+        }
+
+        // Replying: the author's name first, once per session.
+        body = body.push(horizontal_rule());
+        if self.author.is_none() {
+            body = body.push(
+                column![
+                    muted("Add your name so others know who replied.", 12.0),
+                    row![
+                        iced::widget::text_input("Your name", &self.author_input)
+                            .on_input(|v| Message::Annot(AnnotMsg::AuthorInput(v)))
+                            .on_submit(Message::Annot(AnnotMsg::AuthorSave))
+                            .size(13)
+                            .padding([5, 8])
+                            .style(theme::input),
+                        button(text("Save").size(13))
+                            .padding([5, 12])
+                            .style(theme::secondary)
+                            .on_press(Message::Annot(AnnotMsg::AuthorSave)),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(4),
+            );
+        } else {
+            let has_reply = !note.reply.text().trim().is_empty();
+            body = body.push(
+                text_editor(&note.reply)
+                    .placeholder("Reply")
+                    .size(13)
+                    .height(Length::Fixed(56.0))
+                    .padding(8)
+                    .on_action(|a| Message::Annot(AnnotMsg::ReplyEdit(a))),
+            );
+            body = body.push(row![
+                Space::new().width(Length::Fill),
+                button(text("Reply").size(13))
+                    .padding([5, 14])
+                    .style(theme::secondary)
+                    .on_press_maybe(has_reply.then_some(Message::Annot(AnnotMsg::ReplySend))),
+            ]);
+        }
+        body = body.push(
+            row![
+                icon_button(
+                    Icon::Delete,
+                    "Delete",
+                    annot
+                        .is_deletable()
+                        .then_some(Message::Annot(AnnotMsg::NoteDelete)),
+                    false,
+                ),
+                Space::new().width(Length::Fill),
+                button(text("Done").size(13))
+                    .padding([6, 16])
+                    .style(theme::primary)
+                    .on_press(Message::Annot(AnnotMsg::NoteDone)),
+            ]
+            .align_y(Alignment::Center),
+        );
+        container(body)
+            .width(320)
+            .padding(12)
+            .style(theme::popover)
             .into()
     }
 
@@ -559,6 +757,12 @@ fn selection_bar<'a>(certified: bool) -> Element<'a, Message> {
     container(items).padding(4).style(theme::popover).into()
 }
 
+fn horizontal_rule<'a>() -> Element<'a, Message> {
+    container(Space::new().width(Length::Fill).height(1))
+        .style(|theme: &Theme| container::Style::default().background(theme::tokens(theme).border))
+        .into()
+}
+
 fn close(a: Rgb, b: Rgb) -> bool {
     (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
 }
@@ -614,6 +818,7 @@ fn comment_row<'a>(
     page: ferrix_core::PageKey,
     id: AnnotId,
     annot: &'a Annotation,
+    replies: usize,
     selected: bool,
 ) -> Element<'a, Message> {
     let tint = annot.props.color.unwrap_or(Rgb::BLACK);
@@ -648,6 +853,16 @@ fn comment_row<'a>(
         let preview: String = contents.lines().take(2).collect::<Vec<_>>().join("\n");
         body = body.push(muted(preview, 13.0));
     }
+    if replies > 0 {
+        body = body.push(muted(
+            if replies == 1 {
+                "1 reply".to_owned()
+            } else {
+                format!("{replies} replies")
+            },
+            12.0,
+        ));
+    }
     button(row![icon, body].spacing(10))
         .width(Length::Fill)
         .padding([8, 10])
@@ -659,57 +874,5 @@ fn comment_row<'a>(
             style
         })
         .on_press(Message::Annot(AnnotMsg::Select(page, id)))
-        .into()
-}
-
-fn note_editor<'a>(
-    note: &'a crate::annotate_ui::NoteEditor,
-    annot: &'a Annotation,
-) -> Element<'a, Message> {
-    let author = annot
-        .props
-        .author
-        .clone()
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| "Note".into());
-    let locked = annot
-        .props
-        .flags
-        .has(ferrix_core::AnnotFlags::LOCKED_CONTENTS)
-        || !markup::editable(annot);
-    let mut editor = text_editor(&note.content)
-        .placeholder("Add a note")
-        .size(13)
-        .height(Length::Fixed(110.0))
-        .padding(8);
-    if !locked {
-        editor = editor.on_action(|a| Message::Annot(AnnotMsg::NoteEdit(a)));
-    }
-    let mut body = column![text(author).size(13).font(SEMIBOLD), editor].spacing(8);
-    if locked {
-        body = body.push(muted("The author locked this note’s text.", 12.0));
-    }
-    body = body.push(
-        row![
-            icon_button(
-                Icon::Delete,
-                "Delete note",
-                annot
-                    .is_deletable()
-                    .then_some(Message::Annot(AnnotMsg::NoteDelete)),
-                false,
-            ),
-            Space::new().width(Length::Fill),
-            button(text("Done").size(13))
-                .padding([6, 16])
-                .style(theme::primary)
-                .on_press(Message::Annot(AnnotMsg::NoteDone)),
-        ]
-        .align_y(Alignment::Center),
-    );
-    container(body)
-        .width(280)
-        .padding(12)
-        .style(theme::popover)
         .into()
 }

@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ferrix_core::{AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageEntry, PageList};
+use ferrix_core::{
+    AnnotId, AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageEntry, PageList, ReplyTo,
+};
 use ferrix_pdf::Revision;
 use ferrix_types::PdfBox;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -174,9 +176,9 @@ pub fn write_page_annotations(
 
         let mut kept: HashMap<ObjectId, &Annotation> = HashMap::new();
         let mut added = Vec::new();
-        for (_, annot) in annots.page(entry.key) {
+        for (annot_id, annot) in annots.page(entry.key) {
             match annot.origin {
-                AnnotOrigin::New => added.push(annot),
+                AnnotOrigin::New => added.push((*annot_id, annot)),
                 AnnotOrigin::Existing { source: s, object } => {
                     let id = (s == entry.source)
                         .then(|| revision.object_id(source, (object.number, object.generation)))
@@ -206,7 +208,9 @@ pub fn write_page_annotations(
         };
         // Replies must stay on their parent's page (ISO 32000-2 §12.5.6.2): delete threads whole.
         if let Some(orphan) = kept.values().find_map(|a| {
-            let parent = a.reply_to?;
+            let ReplyTo::File(parent) = a.reply_to? else {
+                return None;
+            };
             let parent = revision.object_id(source, (parent.number, parent.generation))?;
             removed.contains(&parent).then_some(parent)
         }) {
@@ -235,7 +239,8 @@ pub fn write_page_annotations(
         if pdfa.part == Some(1)
             && added
                 .iter()
-                .chain(changed.iter().map(|(_, a, _)| a))
+                .map(|(_, a)| *a)
+                .chain(changed.iter().map(|(_, a, _)| *a))
                 .any(|a| {
                     // Highlights blend with Multiply, which PDF/A-1 forbids (ISO 19005-1 §6.4).
                     a.props.opacity < 1.0
@@ -295,7 +300,12 @@ pub fn write_page_annotations(
                     .map_or(true, |id| !removed.contains(&id) && !popups.contains(&id))
             })
             .collect();
-        for annot in added {
+        // Ids first, so a reply's /IRT can name a parent added in this same save.
+        let reserved: HashMap<AnnotId, ObjectId> = added
+            .iter()
+            .map(|(annot_id, _)| (*annot_id, revision.reserve_id()))
+            .collect();
+        for (annot_id, annot) in added {
             let ap = appearance(annot).ok_or_else(|| {
                 AnnotError::NotAllowed(format!(
                     "{} annotations can't be created",
@@ -310,9 +320,21 @@ pub fn write_page_annotations(
                 dict.set("NM", text(&unique_name()));
             }
             apply_model(&mut dict, annot, &ap, ap_id, now, true);
-            out.push(Object::Reference(
-                revision.add_object(Object::Dictionary(dict)),
-            ));
+            if let Some(parent) = annot.reply_to {
+                let parent = match parent {
+                    ReplyTo::New(id) => reserved.get(&id).copied(),
+                    ReplyTo::File(object) => {
+                        revision.object_id(source, (object.number, object.generation))
+                    }
+                }
+                .ok_or_else(|| {
+                    AnnotError::NotAllowed("a reply's annotation is no longer on its page".into())
+                })?;
+                dict.set("IRT", Object::Reference(parent));
+            }
+            let object_id = reserved[&annot_id];
+            revision.replace_object(object_id, Object::Dictionary(dict));
+            out.push(Object::Reference(object_id));
             report.added += 1;
         }
         report.removed += removed.len();
@@ -485,10 +507,10 @@ fn apply_model(
             Object::Array(p.dash.iter().map(|d| Object::Real(*d)).collect()),
         );
     }
-    // Notes and text markup have no border style (Tables 175 and 182 define none).
+    // Notes, replies and text markup have no border style (Tables 175 and 182 define none).
     if !matches!(
         annot.kind,
-        AnnotKind::Note { .. } | AnnotKind::Markup { .. }
+        AnnotKind::Note { .. } | AnnotKind::Reply { .. } | AnnotKind::Markup { .. }
     ) {
         dict.set("BS", Object::Dictionary(bs));
         // `/BS` takes precedence, but a stale `/Border` would mislead readers that only know it.
@@ -582,7 +604,10 @@ fn apply_model(
                 ),
             );
         }
-        AnnotKind::Square | AnnotKind::Circle | AnnotKind::Other { .. } => {}
+        AnnotKind::Square
+        | AnnotKind::Circle
+        | AnnotKind::Reply { .. }
+        | AnnotKind::Other { .. } => {}
     }
     // Our appearance replaces any earlier one; these keys describe the old geometry or states.
     for key in [b"RD".as_slice(), b"AS"] {

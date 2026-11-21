@@ -1172,3 +1172,134 @@ fn text_boxes_in_cmyk_pdfa_files_use_icc_colour() {
     }) || String::from_utf8_lossy(&out).contains("/ICCBased");
     assert!(icc, "the text box uses an ICC-based colour space");
 }
+
+/// A reply can name a parent added in the same save: ids are reserved before dictionaries are
+/// built, so /IRT points at the new note's object.
+#[test]
+fn replies_link_to_new_and_existing_parents() {
+    use ferrix_core::{ReplyTo, ReviewState};
+    let base = fixture_with(|doc, page| {
+        let note = note_object(doc, page);
+        let state = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "P" => page, "IRT" => note,
+            "Rect" => vec![500.into(), 700.into(), 520.into(), 720.into()],
+            "State" => Object::string_literal("Accepted"), "StateModel" => "Review",
+            "T" => Object::string_literal("Ben"),
+        });
+        vec![state.into()]
+    });
+    let mut state = open_state(&base, None);
+    let page = state.pages.entries()[0].key;
+
+    // The review state reads as a read-only reply of the existing note.
+    let list = state.annots.page(page).to_vec();
+    let (note_id, note) = list
+        .iter()
+        .find(|(_, a)| matches!(a.kind, AnnotKind::Note { .. }))
+        .cloned()
+        .unwrap();
+    let review = list
+        .iter()
+        .find_map(|(_, a)| match &a.kind {
+            AnnotKind::Reply { state: Some(s) } => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        review,
+        ReviewState {
+            model: "Review".into(),
+            state: "Accepted".into()
+        }
+    );
+    assert_eq!(state.annots.replies(note_id).len(), 1);
+
+    // A new note, a reply to it, and a reply to the existing note, in one save.
+    let new_note = state.annots.new_id();
+    let mut n = Annotation::new(
+        AnnotKind::Note {
+            icon: NoteIcon::Comment,
+            open: false,
+        },
+        ferrix_annot::note_rect(pt(100.0, 700.0)),
+    );
+    n.props.contents = Some("Parent".into());
+    state
+        .apply(&DocEdit::Annot(AnnotEdit::Add {
+            page,
+            index: state.annots.page(page).len(),
+            id: new_note,
+            annot: Box::new(n.clone()),
+        }))
+        .unwrap();
+    let reply = |to: ReplyTo, text: &str, rect: PdfBox| {
+        let mut r = Annotation::new(AnnotKind::Reply { state: None }, rect);
+        r.reply_to = Some(to);
+        r.props.contents = Some(text.into());
+        r.props.author = Some("Ana".into());
+        r
+    };
+    add(
+        &mut state,
+        0,
+        reply(ReplyTo::New(new_note), "Child of new", n.props.rect),
+    );
+    let ferrix_core::AnnotOrigin::Existing { object, .. } = note.origin else {
+        panic!("fixture note is in the file")
+    };
+    add(
+        &mut state,
+        0,
+        reply(ReplyTo::File(object), "Child of existing", note.props.rect),
+    );
+    let out = save_state(&base, None, &state);
+
+    let doc = Document::load_mem(&out).unwrap();
+    let page_id = *doc.get_pages().get(&1).unwrap();
+    let annots: Vec<lopdf::ObjectId> = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Annots")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_reference().unwrap())
+        .collect();
+    let by_contents = |text: &str| {
+        annots
+            .iter()
+            .copied()
+            .find(|id| {
+                doc.get_dictionary(*id)
+                    .unwrap()
+                    .get(b"Contents")
+                    .ok()
+                    .and_then(|c| lopdf::decode_text_string(c).ok())
+                    .as_deref()
+                    == Some(text)
+            })
+            .unwrap()
+    };
+    let parent = by_contents("Parent");
+    let child = doc.get_dictionary(by_contents("Child of new")).unwrap();
+    assert_eq!(child.get(b"IRT").unwrap().as_reference().unwrap(), parent);
+    assert!(child.get(b"BS").is_err(), "replies have no border style");
+    let other = doc
+        .get_dictionary(by_contents("Child of existing"))
+        .unwrap();
+    assert_eq!(
+        other.get(b"IRT").unwrap().as_reference().unwrap(),
+        (object.number, object.generation)
+    );
+
+    let reread = open_state(&out, None);
+    let page = reread.pages.entries()[0].key;
+    let replies = reread
+        .annots
+        .page(page)
+        .iter()
+        .filter(|(_, a)| matches!(a.kind, AnnotKind::Reply { state: None }))
+        .count();
+    assert_eq!(replies, 2);
+}

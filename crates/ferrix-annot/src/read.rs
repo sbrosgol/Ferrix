@@ -5,7 +5,7 @@
 
 use ferrix_core::{
     AnnotFlags, AnnotKind, AnnotOrigin, AnnotProps, Annotation, LineEnd, MAX_STROKE_POINTS,
-    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, Rgb, SourceId,
+    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, ReplyTo, Rgb, SourceId,
 };
 use ferrix_types::{PdfBox, PdfPoint};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -85,11 +85,24 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
         .get(b"IRT")
         .and_then(Object::as_reference)
         .ok()
-        .map(|(number, generation)| ObjectRef { number, generation });
-    // Replies are part of a thread, which Ferrix doesn't edit yet. Shapes drawn with features
-    // our appearance can't reproduce stay display-only, so editing never silently drops them.
-    let kind = if dict.has(b"IRT") {
-        other()
+        .map(|(number, generation)| ReplyTo::File(ObjectRef { number, generation }));
+    // Replies are notes with /IRT; group members (/RT /Group) stay display-only, deleted with
+    // their primary. Shapes drawn with features our appearance can't reproduce stay
+    // display-only too, so editing never silently drops them.
+    let grouped = name(doc, dict, b"RT").is_some_and(|rt| rt == "Group");
+    let kind = if reply_to.is_some() {
+        if subtype == "Text" && !grouped {
+            let state = match (name(doc, dict, b"StateModel"), text(doc, dict, b"State")) {
+                (model, Some(state)) => Some(ferrix_core::ReviewState {
+                    model: model.unwrap_or_else(|| "Marked".into()),
+                    state,
+                }),
+                _ => None,
+            };
+            AnnotKind::Reply { state }
+        } else {
+            other()
+        }
     } else {
         match subtype.as_str() {
             "Text" => AnnotKind::Note {
