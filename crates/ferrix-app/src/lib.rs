@@ -10,6 +10,7 @@ mod recovery;
 mod render;
 mod strip;
 pub mod theme;
+mod titlebar;
 mod view;
 mod worker;
 pub mod writer;
@@ -17,11 +18,12 @@ mod writer_canvas;
 
 use std::path::PathBuf;
 
-pub use app::{App, Message, Recovery};
+pub use app::{App, Appearance, Message, Recovery};
 pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
 pub use recovery::Recoverable;
+pub use titlebar::TitleBarAction;
 use worker::EngineWorker;
 pub use writer::{Action as WriteAction, KeyCommand};
 
@@ -44,6 +46,11 @@ pub fn application(
     .theme(App::theme)
     .subscription(App::subscription)
     .window(window_settings())
+    // Inter (SIL OFL 1.1, `assets/fonts/LICENSE-OFL`) with real weights, so headings and body
+    // text share one typeface on every platform (design system: Type).
+    .font(include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice())
+    .font(include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice())
+    .default_font(theme::UI_FONT)
     // Closing asks about unsaved changes first; the app exits itself when it may.
     .exit_on_close_request(false)
     .antialiasing(true)

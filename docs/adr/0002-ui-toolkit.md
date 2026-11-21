@@ -54,3 +54,17 @@ Use **iced** (MIT) for `ferrix-app`, without a comparative trial.
   the one filling most of the view, updated from `on_scroll`, which iced sends only for user
   scrolling, so programmatic `scroll_to` jumps never feed back. Zoom, resize and page edits
   keep the view on the same fraction of the current page. "Fit" zooms fit the largest page.
+
+## Implementation notes (visual design, 2026-11-21)
+- The app follows `docs/design-system.md`: semantic colour tokens for light and dark in
+  `ferrix-app/src/theme.rs`, a 4-pt spacing grid, a fixed type scale, and component anatomy
+  for the toolbar, sidebar, format bar, dialogs and status bar. Work on it goes through the
+  `ferrix-ui` skill; the `ux-designer` agent critiques and `ui-verifier` checks screenshots.
+- **Inter** (Regular and SemiBold, SIL OFL 1.1, about 830 KB) is bundled as the UI font. iced's
+  system default has no real semibold, so headings fell back to another typeface. Documents
+  still use the bundled Liberation fonts (ADR-0008).
+- The overflow menu (`⋯`) is a popover built from a stack and a mouse area. iced 0.14 has no
+  menu widget, and there is no native menu bar yet.
+- Known gaps: buttons have no keyboard focus ring (iced 0.14 buttons aren't focusable); the
+  New Document dialog still offers three side-by-side actions rather than one confirm button;
+  the screenshot emulator doesn't draw shadows.

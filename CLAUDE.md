@@ -66,6 +66,11 @@ Line numbers drift; search by name if one is off.
 - Comments explain why; user-facing strings use curly quotes and plain language.
 - Lints: `clippy::all`, `unwrap_used`, `unreachable_pub`, `missing_debug_implementations` are warnings and must stay clean.
 
+## UI work
+
+Follow `docs/design-system.md` (tokens, spacing, type, components, copy) and the `ferrix-ui`
+skill. The `ux-designer` agent critiques and specs; `ui-verifier` checks the screenshots.
+
 ## Testing UI changes
 
 Use the headless screenshot example (`cargo run -p ferrix-app --example screenshot -- out.png …`)
