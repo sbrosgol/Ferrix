@@ -282,7 +282,7 @@ pub fn write_page_annotations(
                     annot.kind.subtype()
                 ))
             })?;
-            let ap_id = appearance_stream(revision, &ap, pdfa.cmyk);
+            let ap_id = annotation_stream(revision, annot, &ap, pdfa)?;
             apply_model(&mut dict, annot, &ap, ap_id, now, contents_changed);
             revision.replace_object(id, Object::Dictionary(dict));
             report.changed += 1;
@@ -302,7 +302,7 @@ pub fn write_page_annotations(
                     annot.kind.subtype()
                 ))
             })?;
-            let ap_id = appearance_stream(revision, &ap, pdfa.cmyk);
+            let ap_id = annotation_stream(revision, annot, &ap, pdfa)?;
             let mut dict = Dictionary::new();
             dict.set("P", Object::Reference(page_id));
             dict.set("CreationDate", text(now));
@@ -346,6 +346,52 @@ fn popups_of(doc: &Document, items: &[Object], removed: &HashSet<ObjectId>) -> H
         }
     }
     popups
+}
+
+/// The appearance of `annot`: vector shapes, or for text boxes, text set by `ferrix-compose`.
+fn annotation_stream(
+    revision: &mut Revision,
+    annot: &Annotation,
+    ap: &Appearance,
+    pdfa: PdfaRules,
+) -> Result<ObjectId, AnnotError> {
+    let AnnotKind::FreeText { size, color } = annot.kind else {
+        return Ok(appearance_stream(revision, ap, pdfa.cmyk));
+    };
+    if pdfa.cmyk {
+        // krilla writes RGB text; DeviceRGB isn't allowed under a CMYK output intent.
+        return Err(AnnotError::NotAllowed(
+            "text boxes can't be added to PDF/A files prepared for CMYK printing yet".into(),
+        ));
+    }
+    let r = ap.bbox;
+    let (w, h) = (r.width().max(1.0), r.height().max(1.0));
+    let text = annot.props.contents.as_deref().unwrap_or("");
+    let page = crate::free_text::render(text, size, color, w, h)?;
+    // krilla draws in its own [0 0 w h] page; the outer form places it at the box.
+    let inner = revision.import_page_as_form(&page, 0, [0.0, 0.0, w, h])?;
+    let mut xobjects = Dictionary::new();
+    xobjects.set("Tx", Object::Reference(inner));
+    let mut resources = Dictionary::new();
+    resources.set("XObject", Object::Dictionary(xobjects));
+    let mut content = String::from("q ");
+    if ap.opacity < 1.0 {
+        let mut gs = Dictionary::new();
+        gs.set("Type", Object::Name(b"ExtGState".to_vec()));
+        gs.set("CA", Object::Real(ap.opacity));
+        gs.set("ca", Object::Real(ap.opacity));
+        let mut states = Dictionary::new();
+        states.set("GS0", Object::Dictionary(gs));
+        resources.set("ExtGState", Object::Dictionary(states));
+        content.push_str("/GS0 gs ");
+    }
+    content.push_str(&format!("1 0 0 1 {} {} cm /Tx Do Q\n", r.left, r.bottom));
+    let mut dict = Dictionary::new();
+    dict.set("Type", Object::Name(b"XObject".to_vec()));
+    dict.set("Subtype", Object::Name(b"Form".to_vec()));
+    dict.set("BBox", rect(r));
+    dict.set("Resources", Object::Dictionary(resources));
+    Ok(revision.add_object(Object::Stream(Stream::new(dict, content.into_bytes()))))
 }
 
 /// Adds the form XObject for `/AP /N` and returns its id. Coordinates are in user space, so
@@ -503,6 +549,32 @@ fn apply_model(
                 ),
             );
         }
+        AnnotKind::FreeText { size, color } => {
+            let hex = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            // For readers that rebuild the look: Helvetica has Liberation Sans's metrics.
+            dict.set(
+                "DA",
+                text(&format!(
+                    "/Helv {size} Tf {} {} {} rg",
+                    num(color.r),
+                    num(color.g),
+                    num(color.b)
+                )),
+            );
+            dict.set(
+                "DS",
+                text(&format!(
+                    "font: Helvetica,sans-serif {size}pt; text-align:left; color:#{:02X}{:02X}{:02X}",
+                    hex(color.r),
+                    hex(color.g),
+                    hex(color.b)
+                )),
+            );
+            dict.set("Q", Object::Integer(0));
+            // A stale rich-text body would bring back old text or style when Acrobat edits it.
+            dict.remove(b"RC");
+            dict.remove(b"IC");
+        }
         AnnotKind::Markup { quads, .. } => {
             dict.set(
                 "QuadPoints",
@@ -546,6 +618,12 @@ fn rect(b: PdfBox) -> Object {
 
 fn color(r: f32, g: f32, b: f32) -> Object {
     Object::Array(vec![Object::Real(r), Object::Real(g), Object::Real(b)])
+}
+
+/// A number as PDF syntax: at most three decimals, no exponent.
+fn num(v: f32) -> String {
+    let s = format!("{:.3}", if v.is_finite() { v } else { 0.0 });
+    s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// A PDF text string: PDFDocEncoding when ASCII, otherwise UTF-16BE with a byte-order mark.

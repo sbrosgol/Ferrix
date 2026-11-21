@@ -120,6 +120,8 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
                 .outset(width / 2.0 + 1.0);
             (items, bbox)
         }
+        // Text is set by `free_text` when writing; the display list has only the box.
+        AnnotKind::FreeText { .. } => (Vec::new(), props.rect),
         AnnotKind::Markup { style, quads } => {
             let color = props.color.unwrap_or(Rgb::new(1.0, 0.82, 0.2));
             let items = markup_items(*style, quads, color);

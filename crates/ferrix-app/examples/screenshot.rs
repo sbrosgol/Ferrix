@@ -57,6 +57,9 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--textbox") {
+        script.extend(textbox_script());
+    }
     if flag(&mut args, "--select") {
         script.extend(select_script());
     }
@@ -114,6 +117,25 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Adds a text box, types into it and commits it.
+fn textbox_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_types::PdfPoint;
+    let mut s = vec![
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::TextBox)),
+        Message::Annot(A::Color(4)),
+        Message::Annot(A::PointerAt(0, P::Press(PdfPoint::new(330.0, 770.0)))),
+    ];
+    for c in "Approved — see the notes below".chars() {
+        s.push(Message::Annot(A::NoteEdit(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert(c)),
+        )));
+    }
+    s.push(Message::Annot(A::NoteDone));
+    s
 }
 
 /// Highlights a line (triple-click, then the selection bar), underlines another with the

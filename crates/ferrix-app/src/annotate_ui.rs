@@ -21,6 +21,8 @@ pub enum AnnotMsg {
     Pointer(PageKey, Pointer),
     /// Pointer input on the page at an index, for scripted use (screenshots, tests).
     PointerAt(usize, Pointer),
+    /// A text box's font size.
+    TextSize(f32),
     /// A palette colour, by index into [`COLORS`].
     Color(usize),
     Width(f32),
@@ -83,8 +85,26 @@ impl App {
             AnnotMsg::Color(i) => {
                 if let Some((_, color)) = COLORS.get(i) {
                     let color = *color;
-                    return self.restyle(|s| s.color = color, |a| a.props.color = Some(color));
+                    return self.restyle(
+                        |s| s.color = color,
+                        |a| match &mut a.kind {
+                            // A text box's colour is its text's.
+                            AnnotKind::FreeText { color: c, .. } => *c = color,
+                            _ => a.props.color = Some(color),
+                        },
+                    );
                 }
+            }
+            AnnotMsg::TextSize(size) => {
+                return self.restyle(
+                    |_| {},
+                    |a| {
+                        if let AnnotKind::FreeText { size: s, .. } = &mut a.kind {
+                            *s = size;
+                            a.props.rect = text_box_rect(a, size);
+                        }
+                    },
+                );
             }
             AnnotMsg::Width(width) => {
                 return self.restyle(|s| s.width = width, |a| a.props.border_width = width);
@@ -216,8 +236,8 @@ impl App {
                 if !self.may_annotate(page) {
                     return close;
                 }
-                if tool == Tool::Note {
-                    return Task::batch([close, self.place_note(page, at)]);
+                if matches!(tool, Tool::Note | Tool::TextBox) {
+                    return Task::batch([close, self.place_note(page, at, tool)]);
                 }
                 if let Some(m) = self.markup.as_mut() {
                     m.selected = None;
@@ -315,7 +335,10 @@ impl App {
         let Some((_, annot)) = self.doc.as_ref().and_then(|d| d.state.annots.get(id)) else {
             return;
         };
-        if !matches!(annot.kind, AnnotKind::Note { .. }) {
+        if !matches!(
+            annot.kind,
+            AnnotKind::Note { .. } | AnnotKind::FreeText { .. }
+        ) {
             return;
         }
         if self.note.as_ref().is_some_and(|n| n.id == id) {
@@ -329,12 +352,18 @@ impl App {
         });
     }
 
-    fn place_note(&mut self, page: PageKey, at: ferrix_types::PdfPoint) -> Task<Message> {
-        let Some(style) = self.markup.as_ref().map(|m| m.style(Tool::Note)) else {
+    /// Places a note or a text box at `at` and opens its editor.
+    fn place_note(
+        &mut self,
+        page: PageKey,
+        at: ferrix_types::PdfPoint,
+        tool: Tool,
+    ) -> Task<Message> {
+        let Some(style) = self.markup.as_ref().map(|m| m.style(tool)) else {
             return Task::none();
         };
         let Some(annot) = markup::create(
-            Tool::Note,
+            tool,
             style,
             &markup::Drag {
                 start: at,
@@ -605,7 +634,15 @@ impl App {
             return Task::none();
         };
         let mut changed = annot.clone();
+        let is_text_box = matches!(annot.kind, AnnotKind::FreeText { .. });
+        if is_text_box && text.is_empty() && markup::editable(annot) {
+            // An empty text box means nothing: it goes away.
+            return self.apply_annot(AnnotEdit::Remove { id: note.id }, "Delete Text Box");
+        }
         changed.props.contents = (!text.is_empty()).then_some(text);
+        if let AnnotKind::FreeText { size, .. } = changed.kind {
+            changed.props.rect = text_box_rect(&changed, size);
+        }
         if changed == *annot || !markup::editable(annot) {
             return Task::none();
         }
@@ -614,7 +651,11 @@ impl App {
                 id: note.id,
                 annot: Box::new(changed),
             },
-            "Edit Note",
+            if is_text_box {
+                "Edit Text Box"
+            } else {
+                "Edit Note"
+            },
         )
     }
 
@@ -644,3 +685,16 @@ impl App {
 
 /// Shown when a certified document doesn't allow annotations.
 pub(crate) const CERTIFIED: &str = "This document is certified, and its author doesn’t allow annotations. You can read it but not annotate it.";
+
+/// A text box's rectangle for its text at `size`: same top-left corner, sized to fit.
+fn text_box_rect(annot: &ferrix_core::Annotation, size: f32) -> ferrix_types::PdfBox {
+    let r = annot.props.rect;
+    let text = annot.props.contents.as_deref().unwrap_or("");
+    let (w, h) = ferrix_annot::free_text::measure(text, size, None);
+    ferrix_types::PdfBox {
+        left: r.left,
+        top: r.top,
+        right: r.left + w,
+        bottom: r.top - h,
+    }
+}

@@ -23,6 +23,16 @@ use crate::{
     view::{BAR_HEIGHT, CLUSTER_GAP, SEMIBOLD, icon_button, muted, pill, small_chevron},
 };
 
+/// A text box font size for the pick list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextSize(u8);
+
+impl std::fmt::Display for TextSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} pt", self.0)
+    }
+}
+
 /// An opacity choice for the pick list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Opacity(u8);
@@ -47,6 +57,7 @@ fn tool_icon(tool: Tool) -> Icon {
         Tool::Underline => Icon::Underline,
         Tool::StrikeOut => Icon::Strikethrough,
         Tool::Squiggly => Icon::UnderlineWavy,
+        Tool::TextBox => Icon::TextBox,
         Tool::Note => Icon::StickyNote,
         Tool::Pen => Icon::Pencil,
         Tool::Rectangle => Icon::Square,
@@ -64,6 +75,7 @@ fn kind_icon(annot: &Annotation) -> Icon {
         AnnotKind::Circle => Icon::Circle,
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => Icon::ArrowUpRight,
         AnnotKind::Line { .. } => Icon::Minus,
+        AnnotKind::FreeText { .. } => Icon::TextBox,
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => Icon::Highlighter,
             ferrix_core::MarkupStyle::StrikeOut => Icon::Strikethrough,
@@ -82,6 +94,7 @@ pub(crate) fn kind_name(annot: &Annotation) -> String {
         AnnotKind::Circle => "Ellipse".into(),
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => "Arrow".into(),
         AnnotKind::Line { .. } => "Line".into(),
+        AnnotKind::FreeText { .. } => "Text box".into(),
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => "Highlight".into(),
             ferrix_core::MarkupStyle::Underline => "Underline".into(),
@@ -159,14 +172,28 @@ impl App {
                     m.tool
                 };
                 let style = m.style(tool);
-                let (color, width, opacity, is_note) = match selected {
-                    Some((_, a)) => (
-                        a.props.color.unwrap_or(Rgb::BLACK),
-                        a.props.border_width,
-                        a.props.opacity,
-                        matches!(a.kind, AnnotKind::Note { .. }),
+                // Text boxes show a font size instead of a line width.
+                let (color, width, opacity, is_note, text_size) = match selected {
+                    Some((_, a)) => {
+                        let (color, text_size) = match a.kind {
+                            AnnotKind::FreeText { size, color } => (color, Some(size)),
+                            _ => (a.props.color.unwrap_or(Rgb::BLACK), None),
+                        };
+                        (
+                            color,
+                            a.props.border_width,
+                            a.props.opacity,
+                            matches!(a.kind, AnnotKind::Note { .. }),
+                            text_size,
+                        )
+                    }
+                    None => (
+                        style.color,
+                        style.width,
+                        style.opacity,
+                        tool == Tool::Note,
+                        (tool == Tool::TextBox).then_some(12.0),
                     ),
-                    None => (style.color, style.width, style.opacity, tool == Tool::Note),
                 };
                 content = content.push(pill(row(COLORS.iter().enumerate().map(
                     |(i, (name, c))| {
@@ -178,7 +205,23 @@ impl App {
                         )
                     },
                 ))));
-                if !is_note {
+                if let Some(size) = text_size {
+                    let sizes: Vec<TextSize> = ferrix_annot::free_text::SIZES
+                        .iter()
+                        .map(|s| TextSize(*s as u8))
+                        .collect();
+                    content = content.push(
+                        pick_list(sizes, Some(TextSize(size.round() as u8)), |s: TextSize| {
+                            Message::Annot(AnnotMsg::TextSize(f32::from(s.0)))
+                        })
+                        .text_size(13)
+                        .padding([4, 8])
+                        .width(76)
+                        .handle(small_chevron())
+                        .style(theme::select)
+                        .menu_style(theme::select_menu),
+                    );
+                } else if !is_note {
                     content = content.push(pill(row(WIDTHS
                         .iter()
                         .map(|w| width_button(*w, (w - width).abs() < 0.01)))));
@@ -294,6 +337,45 @@ impl App {
             && let Some((_, annot)) = doc.state.annots.get(note.id)
         {
             let r = annot.props.rect;
+            if let AnnotKind::FreeText { size: font, color } = annot.kind {
+                // Text boxes are edited in place, over the box, at the page's zoom.
+                let corner = transform.to_page(r.left, r.top);
+                let (x, y) = (corner.x * scale, corner.y * scale);
+                let width = (r.width() * scale)
+                    .max(160.0)
+                    .min((size.width - x).max(80.0));
+                let editor = text_editor(&note.content)
+                    .placeholder("Type here")
+                    .size(font * scale)
+                    .padding(ferrix_annot::free_text::PADDING * scale)
+                    .width(width)
+                    .on_action(|a| Message::Annot(AnnotMsg::NoteEdit(a)))
+                    .style(move |theme: &Theme, status| {
+                        let t = theme::tokens(theme);
+                        let mut style = text_editor::default(theme, status);
+                        // Paper white hides the committed text PDFium draws underneath.
+                        style.background = Background::Color(Color::WHITE);
+                        style.border = Border {
+                            color: t.accent,
+                            width: 1.0,
+                            radius: 0.0.into(),
+                        };
+                        style.value = iced_color(color);
+                        style
+                    });
+                layers = layers.push(
+                    container(opaque(editor))
+                        .width(size.width)
+                        .height(size.height)
+                        .padding(iced::Padding {
+                            top: y.clamp(0.0, size.height),
+                            left: x.clamp(0.0, size.width),
+                            right: 0.0,
+                            bottom: 0.0,
+                        }),
+                );
+                return layers.into();
+            }
             let corner = transform.to_page(r.right, r.top);
             let (x, y) = (corner.x * scale + 8.0, corner.y * scale);
             const WIDTH: f32 = 280.0;

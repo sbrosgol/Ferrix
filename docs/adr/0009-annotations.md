@@ -325,3 +325,48 @@ The constraints:
   - Annotating pages inserted from another file before saving (refused with a notice, because
     previews cover the document's own pages only).
   - Replies shown in the note editor.
+
+## Implementation notes (phase 3, text, 2026-11-21)
+- **Text selection** (`ferrix-text`, new crate; also the M1 roadmap item):
+  - Page text comes from PDFium (loose character boxes) and is split into lines at line breaks
+    and baseline changes.
+  - It provides caret hit-testing, words, lines, copied text (soft hyphens and `\r` dropped) and
+    one box per line.
+  - Tested on a PDF written by `ferrix-compose`.
+  - The app loads visible pages' text lazily and selects in every mode: drag, double-click,
+    triple-click, Shift-click, ⌘A (the current page), ⌘C.
+  - A selection bar over the selection offers highlight colours, the underline styles and Copy.
+- **Text markup:**
+  - `AnnotKind::Markup { style, quads }`, with quads in Acrobat's Z order. Quads in the
+    specification's counter-clockwise order are reordered on read.
+  - Following the PDF review:
+    - Highlights fill all quads in one path, through an ExtGState with `/BM /Multiply` and no
+      isolating group (pdf.js isolates every group), at full opacity.
+    - Underline, strike-out and squiggly use butt caps and keep their ink inside the quads.
+    - No `/BS` is written on markup types.
+    - PDF/A-1 files refuse highlights, because blend modes are forbidden there.
+  - Tools Highlight, Underline, Strikethrough and Squiggly (H, U, S, W) mark text by dragging
+    over it.
+- **Text boxes** (`AnnotKind::FreeText { size, color }`):
+  - Their text is `/Contents` alone.
+  - `free_text` lays it out with `ferrix-compose` in Liberation Sans, and krilla writes an
+    untagged single page (`export_plain_page`, so no marked-content ids clash with the host page).
+  - `Revision::import_page_as_form` copies that page as an inner form, which an outer form
+    places at `/Rect`.
+  - The dictionary gets `/DA` (Helvetica at the same size and colour), `/DS` and `/Q 0`.
+    `/RC`, `/IC` and `/C` are removed.
+  - Plain and typewriter boxes from other apps are editable. Callouts, line ends, rotated or
+    filled boxes, cloudy borders and styled rich text stay `Other`.
+  - In the app: the Text box tool (T) places an auto-width box with an on-page editor (paper
+    white, so the committed text underneath doesn't show through). An emptied box is removed.
+    The size control (8–36 pt) and colour re-measure the box.
+- **Open items:**
+  - Quads for rotated text: char angle isn't read yet, so boxes are axis-aligned.
+  - Selection across pages.
+  - Honouring the file's no-copy permission.
+  - Width handles on text boxes.
+  - The text-box default size from the bar without a selection.
+  - Text boxes in PDF/A files with a CMYK output intent (refused for now; krilla would need CMYK
+    colours).
+  - Comments rows quoting the marked text.
+  - Folding the longer tools bar in narrow windows.

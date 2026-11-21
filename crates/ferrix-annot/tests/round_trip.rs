@@ -220,9 +220,14 @@ fn reads_what_ferrix_models_and_skips_the_rest() {
     assert_eq!(square.props.color, Some(Rgb::new(0.0, 0.0, 1.0)));
     assert_eq!(square.props.contents.as_deref(), Some("from another app"));
     assert!(square.is_editable());
-    assert!(
-        !state.annots.page(page1)[1].1.is_editable(),
-        "free text is display-only"
+    // A plain text box (no callout, fill or styled rich text) is editable since phase 3; its
+    // size and colour come from /DA.
+    assert_eq!(
+        state.annots.page(page1)[1].1.kind,
+        AnnotKind::FreeText {
+            size: 12.0,
+            color: Rgb::BLACK
+        }
     );
     let (_, note) = &state.annots.page(page1)[2];
     assert_eq!(
@@ -1073,4 +1078,68 @@ fn quad_points_in_specification_order_are_reordered() {
             pt(300.0, 500.0)
         ]
     );
+}
+
+#[test]
+fn text_boxes_round_trip_with_an_embedded_font_and_render() {
+    let base = fixture();
+    let mut state = open_state(&base, None);
+    let text = "Hello, Ferrix — привет";
+    let (w, h) = ferrix_annot::free_text::measure(text, 18.0, None);
+    let mut box_ = Annotation::new(
+        AnnotKind::FreeText {
+            size: 18.0,
+            color: Rgb::new(0.1, 0.1, 0.6),
+        },
+        PdfBox::from_corners(pt(100.0, 700.0 - h), pt(100.0 + w, 700.0)),
+    );
+    box_.props.color = None;
+    box_.props.border_width = 0.0;
+    box_.props.contents = Some(text.into());
+    add(&mut state, 0, box_);
+    let out = save_state(&base, None, &state);
+
+    let reread = open_state(&out, None);
+    let page = reread.pages.entries()[0].key;
+    let (_, b) = reread.annots.page(page).last().unwrap();
+    assert_eq!(
+        b.kind,
+        AnnotKind::FreeText {
+            size: 18.0,
+            color: Rgb::new(0.1, 0.1, 0.6)
+        },
+        "size and colour come back from /DA"
+    );
+    assert_eq!(b.props.contents.as_deref(), Some(text));
+
+    // The appearance carries its own embedded font (no reliance on the reader's Helvetica).
+    let doc = Document::load_mem(&out).unwrap();
+    let embedded = doc
+        .objects
+        .values()
+        .any(|o| o.as_dict().ok().is_some_and(|d| d.has(b"FontFile2")));
+    assert!(embedded, "a font subset is embedded");
+
+    let Some(mut engine) = pdfium() else { return };
+    let seen = pdfium_annotations(&mut engine, &out, None);
+    assert!(seen[0].iter().any(|(s, _)| s == "FreeText"));
+    // Some dark text pixels inside the box.
+    let doc = engine.open(DocSource::Bytes(out), None).unwrap();
+    let top = (792.0 - 700.0) as u32;
+    let tile = engine
+        .render_tile(&TileRequest {
+            doc: doc.id,
+            page: PageIndex(0),
+            scale: 1.0,
+            rotation: Rotation::R0,
+            region: PixelRect::new(100, top, w as u32, h as u32),
+            flags: RenderFlags::default(),
+        })
+        .unwrap();
+    let dark = tile
+        .pixels
+        .chunks(4)
+        .filter(|p| p[0] < 120 && p[2] > 60)
+        .count();
+    assert!(dark > 20, "text drawn: {dark} dark pixels");
 }

@@ -39,6 +39,7 @@ pub enum Tool {
     Underline,
     StrikeOut,
     Squiggly,
+    TextBox,
     Note,
     Pen,
     Rectangle,
@@ -57,7 +58,8 @@ impl Tool {
         Self::Squiggly,
     ];
     /// Tools that add things.
-    pub(crate) const ADD: [Self; 6] = [
+    pub(crate) const ADD: [Self; 7] = [
+        Self::TextBox,
         Self::Note,
         Self::Pen,
         Self::Rectangle,
@@ -73,6 +75,7 @@ impl Tool {
             Self::Underline => "Underline (U)",
             Self::StrikeOut => "Strikethrough (S)",
             Self::Squiggly => "Squiggly underline (W)",
+            Self::TextBox => "Text box (T)",
             Self::Note => "Note (N)",
             Self::Pen => "Pen (P)",
             Self::Rectangle => "Rectangle (R)",
@@ -89,6 +92,7 @@ impl Tool {
             "u" => Self::Underline,
             "s" => Self::StrikeOut,
             "w" => Self::Squiggly,
+            "t" => Self::TextBox,
             "n" => Self::Note,
             "p" => Self::Pen,
             "r" => Self::Rectangle,
@@ -176,11 +180,11 @@ impl Markup {
     /// The style new annotations of `tool` get: notes yellow, everything else red, 2 pt.
     pub(crate) fn style(&self, tool: Tool) -> Style {
         self.styles.get(&tool).copied().unwrap_or(Style {
-            // Notes and highlights yellow, everything else red.
-            color: if matches!(tool, Tool::Note | Tool::Highlight) {
-                COLORS[2].1
-            } else {
-                COLORS[0].1
+            // Notes and highlights yellow, text black, everything else red.
+            color: match tool {
+                Tool::Note | Tool::Highlight => COLORS[2].1,
+                Tool::TextBox => COLORS[6].1,
+                _ => COLORS[0].1,
             },
             width: 2.0,
             opacity: 1.0,
@@ -222,6 +226,16 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
     let kind_rect = match tool {
         Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
             return None;
+        }
+        Tool::TextBox => {
+            let (w, h) = ferrix_annot::free_text::measure("", 12.0, None);
+            (
+                AnnotKind::FreeText {
+                    size: 12.0,
+                    color: COLORS[6].1,
+                },
+                PdfBox::from_corners(start, PdfPoint::new(start.x + w, start.y - h)),
+            )
         }
         Tool::Note => (
             AnnotKind::Note {
@@ -289,9 +303,18 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
         }
     };
     let (kind, rect) = kind_rect;
+    let is_text = matches!(kind, AnnotKind::FreeText { .. });
     let mut annot = Annotation::new(kind, rect);
     annot.props.color = Some(style.color);
     annot.props.border_width = style.width;
+    if is_text {
+        // The text's colour is in the kind; a text box has no border.
+        annot.props.color = None;
+        annot.props.border_width = 0.0;
+        if let AnnotKind::FreeText { color, .. } = &mut annot.kind {
+            *color = style.color;
+        }
+    }
     annot.props.opacity = style.opacity;
     annot.props.name = Some(ferrix_annot::unique_name());
     Some(annot)
@@ -371,8 +394,11 @@ pub(crate) fn moved(annot: &Annotation, dx: f32, dy: f32) -> Annotation {
 /// The handles of `annot`'s selection; none for notes, which keep their size.
 pub(crate) fn handles(annot: &Annotation) -> Vec<(Handle, PdfPoint)> {
     match &annot.kind {
-        // Notes keep their size; text markup follows the text it marks.
-        AnnotKind::Note { .. } | AnnotKind::Markup { .. } | AnnotKind::Other { .. } => Vec::new(),
+        // Notes keep their size, text boxes fit their text, text markup follows its text.
+        AnnotKind::Note { .. }
+        | AnnotKind::FreeText { .. }
+        | AnnotKind::Markup { .. }
+        | AnnotKind::Other { .. } => Vec::new(),
         AnnotKind::Line { from, to, .. } => vec![(Handle::LineFrom, *from), (Handle::LineTo, *to)],
         _ => {
             let r = shape_box(annot);

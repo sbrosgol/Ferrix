@@ -250,6 +250,9 @@ pub enum AnnotKind {
         to: PdfPoint,
         ends: [LineEnd; 2],
     },
+    /// A text box (`FreeText`): its text is `/Contents` (in [`AnnotProps::contents`]), set in
+    /// the bundled sans-serif at `size` points in `color`, inside `rect`.
+    FreeText { size: f32, color: Rgb },
     /// Highlight, underline, strike-out or squiggly underline over text: one quadrilateral per
     /// line run (`/QuadPoints`), each as top-left, top-right, bottom-left, bottom-right (the
     /// order Acrobat writes and readers expect).
@@ -306,6 +309,7 @@ impl AnnotKind {
             Self::Circle => "Circle",
             Self::Line { .. } => "Line",
             Self::Markup { style, .. } => style.subtype(),
+            Self::FreeText { .. } => "FreeText",
             Self::Other { subtype } => subtype,
         }
     }
@@ -457,6 +461,11 @@ impl Annotation {
                 icon: NoteIcon::Other(name),
                 ..
             } if !name_ok(name) => return invalid("note icon"),
+            AnnotKind::FreeText { size, color } => {
+                if !(4.0..=144.0).contains(size) || !color.is_valid() {
+                    return invalid("text box");
+                }
+            }
             AnnotKind::Markup { quads, .. } => {
                 if quads.is_empty() || quads.len() > MAX_QUADS {
                     return invalid("text markup");

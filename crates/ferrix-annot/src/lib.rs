@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod appearance;
+pub mod free_text;
 mod read;
 mod write;
 

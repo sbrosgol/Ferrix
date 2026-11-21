@@ -1372,6 +1372,7 @@ dependencies = [
 name = "ferrix-annot"
 version = "0.0.1"
 dependencies = [
+ "ferrix-compose",
  "ferrix-core",
  "ferrix-engine",
  "ferrix-engine-pdfium",

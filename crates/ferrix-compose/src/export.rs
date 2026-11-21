@@ -53,6 +53,41 @@ pub fn export_pdf(doc: &Document, layout: &Layout, fonts: &Fonts) -> Result<Vec<
     export_with(doc, layout, &fonts.for_embedding(layout))
 }
 
+/// The first page of `layout` as a bare PDF: no tags, metadata, embedded source or second pass.
+/// For annotation appearances (ADR-0009 phase 3), whose page is copied into another file as a
+/// form XObject; marked-content ids would clash with the host page's structure there.
+pub fn export_plain_page(
+    doc: &Document,
+    layout: &Layout,
+    fonts: &Fonts,
+) -> Result<Vec<u8>, ExportError> {
+    let fonts = fonts.for_embedding(layout);
+    let mut pdf = krilla::Document::new_with(SerializeSettings {
+        enable_tagging: false,
+        ..SerializeSettings::default()
+    });
+    let texts: Vec<String> = doc
+        .paragraphs
+        .iter()
+        .map(|p| p.text().replace(['\n', '\r'], " "))
+        .collect();
+    let mut cache: HashMap<cosmic_text::fontdb::ID, Font> = HashMap::new();
+    let settings = PageSettings::from_wh(layout.page.width, layout.page.height)
+        .ok_or_else(|| ExportError::Write("invalid page size".into()))?;
+    let mut page_out = pdf.start_page_with(settings);
+    let mut surface = page_out.surface();
+    if let Some(page) = layout.pages.first() {
+        for line in &page.lines {
+            let text = texts.get(line.block).map_or("", String::as_str);
+            draw_line(&mut surface, line, text, &fonts, &mut cache, None)?;
+        }
+    }
+    surface.finish();
+    page_out.finish();
+    pdf.finish()
+        .map_err(|e| ExportError::Write(format!("{e:?}")))
+}
+
 /// Everything needed to write a PDF, detached from the editor so it can run on another thread.
 #[derive(Debug, Clone)]
 pub struct ExportJob {
