@@ -50,6 +50,56 @@ const OPACITY_CHOICES: [Opacity; 4] = [
     Opacity(OPACITIES[3]),
 ];
 
+/// An entry of the Stamp tool's picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StampChoice {
+    Standard(&'static str),
+    /// The picture already chosen.
+    Picture,
+    ChoosePicture,
+}
+
+impl From<&ferrix_core::StampContent> for StampChoice {
+    fn from(content: &ferrix_core::StampContent) -> Self {
+        match content {
+            ferrix_core::StampContent::Standard(name) => ferrix_annot::stamp::STANDARD
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map_or(Self::Standard("Approved"), |(n, _, _)| Self::Standard(n)),
+            _ => Self::Picture,
+        }
+    }
+}
+
+impl std::fmt::Display for StampChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Standard(name) => {
+                let label = ferrix_annot::stamp::standard(name).map_or(*name, |(l, _)| l);
+                f.write_str(&title(label))
+            }
+            Self::Picture => f.write_str("Picture"),
+            Self::ChoosePicture => f.write_str("Choose Picture…"),
+        }
+    }
+}
+
+/// "NOT APPROVED" → "Not Approved".
+fn title(label: &str) -> String {
+    label
+        .split(' ')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase()
+                    .chain(c.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn tool_icon(tool: Tool) -> Icon {
     match tool {
         Tool::Select => Icon::Pointer,
@@ -59,6 +109,7 @@ fn tool_icon(tool: Tool) -> Icon {
         Tool::Squiggly => Icon::UnderlineWavy,
         Tool::TextBox => Icon::TextBox,
         Tool::Note => Icon::StickyNote,
+        Tool::Stamp => Icon::Stamp,
         Tool::Pen => Icon::Pencil,
         Tool::Rectangle => Icon::Square,
         Tool::Ellipse => Icon::Circle,
@@ -76,6 +127,7 @@ fn kind_icon(annot: &Annotation) -> Icon {
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => Icon::ArrowUpRight,
         AnnotKind::Line { .. } => Icon::Minus,
         AnnotKind::FreeText { .. } => Icon::TextBox,
+        AnnotKind::Stamp { .. } => Icon::Stamp,
         AnnotKind::Reply { .. } => Icon::Comments,
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => Icon::Highlighter,
@@ -97,6 +149,15 @@ pub(crate) fn kind_name(annot: &Annotation) -> String {
         AnnotKind::Line { .. } => "Line".into(),
         AnnotKind::FreeText { .. } => "Text box".into(),
         AnnotKind::Reply { .. } => "Reply".into(),
+        AnnotKind::Stamp { content } => match content {
+            ferrix_core::StampContent::Standard(name) => ferrix_annot::stamp::standard(name)
+                .map_or_else(
+                    || "Stamp".into(),
+                    |(label, _)| format!("{} stamp", title(label)),
+                ),
+            ferrix_core::StampContent::Image(_) => "Picture".into(),
+            ferrix_core::StampContent::Kept => "Stamp".into(),
+        },
         AnnotKind::Markup { style, .. } => match style {
             ferrix_core::MarkupStyle::Highlight => "Highlight".into(),
             ferrix_core::MarkupStyle::Underline => "Underline".into(),
@@ -159,6 +220,39 @@ impl App {
             .and_then(|id| doc.state.annots.get(id).map(|(_, a)| (id, a)));
         let mut content = row![tools].spacing(CLUSTER_GAP).align_y(Alignment::Center);
         match selected {
+            // Stamps have no colour or width to change: they are moved and resized.
+            Some((_, annot))
+                if markup::editable(annot) && matches!(annot.kind, AnnotKind::Stamp { .. }) =>
+            {
+                content = content.push(muted("Drag to move; drag a corner to resize.", 12.0));
+            }
+            None if m.tool == Tool::Stamp => {
+                let current = StampChoice::from(&m.stamp);
+                let mut choices: Vec<StampChoice> = ferrix_annot::stamp::STANDARD
+                    .iter()
+                    .map(|(name, _, _)| StampChoice::Standard(name))
+                    .collect();
+                if matches!(m.stamp, ferrix_core::StampContent::Image(_)) {
+                    choices.push(StampChoice::Picture);
+                }
+                choices.push(StampChoice::ChoosePicture);
+                content = content.push(
+                    pick_list(choices, Some(current), |c: StampChoice| match c {
+                        StampChoice::Standard(name) => {
+                            Message::Annot(AnnotMsg::StampPick(name.to_owned()))
+                        }
+                        StampChoice::Picture => Message::Annot(AnnotMsg::Tool(Tool::Stamp)),
+                        StampChoice::ChoosePicture => Message::Annot(AnnotMsg::StampImage),
+                    })
+                    .text_size(13)
+                    .padding([4, 8])
+                    .width(190)
+                    .handle(small_chevron())
+                    .style(theme::select)
+                    .menu_style(theme::select_menu),
+                );
+                content = content.push(muted("Click the page to place it.", 12.0));
+            }
             Some((_, annot)) if !markup::editable(annot) => {
                 let why = if annot.is_deletable() {
                     "Made in another app. Ferrix can only delete it."

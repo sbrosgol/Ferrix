@@ -1303,3 +1303,143 @@ fn replies_link_to_new_and_existing_parents() {
         .count();
     assert_eq!(replies, 2);
 }
+
+fn stamps_of(state: &DocState) -> Vec<(ferrix_core::AnnotId, Annotation)> {
+    let page = state.pages.entries()[0].key;
+    state
+        .annots
+        .page(page)
+        .iter()
+        .filter(|(_, a)| a.kind.subtype() == "Stamp")
+        .cloned()
+        .collect()
+}
+
+/// Standard stamps come back as themselves; picture stamps and other apps' stamps keep their
+/// appearance and move by /Rect alone; stamps with appearance states stay display-only.
+#[test]
+fn stamps_round_trip_and_kept_appearances_move_by_rect() {
+    use ferrix_core::StampContent;
+    let base = fixture_with(|doc, page| {
+        let form = |doc: &mut Document| {
+            doc.add_object(lopdf::Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 50.into(), 20.into()],
+                },
+                b"0 0 1 rg 0 0 50 20 re f".to_vec(),
+            ))
+        };
+        let plain = form(doc);
+        let on = form(doc);
+        let foreign = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "P" => page, "Name" => "Approved",
+            "Rect" => vec![300.into(), 300.into(), 350.into(), 320.into()],
+            "AP" => dictionary! { "N" => plain },
+        });
+        let stateful = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "P" => page, "AS" => "On",
+            "Rect" => vec![300.into(), 400.into(), 350.into(), 420.into()],
+            "AP" => dictionary! { "N" => dictionary! { "On" => on } },
+        });
+        vec![foreign.into(), stateful.into()]
+    });
+    let mut state = open_state(&base, None);
+    let kinds: Vec<_> = stamps_of(&state).into_iter().map(|(_, a)| a.kind).collect();
+    assert!(kinds.contains(&AnnotKind::Stamp {
+        content: StampContent::Kept
+    }));
+    assert!(kinds.contains(&AnnotKind::Other {
+        subtype: "Stamp".into()
+    }));
+
+    let (w, h) = ferrix_annot::stamp::standard_size("Approved");
+    let approved = Annotation::new(
+        AnnotKind::Stamp {
+            content: StampContent::Standard("Approved".into()),
+        },
+        PdfBox::from_corners(pt(100.0, 600.0), pt(100.0 + w, 600.0 + h)),
+    );
+    add(&mut state, 0, approved);
+    let png = include_bytes!("fixtures/red.png").to_vec();
+    let image = ferrix_annot::stamp::image_from_bytes(png).unwrap();
+    assert_eq!((image.width, image.height), (4, 3));
+    add(
+        &mut state,
+        0,
+        Annotation::new(
+            AnnotKind::Stamp {
+                content: StampContent::Image(image),
+            },
+            PdfBox::from_corners(pt(100.0, 500.0), pt(140.0, 530.0)),
+        ),
+    );
+    let saved = save_state(&base, None, &state);
+
+    // Ours: the standard stamp is ours again; the picture is kept as written.
+    let doc = Document::load_mem(&saved).unwrap();
+    let mut reread = open_state(&saved, None);
+    let stamps = stamps_of(&reread);
+    assert!(stamps.iter().any(|(_, a)| a.kind
+        == AnnotKind::Stamp {
+            content: StampContent::Standard("Approved".into())
+        }));
+    let kept: Vec<_> = stamps
+        .iter()
+        .filter(|(_, a)| {
+            a.kind
+                == AnnotKind::Stamp {
+                    content: StampContent::Kept,
+                }
+        })
+        .cloned()
+        .collect();
+    assert_eq!(kept.len(), 2, "the foreign stamp and the picture");
+    let has_key = |key: &[u8], value: &[u8]| {
+        doc.objects.values().any(|o| {
+            o.as_dict().is_ok_and(|d| {
+                d.get(key)
+                    .and_then(Object::as_name)
+                    .is_ok_and(|n| n == value)
+            })
+        })
+    };
+    assert!(has_key(b"IT", b"StampImage"));
+    assert!(has_key(b"Name", b"#Approved"));
+
+    // Moving and resizing a kept stamp rewrites /Rect and nothing else of its look.
+    let ap_of = |doc: &Document, origin: &ferrix_core::AnnotOrigin| {
+        let ferrix_core::AnnotOrigin::Existing { object, .. } = origin else {
+            panic!("from the file")
+        };
+        let d = doc
+            .get_dictionary((object.number, object.generation))
+            .unwrap();
+        (
+            d.get(b"AP").unwrap().clone(),
+            d.get(b"Rect").unwrap().clone(),
+        )
+    };
+    for (id, annot) in &kept {
+        let mut moved = annot.clone();
+        let r = annot.props.rect;
+        moved.props.rect = PdfBox::from_corners(
+            pt(r.left + 10.0, r.bottom + 10.0),
+            pt(r.right + 30.0, r.top + 30.0),
+        );
+        reread
+            .apply(&DocEdit::Annot(AnnotEdit::Set {
+                id: *id,
+                annot: Box::new(moved),
+            }))
+            .unwrap();
+    }
+    let edited = save_state(&saved, None, &reread);
+    let after = Document::load_mem(&edited).unwrap();
+    for (_, annot) in &kept {
+        let (ap0, rect0) = ap_of(&doc, &annot.origin);
+        let (ap1, rect1) = ap_of(&after, &annot.origin);
+        assert_eq!(ap0, ap1, "appearance kept");
+        assert_ne!(rect0, rect1, "moved");
+    }
+}

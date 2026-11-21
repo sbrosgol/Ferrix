@@ -146,6 +146,23 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
                     _ => other(),
                 }
             }
+            // Ferrix's own standard stamps (`/Name /#Approved`) are redrawn when edited. Any
+            // other stamp with one plain appearance keeps it and can be moved and resized;
+            // stamps with appearance states stay display-only.
+            "Stamp" => {
+                let ours = name(doc, dict, b"Name")
+                    .and_then(|n| n.strip_prefix('#').map(str::to_owned))
+                    .filter(|n| crate::stamp::standard(n).is_some());
+                match ours {
+                    Some(n) => AnnotKind::Stamp {
+                        content: ferrix_core::StampContent::Standard(n),
+                    },
+                    None if single_appearance(doc, dict) => AnnotKind::Stamp {
+                        content: ferrix_core::StampContent::Kept,
+                    },
+                    None => other(),
+                }
+            }
             "Line" if has_line_extras(doc, dict) => other(),
             "Line" => line(doc, dict).unwrap_or_else(other),
             _ => other(),
@@ -439,4 +456,25 @@ fn line(doc: &Document, dict: &Dictionary) -> Option<AnnotKind> {
         to: PdfPoint::new(l[2], l[3]),
         ends,
     })
+}
+
+/// Whether `/AP /N` is one form XObject (not a dictionary of states) and `/AS` is absent: the
+/// appearance can then be kept as it is while `/Rect` changes.
+fn single_appearance(doc: &Document, dict: &Dictionary) -> bool {
+    if dict.has(b"AS") {
+        return false;
+    }
+    let Some(ap) = deref(doc, dict, b"AP").and_then(|o| o.as_dict().ok()) else {
+        return false;
+    };
+    let Ok(normal) = ap.get(b"N") else {
+        return false;
+    };
+    let normal = match normal {
+        Object::Reference(id) => doc.get_object(*id).ok(),
+        other => Some(other),
+    };
+    normal
+        .and_then(|o| o.as_stream().ok())
+        .is_some_and(|s| s.dict.get(b"BBox").is_ok())
 }

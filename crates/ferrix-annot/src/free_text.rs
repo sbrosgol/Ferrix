@@ -22,7 +22,7 @@ const MAX_AUTO_WIDTH: f32 = 2000.0;
 /// Loading the bundled fonts is slow; every text box shares one set.
 static FONTS: LazyLock<Mutex<Fonts>> = LazyLock::new(|| Mutex::new(Fonts::bundled()));
 
-fn document(text: &str, size: f32, color: Rgb, width: f32, height: f32) -> Document {
+fn document(text: &str, size: f32, color: Rgb, width: f32, height: f32, bold: bool) -> Document {
     let mut page = PageSetup::new((width.max(1.0), height.max(1.0)));
     page.margins = Margins::uniform(PADDING);
     let mut doc = Document::with_page(page);
@@ -30,6 +30,7 @@ fn document(text: &str, size: f32, color: Rgb, width: f32, height: f32) -> Docum
         family: Some(FAMILY.into()),
         size: Some(size),
         color: Some(Color(channel(color.r), channel(color.g), channel(color.b))),
+        bold: bold.then_some(true),
         ..CharFormat::default()
     };
     doc.paragraphs = text
@@ -52,12 +53,17 @@ fn channel(v: f32) -> u8 {
 /// The box a text needs: `width` given (wrapping inside it), or the text's natural width when
 /// `None`. Padding included.
 pub fn measure(text: &str, size: f32, width: Option<f32>) -> (f32, f32) {
+    measure_with(text, size, width, false)
+}
+
+/// [`measure`], optionally in bold (stamp labels).
+pub(crate) fn measure_with(text: &str, size: f32, width: Option<f32>, bold: bool) -> (f32, f32) {
     let Ok(mut fonts) = FONTS.lock() else {
         return (width.unwrap_or(100.0), size * 1.2 + 2.0 * PADDING);
     };
     let probe_width = width.unwrap_or(MAX_AUTO_WIDTH);
     // Within the largest PDF page (14 400 pt); taller pages are refused by the layout.
-    let doc = document(text, size, Rgb::BLACK, probe_width, 14_000.0);
+    let doc = document(text, size, Rgb::BLACK, probe_width, 14_000.0, bold);
     let layout = Layout::new(&doc, &mut fonts);
     let lines = layout.pages.first().map_or(&[][..], |p| p.lines.as_slice());
     let height = lines
@@ -85,10 +91,23 @@ pub fn render(
     height: f32,
     icc: bool,
 ) -> Result<Vec<u8>, AnnotError> {
+    render_with(text, size, color, width, height, false, icc)
+}
+
+/// [`render`], optionally in bold (stamp labels).
+pub(crate) fn render_with(
+    text: &str,
+    size: f32,
+    color: Rgb,
+    width: f32,
+    height: f32,
+    bold: bool,
+    icc: bool,
+) -> Result<Vec<u8>, AnnotError> {
     let mut fonts = FONTS
         .lock()
         .map_err(|_| AnnotError::NotAllowed("the text layout failed earlier".into()))?;
-    let doc = document(text, size, color, width, height);
+    let doc = document(text, size, color, width, height, bold);
     let layout = Layout::new(&doc, &mut fonts);
     ferrix_compose::export_plain_page(&doc, &layout, &fonts, icc)
         .map_err(|e| AnnotError::NotAllowed(format!("couldn’t set the text: {e}")))

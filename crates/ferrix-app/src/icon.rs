@@ -60,6 +60,7 @@ pub(crate) enum Icon {
     Comments,
     Highlighter,
     TextBox,
+    Stamp,
     UnderlineWavy,
     Copy,
 }
@@ -134,6 +135,7 @@ icons! {
     Comments => "message-square-text",
     Highlighter => "highlighter",
     TextBox => "type",
+    Stamp => "stamp",
     UnderlineWavy => "underline-wavy",
     Copy => "copy",
 }

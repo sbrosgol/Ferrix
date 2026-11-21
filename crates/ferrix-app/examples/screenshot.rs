@@ -57,6 +57,9 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--stamps") {
+        script.extend(stamps_script());
+    }
     if flag(&mut args, "--replies") {
         script.extend(replies_script());
     }
@@ -120,6 +123,28 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Places two standard stamps and leaves the Stamp tool picked.
+fn stamps_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_types::PdfPoint;
+    let place = |x: f32, y: f32| {
+        let at = PdfPoint::new(x, y);
+        [
+            Message::Annot(A::PointerAt(0, P::Press(at))),
+            Message::Annot(A::PointerAt(0, P::Release(at))),
+        ]
+    };
+    let mut s = vec![
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::Stamp)),
+    ];
+    s.extend(place(420.0, 720.0));
+    s.push(Message::Annot(A::StampPick("Confidential".into())));
+    s.extend(place(420.0, 560.0));
+    s.push(Message::Annot(A::StampPick("Draft".into())));
+    s
 }
 
 /// Adds a note, then reopens it, gives a name and sends two replies.

@@ -10,6 +10,7 @@
 mod appearance;
 pub mod free_text;
 mod read;
+pub mod stamp;
 mod write;
 
 use std::sync::atomic::{AtomicU64, Ordering};

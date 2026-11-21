@@ -13,6 +13,7 @@ ferrix-compose.workspace = true
 ferrix-core.workspace = true
 ferrix-pdf.workspace = true
 ferrix-types.workspace = true
+krilla.workspace = true
 lopdf.workspace = true
 thiserror.workspace = true
 

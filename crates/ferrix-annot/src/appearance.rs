@@ -7,7 +7,7 @@
 use std::f32::consts::PI;
 use std::fmt::Write as _;
 
-use ferrix_core::{AnnotKind, Annotation, LineEnd, MarkupStyle, NoteIcon, Rgb};
+use ferrix_core::{AnnotKind, Annotation, LineEnd, MarkupStyle, NoteIcon, Rgb, StampContent};
 use ferrix_types::{PdfBox, PdfPoint};
 
 /// Bézier control-point distance for a quarter circle of radius 1.
@@ -51,6 +51,41 @@ pub struct Appearance {
     /// Blend with the page by multiplying (highlights: the text under them stays dark).
     pub multiply: bool,
     pub items: Vec<Item>,
+}
+
+/// A rectangle with corners of radius `radius` (cubic Bézier quarter circles).
+fn rounded_rect(r: PdfBox, radius: f32) -> Vec<PathEl> {
+    let rad = radius.min(r.width() / 2.0).min(r.height() / 2.0).max(0.0);
+    let k = rad * (1.0 - 0.552_284_8);
+    let p = PdfPoint::new;
+    vec![
+        PathEl::MoveTo(p(r.left + rad, r.bottom)),
+        PathEl::LineTo(p(r.right - rad, r.bottom)),
+        PathEl::CurveTo(
+            p(r.right - k, r.bottom),
+            p(r.right, r.bottom + k),
+            p(r.right, r.bottom + rad),
+        ),
+        PathEl::LineTo(p(r.right, r.top - rad)),
+        PathEl::CurveTo(
+            p(r.right, r.top - k),
+            p(r.right - k, r.top),
+            p(r.right - rad, r.top),
+        ),
+        PathEl::LineTo(p(r.left + rad, r.top)),
+        PathEl::CurveTo(
+            p(r.left + k, r.top),
+            p(r.left, r.top - k),
+            p(r.left, r.top - rad),
+        ),
+        PathEl::LineTo(p(r.left, r.bottom + rad)),
+        PathEl::CurveTo(
+            p(r.left, r.bottom + k),
+            p(r.left + k, r.bottom),
+            p(r.left + rad, r.bottom),
+        ),
+        PathEl::Close,
+    ]
 }
 
 /// The rectangle of a note icon whose top-left corner is at `at`.
@@ -122,6 +157,28 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
         }
         // Text is set by `free_text` when writing; the display list has only the box.
         AnnotKind::FreeText { .. } => (Vec::new(), props.rect),
+        // A standard stamp's rounded border; its label and an image stamp's picture are
+        // inner forms added when writing.
+        AnnotKind::Stamp { content } => match content {
+            StampContent::Standard(name) => {
+                let ink = crate::stamp::standard(name).map_or(Rgb::BLACK, |(_, ink)| ink);
+                let scale = crate::stamp::scale(name, props.rect);
+                let border = crate::stamp::BORDER * scale;
+                let r = inset(props.rect, border / 2.0);
+                let item = Item {
+                    path: rounded_rect(r, 4.0 * scale),
+                    fill: None,
+                    stroke: Some(Stroke {
+                        color: ink,
+                        width: border,
+                        dash: Vec::new(),
+                        round: false,
+                    }),
+                };
+                (vec![item], props.rect)
+            }
+            StampContent::Image(_) | StampContent::Kept => (Vec::new(), props.rect),
+        },
         // Replies show in their thread, not on the page: an empty appearance stops PDFium and
         // Poppler drawing each one as an extra icon (hiding by flag isn't allowed in PDF/A).
         AnnotKind::Reply { .. } => (Vec::new(), props.rect),

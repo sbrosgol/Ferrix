@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use ferrix_core::{AnnotFlags, AnnotId, AnnotKind, Annotation, LineEnd, NoteIcon, Rgb};
+use ferrix_core::{
+    AnnotFlags, AnnotId, AnnotKind, Annotation, LineEnd, NoteIcon, Rgb, StampContent,
+};
 use ferrix_types::{PdfBox, PdfPoint};
 
 /// The paper palette (design system › Annotations): names and colours.
@@ -41,6 +43,7 @@ pub enum Tool {
     Squiggly,
     TextBox,
     Note,
+    Stamp,
     Pen,
     Rectangle,
     Ellipse,
@@ -58,9 +61,10 @@ impl Tool {
         Self::Squiggly,
     ];
     /// Tools that add things.
-    pub(crate) const ADD: [Self; 7] = [
+    pub(crate) const ADD: [Self; 8] = [
         Self::TextBox,
         Self::Note,
+        Self::Stamp,
         Self::Pen,
         Self::Rectangle,
         Self::Ellipse,
@@ -77,6 +81,7 @@ impl Tool {
             Self::Squiggly => "Squiggly underline (W)",
             Self::TextBox => "Text box (T)",
             Self::Note => "Note (N)",
+            Self::Stamp => "Stamp (M)",
             Self::Pen => "Pen (P)",
             Self::Rectangle => "Rectangle (R)",
             Self::Ellipse => "Ellipse (O)",
@@ -94,6 +99,7 @@ impl Tool {
             "w" => Self::Squiggly,
             "t" => Self::TextBox,
             "n" => Self::Note,
+            "m" => Self::Stamp,
             "p" => Self::Pen,
             "r" => Self::Rectangle,
             "o" => Self::Ellipse,
@@ -162,6 +168,8 @@ pub(crate) struct Markup {
     pub(crate) gesture: Option<(ferrix_core::PageKey, Gesture)>,
     /// The ink annotation the next pen stroke may join, and when it was drawn.
     pub(crate) last_ink: Option<(AnnotId, std::time::Instant)>,
+    /// What the Stamp tool places.
+    pub(crate) stamp: StampContent,
 }
 
 impl Default for Markup {
@@ -172,6 +180,7 @@ impl Default for Markup {
             selected: None,
             gesture: None,
             last_ink: None,
+            stamp: StampContent::Standard("Approved".into()),
         }
     }
 }
@@ -237,6 +246,7 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
                 PdfBox::from_corners(start, PdfPoint::new(start.x + w, start.y - h)),
             )
         }
+        Tool::Stamp => return None,
         Tool::Note => (
             AnnotKind::Note {
                 icon: NoteIcon::Comment,
@@ -432,7 +442,9 @@ pub(crate) fn resized(
     match (handle, &mut out.kind) {
         (Handle::LineFrom, AnnotKind::Line { from, .. }) => *from = to,
         (Handle::LineTo, AnnotKind::Line { to: end, .. }) => *end = to,
-        (Handle::Box(sx, sy), _) => {
+        (Handle::Box(sx, sy), kind) => {
+            // Stamps keep their proportions: labels and pictures would distort.
+            let keep_ratio = keep_ratio || matches!(kind, AnnotKind::Stamp { .. });
             let old = shape_box(annot);
             let mut r = old;
             if sx < 0 {
@@ -851,4 +863,32 @@ mod date_tests {
         assert_eq!(relative_date("D:20261120100000Z", now), "Yesterday");
         assert_eq!(relative_date("D:20261001000000Z", now), "1 Oct 2026");
     }
+}
+
+/// A stamp of `content` centred at `at`: standard stamps at their natural size, pictures at
+/// 72 dpi but no more than 200 pt on a side.
+pub(crate) fn stamp(content: &StampContent, at: PdfPoint) -> Annotation {
+    let (w, h) = match content {
+        StampContent::Standard(name) => ferrix_annot::stamp::standard_size(name),
+        // The tool never holds a kept stamp; a plain square if it ever did.
+        StampContent::Kept => (60.0, 60.0),
+        StampContent::Image(image) => {
+            let (w, h) = (image.width as f32, image.height as f32);
+            let scale = (200.0 / w.max(h)).min(1.0);
+            ((w * scale).max(8.0), (h * scale).max(8.0))
+        }
+    };
+    let rect = PdfBox::from_corners(
+        PdfPoint::new(at.x - w / 2.0, at.y - h / 2.0),
+        PdfPoint::new(at.x + w / 2.0, at.y + h / 2.0),
+    );
+    let mut annot = Annotation::new(
+        AnnotKind::Stamp {
+            content: content.clone(),
+        },
+        rect,
+    );
+    annot.props.name = Some(ferrix_annot::unique_name());
+    annot.props.flags = AnnotFlags(AnnotFlags::PRINT);
+    annot
 }

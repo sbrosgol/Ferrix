@@ -260,6 +260,8 @@ pub enum AnnotKind {
         style: MarkupStyle,
         quads: Vec<[PdfPoint; 4]>,
     },
+    /// A stamp: a standard label ("Approved"…) or a picture, scaled to fill `rect`.
+    Stamp { content: StampContent },
     /// A reply in a comment thread (`Text` with `/IRT`); its text is in `contents`. Drawn by
     /// nothing on the page: readers show it in the thread.
     Reply { state: Option<ReviewState> },
@@ -299,6 +301,37 @@ impl MarkupStyle {
     }
 }
 
+/// What a stamp shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StampContent {
+    /// One of the standard stamps, by its name in ISO 32000-2 Table 181 (e.g. `Approved`).
+    Standard(String),
+    Image(StampImage),
+    /// A stamp from the file whose appearance is kept as it is: other apps' stamps, and
+    /// Ferrix's image stamps once saved. Moving or resizing changes only `/Rect`; readers fit
+    /// the appearance into it (ISO 32000-2 §12.5.5), so the artwork is never redrawn.
+    Kept,
+}
+
+/// A picture for an image stamp, kept as the file's own bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StampImage {
+    pub data: std::sync::Arc<[u8]>,
+    pub format: ImageFormat,
+    /// Size in pixels.
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+}
+
+/// Largest picture accepted for an image stamp, in bytes.
+pub const MAX_STAMP_IMAGE_BYTES: usize = 20 << 20;
+
 /// Most quadrilaterals in one text-markup annotation.
 pub const MAX_QUADS: usize = 10_000;
 
@@ -313,6 +346,7 @@ impl AnnotKind {
             Self::Line { .. } => "Line",
             Self::Markup { style, .. } => style.subtype(),
             Self::FreeText { .. } => "FreeText",
+            Self::Stamp { .. } => "Stamp",
             Self::Reply { .. } => "Text",
             Self::Other { subtype } => subtype,
         }
@@ -481,6 +515,20 @@ impl Annotation {
                 icon: NoteIcon::Other(name),
                 ..
             } if !name_ok(name) => return invalid("note icon"),
+            AnnotKind::Stamp { content } => match content {
+                StampContent::Standard(name) if !name_ok(name) || name.len() > 64 => {
+                    return invalid("stamp name");
+                }
+                StampContent::Image(image)
+                    if image.data.is_empty()
+                        || image.data.len() > MAX_STAMP_IMAGE_BYTES
+                        || image.width == 0
+                        || image.height == 0 =>
+                {
+                    return invalid("stamp image");
+                }
+                _ => {}
+            },
             AnnotKind::FreeText { size, color } => {
                 if !(4.0..=144.0).contains(size) || !color.is_valid() {
                     return invalid("text box");

@@ -45,6 +45,12 @@ pub enum AnnotMsg {
     /// The "Your name" field shown before the first reply.
     AuthorInput(String),
     AuthorSave,
+    /// Choose a standard stamp for the Stamp tool, by name.
+    StampPick(String),
+    /// Choose a picture for the Stamp tool.
+    StampImage,
+    /// The chosen picture, or `None` if the dialog was cancelled.
+    StampImageLoaded(Option<Result<ferrix_core::StampImage, String>>),
 }
 
 /// The note being edited and its text.
@@ -169,6 +175,40 @@ impl App {
             }
             AnnotMsg::ReplySend => return self.send_reply(),
             AnnotMsg::ReplyDelete(id) => return self.delete_thread(id, "Delete Reply"),
+            AnnotMsg::StampPick(name) => {
+                if let Some(m) = self.markup.as_mut() {
+                    m.stamp = ferrix_core::StampContent::Standard(name);
+                    m.tool = Tool::Stamp;
+                    m.selected = None;
+                }
+            }
+            AnnotMsg::StampImage => {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Choose a Picture")
+                    .add_filter("Pictures", &["png", "jpg", "jpeg"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        let bytes = file.read().await;
+                        Some(
+                            ferrix_annot::stamp::image_from_bytes(bytes).map_err(|e| e.to_string()),
+                        )
+                    },
+                    |result| Message::Annot(AnnotMsg::StampImageLoaded(result)),
+                );
+            }
+            AnnotMsg::StampImageLoaded(None) => {}
+            AnnotMsg::StampImageLoaded(Some(result)) => match result {
+                Ok(image) => {
+                    if let Some(m) = self.markup.as_mut() {
+                        m.stamp = ferrix_core::StampContent::Image(image);
+                        m.tool = Tool::Stamp;
+                        m.selected = None;
+                    }
+                    self.notice = Some("Click the page to place the picture.".into());
+                }
+                Err(e) => self.error = Some(format!("Couldn’t use that picture: {e}")),
+            },
             AnnotMsg::AuthorInput(name) => self.author_input = name,
             AnnotMsg::AuthorSave => {
                 let name = self.author_input.trim().to_owned();
@@ -271,6 +311,9 @@ impl App {
                 }
                 if matches!(tool, Tool::Note | Tool::TextBox) {
                     return Task::batch([close, self.place_note(page, at, tool)]);
+                }
+                if tool == Tool::Stamp {
+                    return Task::batch([close, self.place_stamp(page, at)]);
                 }
                 if let Some(m) = self.markup.as_mut() {
                     m.selected = None;
@@ -464,6 +507,33 @@ impl App {
             },
             "Reply",
         )
+    }
+
+    /// Places the Stamp tool's stamp centred at `at`, selects it, and returns to Select.
+    fn place_stamp(&mut self, page: PageKey, at: ferrix_types::PdfPoint) -> Task<Message> {
+        let Some(content) = self.markup.as_ref().map(|m| m.stamp.clone()) else {
+            return Task::none();
+        };
+        let annot = self.with_author(markup::stamp(&content, at));
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let id = doc.state.annots.new_id();
+        let index = doc.state.annots.page(page).len();
+        let task = self.apply_annot(
+            AnnotEdit::Add {
+                page,
+                index,
+                id,
+                annot: Box::new(annot),
+            },
+            "Add Stamp",
+        );
+        if let Some(m) = self.markup.as_mut() {
+            m.selected = Some(id);
+            m.tool = Tool::Select;
+        }
+        task
     }
 
     /// Removes `id` and its replies in one step, replies first so undo restores parents first.
