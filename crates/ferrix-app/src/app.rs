@@ -380,6 +380,12 @@ pub enum Message {
     SaveAs,
     SaveAsPicked(Option<PathBuf>),
     Saved(Result<PathBuf, String>),
+    /// A source's annotations were read (engine document, source index).
+    AnnotationsLoaded(
+        DocId,
+        ferrix_core::SourceId,
+        Result<crate::annotate::Loaded, String>,
+    ),
     CloseRequested,
     Confirmed(Choice),
     Escape,
@@ -624,7 +630,7 @@ impl App {
                         );
                     }
                     Err(e) => {
-                        let page = doc.pages.position(key).map_or(0, |i| i + 1);
+                        let page = doc.state.pages.position(key).map_or(0, |i| i + 1);
                         self.error = Some(format!("Couldn’t show page {page}: {e}"));
                         doc.render_failed.insert(key);
                     }
@@ -750,8 +756,10 @@ impl App {
                     return Task::none();
                 };
                 let keys = doc.targets();
-                let positions: Vec<usize> =
-                    keys.iter().filter_map(|k| doc.pages.position(*k)).collect();
+                let positions: Vec<usize> = keys
+                    .iter()
+                    .filter_map(|k| doc.state.pages.position(*k))
+                    .collect();
                 let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
                     return Task::none();
                 };
@@ -762,7 +770,7 @@ impl App {
                     (last + 1 < doc.len()).then(|| last + 2 - keys.len())
                 };
                 let Some(to) = to else { return Task::none() };
-                match doc.pages.move_edit(&keys, to) {
+                match doc.state.pages.move_edit(&keys, to) {
                     Ok(edit) => {
                         let label = pages_label("Move", keys.len());
                         return self.apply(edit, label);
@@ -895,6 +903,43 @@ impl App {
                 // Reload what is now on disk; the edit history starts over from it.
                 self.reopen_at = self.doc.as_ref().map(|d| d.current);
                 return self.load(Origin::File(path), Message::Opened);
+            }
+            Message::AnnotationsLoaded(engine_doc, source, result) => {
+                let Some(doc) = self.doc.as_mut() else {
+                    return Task::none();
+                };
+                // The document may have been closed or replaced meanwhile.
+                if doc.sources.get(source.0 as usize).map(|s| s.doc) != Some(engine_doc) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(loaded) => {
+                        let entries: Vec<_> = doc
+                            .state
+                            .pages
+                            .entries()
+                            .iter()
+                            .filter(|e| e.source == source)
+                            .copied()
+                            .collect();
+                        for entry in entries {
+                            // Pages already holding recovered annotations keep them.
+                            if !doc.state.annots.is_loaded(entry.key) {
+                                let list = loaded
+                                    .pages
+                                    .get(entry.page.0 as usize)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                doc.state.annots.insert_loaded(entry.key, list);
+                            }
+                        }
+                        if source == ferrix_core::SourceId::BASE {
+                            doc.annot_policy = Some(loaded.policy);
+                        }
+                    }
+                    // Viewing still works; editing annotations stays off for this document.
+                    Err(e) => tracing::warn!("couldn’t read annotations: {e}"),
+                }
             }
             Message::Saved(Err(e)) => {
                 self.busy = None;
@@ -1408,10 +1453,11 @@ impl App {
             self.notice = self.open_notice.take();
         }
         let measure = self.measure(doc.info.id, doc.info.page_count);
+        let annots = load_annotations(&doc.origin, doc.info.id, ferrix_core::SourceId::BASE);
         self.doc = Some(doc);
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([close, measure, self.next_thumbnail()])
+        Task::batch([close, measure, annots, self.next_thumbnail()])
     }
 
     /// Opens the documents behind the first recoverable session.
@@ -1508,6 +1554,7 @@ impl App {
             base_info,
             sources,
             found.pages.clone(),
+            found.annots.clone(),
         ));
         // The new session's journal now holds the work; the crashed one can go.
         self.sync_journal();
@@ -1603,8 +1650,10 @@ impl App {
             return Task::none();
         };
         let source = ferrix_core::SourceId(doc.sources.len() as u32);
+        let annots = load_annotations(&origin, info.id, source);
         doc.sources.push(Source::new(origin, info.id));
         let entries = doc
+            .state
             .pages
             .new_entries(source, (0..info.page_count).map(ferrix_types::PageIndex));
         let at = doc.current + 1;
@@ -1617,7 +1666,7 @@ impl App {
         let measure = self.measure(info.id, info.page_count);
         let task = self.apply(Edit::Insert { pages }, pages_label("Insert", count));
         // Show the first inserted page.
-        Task::batch([measure, task, self.go_to(at)])
+        Task::batch([measure, annots, task, self.go_to(at)])
     }
 
     // ── Writing ───────────────────────────────────────────────────────────────
@@ -1911,6 +1960,7 @@ impl App {
             stamp: doc.stamp,
             imports: doc.imports(),
             layout: doc.layout(),
+            state: doc.state.clone(),
         })
     }
 
@@ -2238,7 +2288,7 @@ impl App {
             .chain(near.clone())
             .filter(|i| near.contains(i))
             .find_map(|i| {
-                let entry = doc.pages.get(i)?;
+                let entry = doc.state.pages.get(i)?;
                 if doc.render_failed.contains(&entry.key) {
                     return None;
                 }
@@ -2326,6 +2376,18 @@ fn render_thumbnail(
     render_page(engine, page, scale, scale_factor, 0.0)
 }
 
+/// Reads a source's annotations in the background.
+fn load_annotations(
+    origin: &Origin,
+    engine_doc: DocId,
+    source: ferrix_core::SourceId,
+) -> Task<Message> {
+    let origin = origin.clone();
+    Task::perform(crate::annotate::load(origin, source), move |result| {
+        Message::AnnotationsLoaded(engine_doc, source, result)
+    })
+}
+
 /// Everything needed to write the edited document, gathered on the UI thread.
 #[derive(Debug)]
 struct Export {
@@ -2334,6 +2396,8 @@ struct Export {
     stamp: Option<FileStamp>,
     imports: Vec<Origin>,
     layout: Vec<LayoutPage>,
+    /// Pages and annotations; annotations are written in the same revision (ADR-0009 §6).
+    state: ferrix_core::DocState,
 }
 
 impl Export {
@@ -2346,6 +2410,7 @@ impl Export {
             stamp,
             imports,
             layout,
+            state,
         } = self;
         let bytes = blocking(move || {
             if let Some(path) = base.path()
@@ -2364,8 +2429,19 @@ impl Export {
                 .collect::<Result<Vec<_>, _>>()?;
             let sources: Vec<PdfSource<'_>> =
                 import_bytes.iter().map(|b| PdfSource::new(b)).collect();
-            ferrix_pdf::write_page_layout(PdfSource::new(&base_bytes), &sources, &layout)
-                .map_err(|e| e.to_string())
+            let mut revision = ferrix_pdf::Revision::new(PdfSource::new(&base_bytes), &sources)
+                .map_err(|e| e.to_string())?;
+            // An unchanged page list keeps the original page tree; only touched pages change.
+            if !state.pages.is_unchanged() {
+                revision.set_layout(layout).map_err(|e| e.to_string())?;
+            }
+            let now = ferrix_annot::pdf_date(std::time::SystemTime::now());
+            ferrix_annot::write_annotations(&mut revision, &state.pages, &state.annots, &now)
+                .map_err(|e| e.to_string())?;
+            let out = revision.finish().map_err(|e| e.to_string())?;
+            ferrix_annot::verify(&out, None, &state.pages, &state.annots)
+                .map_err(|e| e.to_string())?;
+            Ok(out)
         })
         .await?;
 
@@ -2543,9 +2619,52 @@ mod tests {
                 stamp: doc.stamp,
                 imports: doc.imports(),
                 layout: doc.layout(),
+                state: doc.state.clone(),
             }
             .run(),
         )
+    }
+
+    #[test]
+    fn export_writes_annotations_with_page_edits_in_one_revision() {
+        let Some(worker) = worker() else { return };
+        let mut doc = open_fixture(&worker, "annotated.pdf", 3);
+        let keys: Vec<PageKey> = (0..3).filter_map(|i| doc.key_at(i)).collect();
+        let id = doc.state.annots.new_id();
+        let square = ferrix_core::Annotation::new(
+            ferrix_core::AnnotKind::Square,
+            ferrix_types::PdfBox::from_corners(
+                ferrix_types::PdfPoint::new(50.0, 50.0),
+                ferrix_types::PdfPoint::new(150.0, 120.0),
+            ),
+        );
+        doc.edit(
+            ferrix_core::AnnotEdit::Add {
+                page: keys[2],
+                index: 0,
+                id,
+                annot: Box::new(square),
+            },
+            "Add Rectangle".into(),
+        )
+        .expect("adds");
+        doc.edit(
+            Edit::Remove {
+                keys: vec![keys[0]],
+            },
+            "Delete".into(),
+        )
+        .expect("delete");
+
+        let bytes = export(&worker, &doc).expect("exports");
+        let written = ferrix_pdf::load(ferrix_pdf::Source::new(&bytes)).expect("parses");
+        let annots = ferrix_annot::read_annotations(&written, ferrix_core::SourceId::BASE);
+        let kinds: Vec<Vec<&str>> = annots
+            .iter()
+            .map(|page| page.iter().map(|a| a.kind.subtype()).collect())
+            .collect();
+        // Page 3 is now page 2, and carries the rectangle.
+        assert_eq!(kinds, vec![vec![], vec!["Square"]]);
     }
 
     #[test]
@@ -2560,7 +2679,7 @@ mod tests {
             "Delete".into(),
         )
         .expect("delete");
-        let to_front = doc.pages.move_edit(&[keys[3]], 0).expect("move");
+        let to_front = doc.state.pages.move_edit(&[keys[3]], 0).expect("move");
         doc.edit(to_front, "Move".into()).expect("move");
         doc.edit(
             Edit::Rotate {

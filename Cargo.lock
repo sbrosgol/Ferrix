@@ -1386,6 +1386,7 @@ name = "ferrix-app"
 version = "0.0.1"
 dependencies = [
  "arboard",
+ "ferrix-annot",
  "ferrix-compose",
  "ferrix-convert",
  "ferrix-core",
@@ -1398,6 +1399,7 @@ dependencies = [
  "iced",
  "iced_test",
  "image",
+ "lopdf",
  "resvg",
  "rfd",
  "serde",

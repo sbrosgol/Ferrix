@@ -35,6 +35,9 @@ enum Record {
     },
     Source(SavedOrigin),
     Pages(PageList),
+    /// The annotations (ADR-0009), when there are any. Ids depend on load order, so the whole
+    /// set is kept rather than edits; recovery is refused anyway if the file changed.
+    Annotations(ferrix_core::AnnotSet),
     /// A written document (ADR-0008) as it was when journaling started...
     Written(ferrix_compose::Document),
     /// ...and each edit applied to it since, undo and redo included.
@@ -120,7 +123,11 @@ impl Journal {
             self.write(&Record::Source(saved))?;
             self.sources_recorded += 1;
         }
-        self.write(&Record::Pages(doc.pages.clone()))
+        self.write(&Record::Pages(doc.state.pages.clone()))?;
+        if !doc.state.annots.is_empty() {
+            self.write(&Record::Annotations(doc.state.annots.clone()))?;
+        }
+        Ok(())
     }
 
     /// Ends the session cleanly, deleting the journal and its blobs.
@@ -252,6 +259,7 @@ pub struct Recoverable {
     pub(crate) base_changed: bool,
     pub(crate) sources: Vec<Origin>,
     pub(crate) pages: PageList,
+    pub(crate) annots: Option<ferrix_core::AnnotSet>,
     /// For a written document: its content with every journaled edit replayed.
     pub(crate) written: Option<ferrix_compose::Document>,
     pub(crate) started: SystemTime,
@@ -306,6 +314,7 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
     let mut header = None;
     let mut sources = Vec::new();
     let mut pages = None;
+    let mut annots = None;
     let mut written: Option<ferrix_compose::Document> = None;
     let mut replay_failed = false;
     for payload in journal::read(path)? {
@@ -322,6 +331,17 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
             }
             Record::Source(origin) => sources.push(origin),
             Record::Pages(list) => pages = Some(list),
+            // A journal is untrusted input: a set that fails validation is dropped, and the
+            // annotations are read from the file again instead.
+            Record::Annotations(set) => {
+                annots = match set.check() {
+                    Ok(()) => Some(set),
+                    Err(e) => {
+                        tracing::warn!("ignoring invalid journaled annotations: {e}");
+                        None
+                    }
+                };
+            }
             Record::Written(doc) => written = Some(doc),
             Record::WriteEdit(edit) => {
                 // Stop at an edit that no longer applies: everything before it is recovered.
@@ -377,6 +397,7 @@ fn load(dir: &Path, path: &Path) -> io::Result<Option<Recoverable>> {
         base_changed,
         sources: restored,
         pages,
+        annots,
         written,
         started: UNIX_EPOCH + std::time::Duration::from_secs(started),
         blobs,
@@ -435,7 +456,7 @@ mod tests {
             Origin::untitled("scan.pdf".into(), None, b"%PDF converted".to_vec()),
             DocId(2),
         ));
-        let inserted = doc.pages.new_entries(SourceId(1), [PageIndex(0)]);
+        let inserted = doc.state.pages.new_entries(SourceId(1), [PageIndex(0)]);
         doc.edit(
             Edit::Insert {
                 pages: vec![(1, inserted[0])],
@@ -475,7 +496,7 @@ mod tests {
         let found = scan_in(&dir.join("recovery"));
         assert_eq!(found.len(), 1);
         let found = &found[0];
-        assert_eq!(found.pages, doc.pages);
+        assert_eq!(found.pages, doc.state.pages);
         assert!(!found.base_changed);
         assert_eq!(found.name(), "report.pdf");
         match &found.sources[..] {
@@ -551,13 +572,13 @@ mod tests {
     fn recovered_pages_must_fit_the_reopened_files() {
         let dir = scratch("fit");
         let doc = edited_document(&dir);
-        assert!(crate::document::pages_fit(&doc.pages, &[3, 1]));
+        assert!(crate::document::pages_fit(&doc.state.pages, &[3, 1]));
         assert!(
-            !crate::document::pages_fit(&doc.pages, &[2, 1]),
+            !crate::document::pages_fit(&doc.state.pages, &[2, 1]),
             "base lost a page"
         );
         assert!(
-            !crate::document::pages_fit(&doc.pages, &[3]),
+            !crate::document::pages_fit(&doc.state.pages, &[3]),
             "inserted source missing"
         );
     }

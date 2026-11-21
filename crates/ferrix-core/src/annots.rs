@@ -531,6 +531,28 @@ impl AnnotSet {
         ids
     }
 
+    /// Checks a set that came from outside, such as a recovery journal: every annotation
+    /// valid, ids unique and below the id counter, and no file object listed twice.
+    pub fn check(&self) -> Result<(), EditError> {
+        let mut ids = HashSet::new();
+        let mut objects = HashSet::new();
+        for (id, annot) in self.pages.values().flatten() {
+            if !ids.insert(*id) {
+                return Err(EditError::DuplicateAnnotation(*id));
+            }
+            if id.0 >= self.next_id {
+                return Err(EditError::InvalidAnnotation("id was not reserved"));
+            }
+            if let AnnotOrigin::Existing { source, object } = annot.origin
+                && !objects.insert((source, object))
+            {
+                return Err(EditError::InvalidAnnotation("object already present"));
+            }
+            annot.validate()?;
+        }
+        Ok(())
+    }
+
     /// Whether `page`'s annotations were read from the file (see [`Self::insert_loaded`]).
     pub fn is_loaded(&self, page: PageKey) -> bool {
         self.loaded.contains(&page)
@@ -701,5 +723,28 @@ impl AnnotSet {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_rejects_tampered_sets() {
+        let mut set = AnnotSet::new();
+        let page = crate::PageList::identity(1).entries()[0].key;
+        set.insert_loaded(
+            page,
+            [Annotation::new(AnnotKind::Square, PdfBox::default())],
+        );
+        assert_eq!(set.check(), Ok(()));
+        set.next_id = 0;
+        assert!(set.check().is_err(), "ids must be below the counter");
+        set.next_id = 1;
+        if let Some(list) = set.pages.get_mut(&page) {
+            list[0].1.props.opacity = 7.0;
+        }
+        assert_eq!(set.check(), Err(EditError::InvalidAnnotation("opacity")));
     }
 }

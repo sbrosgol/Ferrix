@@ -449,7 +449,7 @@ impl App {
         let targets = doc.targets();
         let positions: Vec<usize> = targets
             .iter()
-            .filter_map(|k| doc.pages.position(*k))
+            .filter_map(|k| doc.state.pages.position(*k))
             .collect();
         let can_move_up = positions.first().is_some_and(|&p| p > 0);
         let can_move_down = positions.last().is_some_and(|&p| p + 1 < doc.len());
@@ -527,6 +527,7 @@ impl App {
         .padding([10, 12]);
 
         let thumbs = doc
+            .state
             .pages
             .entries()
             .iter()
@@ -590,6 +591,7 @@ impl App {
     fn page_view<'a>(&self, doc: &'a Document) -> Element<'a, Message> {
         let strip = &doc.strip;
         let pages = doc
+            .state
             .pages
             .entries()
             .iter()

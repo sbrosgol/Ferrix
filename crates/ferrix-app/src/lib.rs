@@ -1,5 +1,6 @@
 //! Ferrix desktop application (iced, ADR-0002).
 
+pub mod annotate;
 mod app;
 mod clipboard;
 mod document;

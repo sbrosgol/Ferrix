@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use ferrix_core::{Edit, EditError, History, PageEntry, PageKey, PageList};
+use ferrix_core::{AnnotSet, DocEdit, DocState, EditError, History, PageEntry, PageKey, PageList};
 use ferrix_engine::DocInfo;
 use ferrix_io::FileStamp;
 use ferrix_pdf::LayoutPage;
@@ -129,8 +129,9 @@ pub(crate) struct Document {
     pub(crate) stamp: Option<FileStamp>,
     pub(crate) info: DocInfo,
     pub(crate) sources: Vec<Source>,
-    pub(crate) pages: PageList,
-    pub(crate) history: History,
+    /// Pages and annotations (ADR-0009), edited together through one history.
+    pub(crate) state: DocState,
+    pub(crate) history: History<DocState>,
     /// Index of the page on screen: the one filling most of the view.
     pub(crate) current: usize,
     pub(crate) selection: BTreeSet<PageKey>,
@@ -150,17 +151,19 @@ pub(crate) struct Document {
     pub(crate) render_failed: BTreeSet<PageKey>,
     pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
     pub(crate) thumbnail_busy: bool,
+    /// What the document allows for annotations; `None` until read (ADR-0009).
+    pub(crate) annot_policy: Option<crate::annotate::Policy>,
 }
 
 impl Document {
     pub(crate) fn new(origin: Origin, info: DocInfo) -> Self {
         let pages = PageList::identity(info.page_count);
         let mut doc = Self {
+            state: DocState::new(pages, AnnotSet::new()),
             stamp: origin.path().and_then(|p| FileStamp::of(p).ok()),
             sources: vec![Source::new(origin.clone(), info.id)],
             origin,
             info,
-            pages,
             history: History::new(),
             current: 0,
             selection: BTreeSet::new(),
@@ -173,6 +176,7 @@ impl Document {
             render_failed: BTreeSet::new(),
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
+            annot_policy: None,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -187,10 +191,14 @@ impl Document {
         info: DocInfo,
         sources: Vec<Source>,
         pages: PageList,
+        annots: Option<AnnotSet>,
     ) -> Self {
         let mut doc = Self::new(origin, info);
         doc.sources.extend(sources);
-        doc.pages = pages;
+        doc.state.pages = pages;
+        if let Some(annots) = annots {
+            doc.state.annots = annots;
+        }
         doc.history = History::unsaved();
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -207,7 +215,7 @@ impl Document {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pages.len()
+        self.state.pages.len()
     }
 
     /// Unsaved edits, or a document that was never saved at all.
@@ -220,7 +228,7 @@ impl Document {
     }
 
     pub(crate) fn key_at(&self, index: usize) -> Option<PageKey> {
-        self.pages.get(index).map(|e| e.key)
+        self.state.pages.get(index).map(|e| e.key)
     }
 
     pub(crate) fn page_ref(&self, entry: &PageEntry) -> Option<PageRef> {
@@ -253,7 +261,8 @@ impl Document {
     }
 
     pub(crate) fn page_sizes(&self) -> Vec<Size> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .map(|e| self.page_size(e))
@@ -262,12 +271,16 @@ impl Document {
 
     /// Size of the current page in points, as displayed.
     pub(crate) fn current_size(&self) -> Option<Size> {
-        self.pages.get(self.current).map(|e| self.page_size(e))
+        self.state
+            .pages
+            .get(self.current)
+            .map(|e| self.page_size(e))
     }
 
     /// The pages an action applies to: the selection in document order, or the current page.
     pub(crate) fn targets(&self) -> Vec<PageKey> {
         let selected: Vec<PageKey> = self
+            .state
             .pages
             .entries()
             .iter()
@@ -299,38 +312,42 @@ impl Document {
             Click::Extend => {
                 let anchor = self
                     .anchor
-                    .and_then(|a| self.pages.position(a))
+                    .and_then(|a| self.state.pages.position(a))
                     .unwrap_or(self.current);
-                let Some(end) = self.pages.position(key) else {
+                let Some(end) = self.state.pages.position(key) else {
                     return;
                 };
                 let (from, to) = (anchor.min(end), anchor.max(end));
                 self.selection = (from..=to).filter_map(|i| self.key_at(i)).collect();
             }
         }
-        if let Some(index) = self.pages.position(key) {
+        if let Some(index) = self.state.pages.position(key) {
             self.current = index;
         }
     }
 
     /// Applies an edit through the undo history, keeping the current page in view.
-    pub(crate) fn edit(&mut self, edit: Edit, label: String) -> Result<(), EditError> {
+    pub(crate) fn edit(
+        &mut self,
+        edit: impl Into<DocEdit>,
+        label: String,
+    ) -> Result<(), EditError> {
         let keep = self.key_at(self.current);
-        self.history.perform(&mut self.pages, edit, label)?;
+        self.history.perform(&mut self.state, edit.into(), label)?;
         self.after_change(keep);
         Ok(())
     }
 
     pub(crate) fn undo(&mut self) -> Option<String> {
         let keep = self.key_at(self.current);
-        let label = self.history.undo(&mut self.pages)?;
+        let label = self.history.undo(&mut self.state)?;
         self.after_change(keep);
         Some(label)
     }
 
     pub(crate) fn redo(&mut self) -> Option<String> {
         let keep = self.key_at(self.current);
-        let label = self.history.redo(&mut self.pages)?;
+        let label = self.history.redo(&mut self.state)?;
         self.after_change(keep);
         Some(label)
     }
@@ -338,9 +355,9 @@ impl Document {
     fn after_change(&mut self, keep: Option<PageKey>) {
         let last = self.len().saturating_sub(1);
         self.current = keep
-            .and_then(|k| self.pages.position(k))
+            .and_then(|k| self.state.pages.position(k))
             .unwrap_or(self.current.min(last));
-        let present: BTreeSet<PageKey> = self.pages.entries().iter().map(|e| e.key).collect();
+        let present: BTreeSet<PageKey> = self.state.pages.entries().iter().map(|e| e.key).collect();
         self.selection.retain(|k| present.contains(k));
         self.thumbnails.retain(|k, _| present.contains(k));
         self.images.retain(|k, _| present.contains(k));
@@ -354,7 +371,8 @@ impl Document {
 
     /// The next page whose thumbnail is missing or shows an outdated rotation.
     pub(crate) fn next_thumbnail(&self) -> Option<(PageKey, PageRef)> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .take(MAX_THUMBNAILS)
@@ -368,7 +386,8 @@ impl Document {
 
     /// The page list as written on save: source 0 is the document, `n` is `sources[n]`.
     pub(crate) fn layout(&self) -> Vec<LayoutPage> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .map(|e| LayoutPage {
