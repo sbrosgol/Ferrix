@@ -665,7 +665,8 @@ fn page_layout_and_annotations_land_in_one_revision_including_imports() {
         ferrix_annot::WriteReport {
             added: 1,
             changed: 1,
-            removed: 0
+            removed: 0,
+            untagged: 0,
         }
     );
     let out = revision.finish().unwrap();
@@ -1442,4 +1443,196 @@ fn stamps_round_trip_and_kept_appearances_move_by_rect() {
         assert_eq!(ap0, ap1, "appearance kept");
         assert_ne!(rect0, rect1, "moved");
     }
+}
+
+/// A tagged copy of the fixture: Document > P (page content MCID 0), parent tree key 0.
+fn tagged_fixture(parent_tree: impl FnOnce(&mut Document, lopdf::ObjectId) -> Object) -> Vec<u8> {
+    let mut doc = Document::load_mem(&fixture()).unwrap();
+    let page = *doc.get_pages().get(&1).unwrap();
+    let root = doc.new_object_id();
+    let document = doc.new_object_id();
+    let para = doc.add_object(dictionary! {
+        "Type" => "StructElem", "S" => "P", "P" => document, "Pg" => page, "K" => 0,
+    });
+    doc.objects.insert(
+        document,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructElem", "S" => "Document", "P" => root, "K" => vec![para.into()],
+        }),
+    );
+    let tree = parent_tree(&mut doc, para);
+    doc.objects.insert(
+        root,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructTreeRoot", "K" => document, "ParentTree" => tree,
+            "ParentTreeNextKey" => 1,
+        }),
+    );
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("StructParents", Object::Integer(0));
+    let catalog = doc.catalog_mut().unwrap();
+    catalog.set("StructTreeRoot", Object::Reference(root));
+    catalog.set("MarkInfo", dictionary! { "Marked" => true });
+    save(&mut doc)
+}
+
+/// In tagged files, new annotations join the structure tree (element, /StructParent, parent
+/// tree, /Tabs) and deleting them takes them out again.
+#[test]
+fn annotations_in_tagged_files_are_tagged_and_untagged() {
+    let base = tagged_fixture(|doc, para| {
+        let entry = doc.add_object(Object::Array(vec![para.into()]));
+        let leaf = doc.add_object(dictionary! {
+            "Limits" => vec![0.into(), 0.into()],
+            "Nums" => vec![0.into(), entry.into()],
+        });
+        Object::Reference(doc.add_object(dictionary! { "Kids" => vec![leaf.into()] }))
+    });
+    let mut state = open_state(&base, None);
+    add(
+        &mut state,
+        0,
+        red_square(PdfBox::from_corners(pt(100.0, 100.0), pt(200.0, 150.0))),
+    );
+    let out = save_state(&base, None, &state);
+
+    let doc = Document::load_mem(&out).unwrap();
+    let page = *doc.get_pages().get(&1).unwrap();
+    assert_eq!(
+        doc.get_dictionary(page)
+            .unwrap()
+            .get(b"Tabs")
+            .unwrap()
+            .as_name()
+            .unwrap(),
+        b"S"
+    );
+    let annot_id = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Annots")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_reference().unwrap())
+        .rfind(|id| {
+            doc.get_dictionary(*id)
+                .unwrap()
+                .get(b"Subtype")
+                .unwrap()
+                .as_name()
+                .unwrap()
+                == b"Square"
+        })
+        .unwrap();
+    let key = doc
+        .get_dictionary(annot_id)
+        .unwrap()
+        .get(b"StructParent")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert_eq!(key, 1);
+    let root = doc
+        .catalog()
+        .unwrap()
+        .get(b"StructTreeRoot")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let root = doc.get_dictionary(root).unwrap();
+    assert_eq!(root.get(b"ParentTreeNextKey").unwrap().as_i64().unwrap(), 2);
+    // The leaf gained the key, and its limits cover it.
+    let tree = doc
+        .get_dictionary(root.get(b"ParentTree").unwrap().as_reference().unwrap())
+        .unwrap();
+    let leaf = doc
+        .get_dictionary(
+            tree.get(b"Kids").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap();
+    let nums = leaf.get(b"Nums").unwrap().as_array().unwrap();
+    assert_eq!(nums.len(), 4);
+    assert_eq!(nums[2].as_i64().unwrap(), 1);
+    assert_eq!(
+        leaf.get(b"Limits").unwrap().as_array().unwrap()[1]
+            .as_i64()
+            .unwrap(),
+        1
+    );
+    let element = doc.get_dictionary(nums[3].as_reference().unwrap()).unwrap();
+    assert_eq!(element.get(b"S").unwrap().as_name().unwrap(), b"Annot");
+    let objr = element.get(b"K").unwrap().as_dict().unwrap();
+    assert_eq!(objr.get(b"Obj").unwrap().as_reference().unwrap(), annot_id);
+    // Under the paragraph that owns the page's content.
+    let para = doc
+        .get_dictionary(element.get(b"P").unwrap().as_reference().unwrap())
+        .unwrap();
+    assert_eq!(para.get(b"S").unwrap().as_name().unwrap(), b"P");
+    assert_eq!(para.get(b"K").unwrap().as_array().unwrap().len(), 2);
+
+    // Deleting it removes the element and the key.
+    let mut reread = open_state(&out, None);
+    let page_key = reread.pages.entries()[0].key;
+    let square = reread
+        .annots
+        .page(page_key)
+        .iter()
+        .rfind(|(_, a)| a.kind == AnnotKind::Square)
+        .map(|(id, _)| *id)
+        .unwrap();
+    reread
+        .apply(&DocEdit::Annot(AnnotEdit::Remove { id: square }))
+        .unwrap();
+    let removed = save_state(&out, None, &reread);
+    let doc = Document::load_mem(&removed).unwrap();
+    let root = doc
+        .catalog()
+        .unwrap()
+        .get(b"StructTreeRoot")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let root = doc.get_dictionary(root).unwrap();
+    let tree = doc
+        .get_dictionary(root.get(b"ParentTree").unwrap().as_reference().unwrap())
+        .unwrap();
+    let leaf = doc
+        .get_dictionary(
+            tree.get(b"Kids").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(leaf.get(b"Nums").unwrap().as_array().unwrap().len(), 2);
+    let para = doc
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .find(|d| {
+            d.get(b"S")
+                .and_then(Object::as_name)
+                .is_ok_and(|s| s == b"P")
+        })
+        .unwrap();
+    assert_eq!(para.get(b"K").unwrap().as_array().unwrap().len(), 1);
+}
+
+/// A parent tree Ferrix can't follow is left alone; the annotation is written untagged.
+#[test]
+fn malformed_structure_trees_are_left_alone() {
+    let base = tagged_fixture(|_, _| dictionary! { "Kids" => vec![Object::Integer(3)] }.into());
+    let mut state = open_state(&base, None);
+    add(
+        &mut state,
+        0,
+        red_square(PdfBox::from_corners(pt(100.0, 100.0), pt(200.0, 150.0))),
+    );
+    let mut revision = Revision::new(Source::new(&base), &[]).unwrap();
+    let report = write_annotations(&mut revision, &state.pages, &state.annots, NOW).unwrap();
+    assert_eq!((report.added, report.untagged), (1, 1));
 }

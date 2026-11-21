@@ -548,7 +548,7 @@ mod tests {
             ],
             policy: crate::annotate::Policy {
                 permission: ferrix_annot::Permission::Allowed,
-                tagged: false,
+                untaggable: false,
             },
             transforms: Vec::new(),
             bytes: std::sync::Arc::new(Vec::new()),

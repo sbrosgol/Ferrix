@@ -18,6 +18,9 @@ pub struct WriteReport {
     pub added: usize,
     pub changed: usize,
     pub removed: usize,
+    /// New annotations left out of a tagged file's structure tree, because the tree isn't
+    /// one Ferrix can safely extend.
+    pub untagged: usize,
 }
 
 impl WriteReport {
@@ -169,6 +172,11 @@ pub fn write_page_annotations(
 ) -> Result<WriteReport, AnnotError> {
     let mut report = WriteReport::default();
     let pdfa = pdfa_rules(revision.source(0)?);
+    let (mut tagger, untaggable) = match crate::tag::Tagger::load(revision.source(0)?) {
+        None => (None, false),
+        Some(Ok(tagger)) => (Some(tagger), false),
+        Some(Err(())) => (None, true),
+    };
     for entry in pages {
         let source = entry.source.0 as usize;
         let page_id = revision.page_id(source, entry.page.0)?;
@@ -268,6 +276,19 @@ pub fn write_page_annotations(
             .cloned()
             .unwrap_or_default();
         let popups = popups_of(doc, &items, &removed);
+        if source == 0
+            && let Some(tagger) = tagger.as_mut()
+        {
+            for id in &removed {
+                if let Some(key) = doc
+                    .get_dictionary(*id)
+                    .ok()
+                    .and_then(|d| d.get(b"StructParent").ok()?.as_i64().ok())
+                {
+                    tagger.untag(doc, key);
+                }
+            }
+        }
         let originals: Vec<(ObjectId, Dictionary, &Annotation, bool)> = changed
             .iter()
             .map(|(id, current, original)| {
@@ -343,12 +364,37 @@ pub fn write_page_annotations(
                 dict.set("IRT", Object::Reference(parent));
             }
             let object_id = reserved[&annot_id];
+            if source == 0
+                && let Some(tagger) = tagger.as_mut()
+            {
+                let element = revision.reserve_id();
+                let alt = crate::tag::alt_text(annot);
+                tagger.tag(
+                    revision.source(0)?,
+                    (page_id, entry.page.0),
+                    object_id,
+                    element,
+                    &mut dict,
+                    &alt,
+                );
+            } else if source == 0 && untaggable {
+                report.untagged += 1;
+            }
             revision.replace_object(object_id, Object::Dictionary(dict));
             out.push(Object::Reference(object_id));
             report.added += 1;
         }
         report.removed += removed.len();
         revision.set_page_annots(source, entry.page.0, out)?;
+    }
+    if let Some(tagger) = tagger {
+        let (objects, pages) = tagger.finish(revision.source(0)?);
+        for (id, dict) in objects {
+            revision.replace_object(id, Object::Dictionary(dict));
+        }
+        for page in pages {
+            revision.set_page_entry(0, page, "Tabs", Object::Name(b"S".to_vec()))?;
+        }
     }
     Ok(report)
 }

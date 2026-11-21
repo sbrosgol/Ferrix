@@ -867,11 +867,13 @@ impl App {
         match doc.edit(edit, label.to_owned()) {
             Ok(()) => {
                 self.notice = None;
-                let tagged = doc.annot_policy.as_ref().is_some_and(|p| p.tagged);
-                if tagged && !doc.tagged_noted {
+                let untaggable = doc.annot_policy.as_ref().is_some_and(|p| p.untaggable);
+                if untaggable && !doc.tagged_noted {
                     doc.tagged_noted = true;
                     self.notice = Some(
-                        "Screen readers won’t announce annotations in this document yet.".into(),
+                        "This document’s accessibility tags can’t be updated, so screen readers \
+                         won’t announce new annotations."
+                            .into(),
                     );
                 }
                 self.after_edit()
