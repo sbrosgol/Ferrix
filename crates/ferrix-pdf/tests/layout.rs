@@ -211,3 +211,95 @@ fn rejects_invalid_layouts() {
         Err(PdfError::Parse(_))
     ));
 }
+
+/// Saving used to re-read its own output without the password, so every page-organization save
+/// of a password-protected file failed verification with "output has 0 pages".
+#[test]
+fn organizes_password_protected_documents() {
+    use lopdf::{EncryptionState, EncryptionVersion, Permissions, StringFormat};
+
+    let mut doc = Document::load_mem(&fixture("Locked", 3, 0)).unwrap();
+    let id = Object::String(b"layout-test-id".to_vec(), StringFormat::Hexadecimal);
+    doc.trailer.set("ID", vec![id.clone(), id]);
+    let state = EncryptionState::try_from(EncryptionVersion::V2 {
+        document: &doc,
+        owner_password: "owner",
+        user_password: "user",
+        key_length: 128,
+        permissions: Permissions::all(),
+    })
+    .unwrap();
+    doc.encrypt(&state).unwrap();
+    let mut base = Vec::new();
+    doc.save_to(&mut base).unwrap();
+
+    let source = Source {
+        bytes: &base,
+        password: Some("user"),
+    };
+    let out = write_page_layout(source, &[], &[page(0, 2), page(0, 0)]).unwrap();
+    assert!(out.starts_with(&base));
+    let reread = ferrix_pdf::load(Source {
+        bytes: &out,
+        password: Some("user"),
+    })
+    .unwrap();
+    assert_eq!(reread.get_pages().len(), 2);
+    assert!(
+        Document::load_mem(&out).is_err() || Document::load_mem(&out).unwrap().is_encrypted(),
+        "still encrypted"
+    );
+}
+
+/// A broken reference in an imported file must not end up pointing at an unrelated object once
+/// the import is renumbered (it used to pull the import's catalog and page tree into the page).
+#[test]
+fn broken_references_in_imports_become_null() {
+    let base = fixture("Base", 1, 0);
+    let mut other = Document::load_mem(&fixture("Other", 1, 0)).unwrap();
+    let page = *other.get_pages().get(&1).unwrap();
+    let missing = (other.max_id + 50, 0);
+    other
+        .get_dictionary_mut(page)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(missing)]);
+    let mut other_bytes = Vec::new();
+    other.save_to(&mut other_bytes).unwrap();
+
+    let out = write_page_layout(
+        Source::new(&base),
+        &[Source::new(&other_bytes)],
+        &[page_of(0, 0), page_of(1, 0)],
+    )
+    .unwrap();
+    let doc = Document::load_mem(&out).unwrap();
+    let imported = *doc.get_pages().get(&2).unwrap();
+    let annots = doc
+        .get_dictionary(imported)
+        .unwrap()
+        .get(b"Annots")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(annots, &vec![Object::Null]);
+    let catalogs = doc
+        .objects
+        .values()
+        .filter(|o| {
+            o.as_dict()
+                .ok()
+                .and_then(|d| d.get(b"Type").ok())
+                .and_then(|t| t.as_name().ok())
+                == Some(b"Catalog".as_slice())
+        })
+        .count();
+    assert_eq!(catalogs, 1, "the import's catalog was not copied");
+}
+
+fn page_of(source: usize, page: u32) -> LayoutPage {
+    LayoutPage {
+        source,
+        page,
+        rotate_by: Rotation::R0,
+    }
+}

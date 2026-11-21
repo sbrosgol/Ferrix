@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
 use ferrix_types::{PageIndex, Rotation};
+
+use crate::AnnotId;
 use serde::{Deserialize, Serialize};
 
 /// Which document a page comes from. [`SourceId::BASE`] is the open document itself; others
@@ -56,6 +58,10 @@ pub enum EditError {
     InvalidPosition(usize),
     NotAPermutation,
     Empty,
+    UnknownAnnotation(AnnotId),
+    DuplicateAnnotation(AnnotId),
+    /// The annotation has an invalid or unsupported value; names what.
+    InvalidAnnotation(&'static str),
 }
 
 impl std::fmt::Display for EditError {
@@ -67,6 +73,9 @@ impl std::fmt::Display for EditError {
             Self::InvalidPosition(at) => write!(f, "position {at} is outside the document"),
             Self::NotAPermutation => f.write_str("the new order must contain every page once"),
             Self::Empty => f.write_str("the edit affects no pages"),
+            Self::UnknownAnnotation(id) => write!(f, "annotation {id:?} is not in the document"),
+            Self::DuplicateAnnotation(id) => write!(f, "annotation {id:?} already exists"),
+            Self::InvalidAnnotation(what) => write!(f, "invalid annotation: {what}"),
         }
     }
 }
@@ -77,7 +86,7 @@ impl std::error::Error for EditError {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageList {
     entries: Vec<PageEntry>,
-    next_key: u64,
+    pub(crate) next_key: u64,
 }
 
 impl PageList {

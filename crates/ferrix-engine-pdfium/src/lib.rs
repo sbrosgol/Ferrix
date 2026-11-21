@@ -8,8 +8,8 @@ mod library;
 use std::{collections::HashMap, path::Path};
 
 use ferrix_engine::{
-    DocInfo, DocMetadata, DocSource, EngineCaps, EngineError, OutlineItem, PageInfo, PdfEngine,
-    RenderedTile, Secret, TextChar, TextPage, TileRequest,
+    AnnotSummary, DocInfo, DocMetadata, DocSource, EngineCaps, EngineError, OutlineItem, PageInfo,
+    PdfEngine, RenderedTile, Secret, TextChar, TextPage, TileRequest,
 };
 use ferrix_types::{DocId, PageIndex, PageTransform, PdfBox, Rect, Rotation};
 pub use library::{LibraryError, PDFIUM_DIR_ENV};
@@ -77,6 +77,7 @@ impl PdfEngine for PdfiumEngine {
             render: true,
             text: true,
             outline: true,
+            annotations: true,
             ..EngineCaps::default()
         }
     }
@@ -210,6 +211,22 @@ impl PdfEngine for PdfiumEngine {
         Ok(TextPage { page: index, chars })
     }
 
+    fn annotations(
+        &mut self,
+        doc: DocId,
+        index: PageIndex,
+    ) -> Result<Vec<AnnotSummary>, EngineError> {
+        let page = self.page(doc, index)?;
+        Ok(page
+            .annotations()
+            .iter()
+            .map(|annot| AnnotSummary {
+                subtype: subtype_name(annot.annotation_type()).to_owned(),
+                rect: annot.bounds().map(|r| pdf_box(&r)).unwrap_or_default(),
+            })
+            .collect())
+    }
+
     fn outline(&mut self, doc: DocId) -> Result<Vec<OutlineItem>, EngineError> {
         let Some(first) = self.doc(doc)?.bookmarks().root() else {
             return Ok(Vec::new());
@@ -271,6 +288,41 @@ fn page_transform(page: &PdfPage<'_>) -> Result<(PageTransform, Rotation), Engin
         PageTransform::new(pdf_box(&crop.bounds), rotation),
         rotation,
     ))
+}
+
+/// The PDF `/Subtype` name of a PDFium annotation type.
+fn subtype_name(kind: PdfPageAnnotationType) -> &'static str {
+    use PdfPageAnnotationType as T;
+    match kind {
+        T::Unknown => "Unknown",
+        T::Text => "Text",
+        T::Link => "Link",
+        T::FreeText => "FreeText",
+        T::Line => "Line",
+        T::Square => "Square",
+        T::Circle => "Circle",
+        T::Polygon => "Polygon",
+        T::Polyline => "PolyLine",
+        T::Highlight => "Highlight",
+        T::Underline => "Underline",
+        T::Squiggly => "Squiggly",
+        T::Strikeout => "StrikeOut",
+        T::Stamp => "Stamp",
+        T::Caret => "Caret",
+        T::Ink => "Ink",
+        T::Popup => "Popup",
+        T::FileAttachment => "FileAttachment",
+        T::Sound => "Sound",
+        T::Movie => "Movie",
+        T::Widget | T::XfaWidget => "Widget",
+        T::Screen => "Screen",
+        T::PrinterMark => "PrinterMark",
+        T::TrapNet => "TrapNet",
+        T::Watermark => "Watermark",
+        T::ThreeD => "3D",
+        T::RichMedia => "RichMedia",
+        T::Redacted => "Redact",
+    }
 }
 
 fn render_rotation(rotation: Rotation) -> PdfPageRenderRotation {

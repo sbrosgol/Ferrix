@@ -1369,6 +1369,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrix-annot"
+version = "0.0.1"
+dependencies = [
+ "ferrix-core",
+ "ferrix-engine",
+ "ferrix-engine-pdfium",
+ "ferrix-pdf",
+ "ferrix-types",
+ "lopdf",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ferrix-app"
 version = "0.0.1"
 dependencies = [
@@ -1399,7 +1412,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "ferrix-annot",
  "ferrix-compose",
+ "ferrix-core",
  "ferrix-engine",
  "ferrix-engine-pdfium",
  "ferrix-io",

@@ -65,6 +65,19 @@ impl Rect {
     }
 }
 
+/// A point in PDF user space (points, origin bottom-left, y up), as written in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct PdfPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl PdfPoint {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
 /// A rectangle in PDF user space (points, origin bottom-left, y up), e.g. a crop box.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct PdfBox {
@@ -81,6 +94,47 @@ impl PdfBox {
 
     pub fn height(&self) -> f32 {
         self.top - self.bottom
+    }
+
+    /// Builds a normalized box from any two opposite corners.
+    pub fn from_corners(a: PdfPoint, b: PdfPoint) -> Self {
+        Self {
+            left: a.x.min(b.x),
+            bottom: a.y.min(b.y),
+            right: a.x.max(b.x),
+            top: a.y.max(b.y),
+        }
+    }
+
+    /// The smallest box holding every point, or `None` when there are none.
+    pub fn bounding(points: impl IntoIterator<Item = PdfPoint>) -> Option<Self> {
+        let mut points = points.into_iter();
+        let first = points.next()?;
+        Some(points.fold(Self::from_corners(first, first), |b, p| b.union_point(p)))
+    }
+
+    /// This box grown to include `p`.
+    pub fn union_point(self, p: PdfPoint) -> Self {
+        Self {
+            left: self.left.min(p.x),
+            bottom: self.bottom.min(p.y),
+            right: self.right.max(p.x),
+            top: self.top.max(p.y),
+        }
+    }
+
+    /// This box grown by `by` points on every side.
+    pub fn outset(self, by: f32) -> Self {
+        Self {
+            left: self.left - by,
+            bottom: self.bottom - by,
+            right: self.right + by,
+            top: self.top + by,
+        }
+    }
+
+    pub fn contains(&self, p: PdfPoint) -> bool {
+        p.x >= self.left && p.x <= self.right && p.y >= self.bottom && p.y <= self.top
     }
 }
 

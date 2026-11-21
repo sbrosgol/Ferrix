@@ -10,7 +10,7 @@ relevant ADR before changing a subsystem, and add implementation notes to it whe
 cargo xtask fetch-pdfium                 # once per checkout: PDFium into vendor/pdfium (git-ignored)
 cargo run -p ferrix-app [-- file.pdf]    # desktop app
 cargo xtask bundle [--release] [--open]  # macOS: target/<profile>/Ferrix.app, named “Ferrix” in the menu bar
-cargo run -p ferrix-cli -- --help        # `ferrix`: info, render, text, outline, organize, compose, source
+cargo run -p ferrix-cli -- --help        # `ferrix`: info, render, text, outline, organize, annotate, compose, source
 cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace
 ```
 
@@ -24,8 +24,9 @@ The only expected warning is the `block v0.1.6` future-incompatibility note from
 |---|---|
 | `ferrix-types` | geometry, ids |
 | `ferrix-engine` / `-pdfium` | `PdfEngine` trait, PDFium backend (rendering, text) |
-| `ferrix-pdf` | lopdf object layer: incremental page-layout saves, blank/image PDFs, embedded files, content digest |
-| `ferrix-core` | page-organization edit model (`PageList`, `Edit`, `History`) |
+| `ferrix-pdf` | lopdf object layer: incremental revisions (`Revision`: page layout + replaced/added objects), blank/image PDFs, embedded files, content digest |
+| `ferrix-core` | PDF edit model: pages (`PageList`, `Edit`), annotations (`AnnotSet`, `AnnotEdit`), both in `DocState`/`DocEdit`; generic `History` |
+| `ferrix-annot` | annotations (ADR-0009): read into the model, appearance display list, write into a `Revision` |
 | `ferrix-io` | atomic writes, `FileStamp`, crash-recovery journal frames, `app_data_dir` (`FERRIX_DATA_DIR` overrides) |
 | `ferrix-print` | native print dialogs; the only crate with `unsafe` (confined platform modules) |
 | `ferrix-convert` | images and Office files → PDF via Word/LibreOffice |
@@ -49,7 +50,9 @@ App (`ferrix-app`):
 - Input/caret overlay widget: [`Canvas::update`](crates/ferrix-app/src/writer_canvas.rs:172); views: [`writer_view`](crates/ferrix-app/src/view.rs:822), [`format_bar`](crates/ferrix-app/src/view.rs:893)
 - Recovery: [`WriterJournal`](crates/ferrix-app/src/recovery.rs:172); clipboard: [`RichClipboard`](crates/ferrix-app/src/clipboard.rs:17)
 
-PDF viewing/organizing: [`PdfEngine`](crates/ferrix-engine/src/lib.rs:24), [`write_page_layout`](crates/ferrix-pdf/src/layout.rs:30), [`content_digest`](crates/ferrix-pdf/src/inspect.rs:89), [`PageList::apply`](crates/ferrix-core/src/pages.rs:159), [`write_atomic`](crates/ferrix-io/src/lib.rs:35).
+PDF viewing/organizing: [`PdfEngine`](crates/ferrix-engine/src/lib.rs:24), [`Revision`](crates/ferrix-pdf/src/layout.rs:55), [`content_digest`](crates/ferrix-pdf/src/inspect.rs:89), [`PageList::apply`](crates/ferrix-core/src/pages.rs:168), [`write_atomic`](crates/ferrix-io/src/lib.rs:35).
+
+Annotations (ADR-0009): [`DocState::apply`](crates/ferrix-core/src/state.rs:51), [`AnnotSet::apply`](crates/ferrix-core/src/annots.rs:461), [`read_annotations`](crates/ferrix-annot/src/read.rs:23), [`appearance`](crates/ferrix-annot/src/appearance.rs:65), [`write_annotations`](crates/ferrix-annot/src/write.rs:89).
 
 Line numbers drift; search by name if one is off.
 

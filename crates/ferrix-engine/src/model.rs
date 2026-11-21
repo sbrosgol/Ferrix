@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf};
 
-use ferrix_types::{DocId, PageIndex, PixelRect, Rect, Rotation, Size};
+use ferrix_types::{DocId, PageIndex, PdfBox, PixelRect, Rect, Rotation, Size};
 use serde::{Deserialize, Serialize};
 
 /// Where a document's bytes come from.
@@ -155,4 +155,13 @@ pub struct OutlineItem {
     /// Target page, if the entry points into this document.
     pub page: Option<PageIndex>,
     pub children: Vec<OutlineItem>,
+}
+
+/// An annotation as the engine sees it; used to verify what Ferrix wrote (ADR-0009 §6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnnotSummary {
+    /// The PDF `/Subtype` name, e.g. `"Square"`.
+    pub subtype: String,
+    /// `/Rect` in PDF user space.
+    pub rect: PdfBox,
 }

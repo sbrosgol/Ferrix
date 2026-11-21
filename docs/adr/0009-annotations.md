@@ -192,3 +192,90 @@ The constraints:
    - Stamps (standard and image; the same path serves visual signatures in M3), replies and
      popups.
    - Structure elements for annotations in tagged PDFs, and pen pressure.
+
+## Implementation notes (phase 1, headless core, 2026-11-21)
+- **Model** (`ferrix-core`): `annots.rs` holds `Annotation`, `AnnotSet` and `AnnotEdit`;
+  `state.rs` holds `DocState`/`DocEdit`. `History` is now generic over an `Undoable` state
+  (default `PageList`, so the app is unchanged) and gains `perform_grouped`, which merges a
+  gesture's `Set`s (and an `Add` followed by `Set`s) into one undo step, never across a save.
+- **Annotations of removed pages are frozen.** The randomized round-trip test found that
+  deleting an annotation of a removed page produced an inverse `Add` that could not apply.
+  `DocState` now refuses `Add`, `Remove` and `Set` on annotations whose page is not in the list.
+- `Other` annotations can be deleted but never `Set`, and Ferrix can't create one. Replies
+  (`/IRT`) read as `Other` until phase 4. Popups, widgets and links are not loaded at all; they
+  stay in `/Annots` untouched.
+- **Reading** (`ferrix-annot::read`) never fails on a malformed annotation: missing or invalid
+  geometry, or more than `MAX_STROKES`/`MAX_STROKE_POINTS`, makes it `Other`. Colours accept
+  gray, RGB and CMYK; text strings decode PDFDocEncoding, UTF-16BE and UTF-8.
+- **Writing** (`ferrix-annot::write`): a page is touched only if something on it changed.
+  Its new `/Annots` keeps the original entries in order, minus deleted annotations and their
+  popups, then appends new annotations. Z-order changes to existing annotations are not
+  written yet. Whether an existing annotation changed is decided by re-reading the original and
+  comparing models, so no baseline copy is kept.
+- **`ferrix-pdf::Revision`** replaces the body of `write_page_layout` (now a thin wrapper). It
+  maps imported annotation objects through lopdf's renumbering by pairing each page's `/Annots`
+  references before and after. Without a layout, only pages with changed annotations get a new
+  dictionary. A certified base (`DocMDP` P=1 or 2) makes `write_annotations` fail with
+  `NotAllowed`.
+- **Bug fixed on the way:** `Revision::finish` (and so every page-organization save) verified
+  its output without the document's password, so saves of password-protected files always
+  failed with "output has 0 pages". It now verifies with the password; lopdf re-encrypts the
+  appended objects, which is tested for RC4-128 and AES-128.
+- **Engine:** `PdfEngine::annotations` returns PDFium's view (`AnnotSummary`: subtype and
+  rect). `ferrix annotate add|remove` refuses to write unless PDFium sees exactly the intended
+  subtypes on every page.
+- **Not yet:** `ferrix-compose` is not a dependency yet (it arrives with `FreeText` in phase
+  3); the note icon is the same bubble for every `/Name`; the preview-revision rendering
+  (decision 7) and recovery snapshots (decision 9) land with the app in phase 2.
+- **Edit-model audit (same day)** found four blocking problems, now fixed with regression tests:
+  - A `Set` could change an annotation's type (to `Other`), so its inverse was refused. `Set`
+    now keeps the type.
+  - A failed `Add` left an empty page entry behind.
+  - `Add` moved the id counter, so inverses were not exact. Ids are now reserved with
+    `AnnotSet::new_id` outside the history (like page keys), and `Add` refuses unreserved ids,
+    which also rules out the `u64::MAX` overflow.
+  - Annotations loaded from files were not validated, so undoing a deletion could be refused.
+    Loading now sanitizes them (`Annotation::sanitized`), turning whatever can't be kept into
+    `Other`.
+
+  Validation now also bounds coordinates (±1e6 pt), refuses all-zero dash patterns and invalid
+  icon names, and caps ink at 1 million points. For annotations from the file, the model
+  enforces `Locked` and `LockedContents`, and no edit may change those flags. The randomized
+  test compares the whole state after failed edits and after undoing everything.
+- **For phase 2 recovery:** journal snapshots should identify file annotations by their
+  `Existing` object, not by `AnnotId`, which depends on load order, and should be validated on
+  replay, because a journal is untrusted input.
+- **PDF review (same day)** found three blocking problems, now fixed with tests:
+  - **Broken references in imported files** (`Revision::new`): lopdf renumbers only objects
+    that exist, so a reference to a missing object kept its number and then pointed at an
+    unrelated object, such as the import's catalog. Missing references are turned into `null`
+    before renumbering, as the spec says they read. This also affected page imports before
+    annotations.
+  - **Replies left behind:** deleting a note left replies whose `/IRT` pointed at an
+    annotation no longer on the page. `Annotation::reply_to` records `/IRT`, and
+    `AnnotSet::thread` lists a note with all its replies, which callers delete in one `Batch`.
+    The writer refuses to orphan a reply.
+  - **PDF/A:**
+    - For files claiming PDF/A with a CMYK output intent, appearances are written in
+      DeviceCMYK.
+    - PDF/A-1 files refuse annotations below full opacity, with a message. This replaces
+      decision 8's "write highlights opaque", which would hide the text.
+- **Also from the review:**
+  - Below full opacity, shapes are drawn opaque in an inner transparency-group form, painted at
+    the given opacity. Overlaps (border on fill, crossing ink, arrowheads) no longer come out
+    darker, and PDFium and Poppler now agree. `/CA` stays in the dictionary as well. ISO
+    32000-1 Table 170 says readers ignore it when there is an appearance; it is there for
+    readers that rebuild the appearance.
+  - Lines with leader lines, captions, intents or measurements, and cloudy-bordered shapes,
+    read as `Other`. `/RD` is applied on read, so an edited shape keeps its place.
+  - When the text of a note changes, `/RC` is removed instead of rewritten (this supersedes
+    decision 4's rewrite): Acrobat's XFA-flavoured rich text isn't worth rebuilding. Stale
+    `/ca` and `/BM` are removed or updated, and notes get no `/BS`.
+  - Notes get `NoZoom|NoRotate` from `Annotation::new`, not only from the CLI.
+  - `AnnotSet` records which pages were loaded, so a page that was never read can't lose its
+    annotations.
+  - Reader-extended files (`/Perms /UR3`) count as signed for the warning.
+  - `ferrix_annot::verify` re-reads the output with lopdf and checks each page's subtypes; the
+    CLI then also checks with PDFium.
+- **Still open:** annotations are not added to the structure tree of tagged PDFs (phase 4), so
+  the app should say so when annotating a tagged file.
