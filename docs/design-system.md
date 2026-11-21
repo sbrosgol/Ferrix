@@ -64,16 +64,17 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 ## Components
 
 - **Toolbar, left to right:**
-  - sidebar toggle
-  - document title block: name, plus an "Edited" dot when unsaved
-  - file cluster: New, Open, Save, Print
-  - history cluster: Undo, Redo
-  - centre: the page navigator pill, `‹ [ 3 ] / 12 ›`
-  - zoom pill: `− 125 % ▾ +`
-  - fit toggle
-  - the overflow menu `⋯`: appearance (System / Light / Dark), page setup, about
+  - the macOS window controls' space
+  - sidebar toggle (PDFs only)
+  - document title, with an "Edited" dot when unsaved
+  - centre: the page navigator pill, `‹ [ 3 ] / 12 ›` (PDFs; a written document shows its
+    page in the status bar)
+  - right: history (Undo, Redo); zoom pill `− 125 % ▾ +` with the fit toggles; file (New,
+    Open, Save, Print); then the overflow menu `⋯`
 
-  With no document open, only the sidebar toggle, title and file cluster show.
+  The overflow menu holds Appearance (Match System / Light / Dark) and, for written documents,
+  Page Setup…. With no document open, only the title, New, Open and `⋯` show. Below 980 px,
+  New, Open and Print move into `⋯` (`view::is_compact`).
 - **Icon button:** ghost (background only on hover or press), 30×30, icon 16. When toggled on,
   `accent_soft` background with an `accent` icon. Every icon button has a tooltip of the form
   "Name (shortcut)".

@@ -44,11 +44,24 @@ pub(crate) const THUMB_WIDTH: f32 = 112.0;
 
 pub(crate) type Worker = EngineWorker<PdfiumEngine>;
 
+/// Light, dark, or whatever the operating system uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Appearance {
+pub enum Appearance {
     System,
     Light,
     Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Match System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -272,8 +285,10 @@ pub struct App {
     window: Option<window::Id>,
     pub(crate) window_size: iced::Size,
     scale_factor: f32,
-    appearance: Appearance,
+    pub(crate) appearance: Appearance,
     system_dark: bool,
+    /// The toolbar's overflow menu (`⋯`) is open.
+    pub(crate) menu_open: bool,
     pub(crate) sidebar: bool,
     pub(crate) zoom: Zoom,
     pub(crate) doc: Option<Document>,
@@ -331,6 +346,8 @@ pub enum Message {
     FitPage,
     ToggleSidebar,
     ToggleTheme,
+    ToggleMenu,
+    SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
     Measured(DocId, Result<Vec<Size>, String>),
     Rendered(DocId, PageKey, Rotation, f32, Result<Rendered, String>),
@@ -425,6 +442,7 @@ impl App {
             scale_factor: 1.0,
             appearance: Appearance::System,
             system_dark: false,
+            menu_open: false,
             sidebar: true,
             zoom: Zoom::Auto,
             doc: None,
@@ -512,7 +530,10 @@ impl App {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::OpenDialog => return self.guard(Proceed::OpenDialog),
+            Message::OpenDialog => {
+                self.menu_open = false;
+                return self.guard(Proceed::OpenDialog);
+            }
             Message::Open(path) => return self.guard(Proceed::Open(path)),
             Message::DialogClosed => {}
             Message::Opened(origin, Ok(info)) => return self.opened(origin, info),
@@ -560,6 +581,11 @@ impl App {
                 } else {
                     Appearance::Dark
                 };
+            }
+            Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::SetAppearance(appearance) => {
+                self.appearance = appearance;
+                self.menu_open = false;
             }
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Measured(doc_id, result) => {
@@ -645,7 +671,10 @@ impl App {
                 self.error = None;
                 self.notice = None;
             }
-            Message::Print => return self.print(),
+            Message::Print => {
+                self.menu_open = false;
+                return self.print();
+            }
             Message::PrintReady(Ok(path)) => {
                 self.busy = None;
                 return self.print_file(path);
@@ -863,6 +892,7 @@ impl App {
                     Choice::Cancel => {}
                 }
             }
+            Message::Escape if self.menu_open => self.menu_open = false,
             Message::Escape => {
                 if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
                     self.find = None;
@@ -890,7 +920,10 @@ impl App {
                 self.busy = None;
                 self.error = Some(format!("Couldn’t convert “{}”: {e}", file_name(&source)));
             }
-            Message::NewDialog => return self.guard(Proceed::NewDialog),
+            Message::NewDialog => {
+                self.menu_open = false;
+                return self.guard(Proceed::NewDialog);
+            }
             Message::NewPaper(paper) => {
                 if let Some(form) = &mut self.new_form {
                     form.paper = paper;
@@ -1024,6 +1057,7 @@ impl App {
                 self.error = Some(format!("Couldn’t save: {e}"));
             }
             Message::PageSetupDialog => {
+                self.menu_open = false;
                 if let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) {
                     let doc = w.editor.document();
                     let page = doc.page;

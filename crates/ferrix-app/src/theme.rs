@@ -18,10 +18,14 @@ pub struct Tokens {
     pub canvas: Color,
     /// Raised surfaces: inputs, menus, cards.
     pub surface: Color,
+    /// Grouped controls (pills) set into the chrome.
+    pub surface_sunken: Color,
     pub border: Color,
     pub border_strong: Color,
     pub text: Color,
     pub text_muted: Color,
+    /// Disabled text and placeholders.
+    pub text_faint: Color,
     pub hover: Color,
     pub pressed: Color,
     pub accent: Color,
@@ -33,31 +37,36 @@ pub struct Tokens {
 }
 
 pub const LIGHT: Tokens = Tokens {
-    chrome: rgb(0xF6F7F9),
-    canvas: rgb(0xE6E8EC),
+    chrome: rgb(0xF7F7F8),
+    canvas: rgb(0xE8E9EC),
     surface: rgb(0xFFFFFF),
-    border: rgb(0xDADDE2),
-    border_strong: rgb(0xC3C8D0),
-    text: rgb(0x1C1F24),
-    text_muted: rgb(0x656B75),
+    surface_sunken: rgba(0x000000, 0.045),
+    border: rgb(0xDEDFE3),
+    border_strong: rgb(0xC4C7CE),
+    text: rgb(0x1B1D21),
+    text_muted: rgb(0x60656E),
+    text_faint: rgb(0xA3A7AF),
     hover: rgba(0x000000, 0.055),
     pressed: rgba(0x000000, 0.10),
-    accent: rgb(0x3D6AF2),
-    accent_hover: rgb(0x5580F7),
+    // 4.9:1 on white, so accent text and icons pass WCAG AA.
+    accent: rgb(0x3563E9),
+    accent_hover: rgb(0x4A74EE),
     on_accent: rgb(0xFFFFFF),
-    accent_soft: rgba(0x3D6AF2, 0.13),
+    accent_soft: rgba(0x3563E9, 0.12),
     danger: rgb(0xD23B3B),
     page_shadow: rgba(0x0B1424, 0.20),
 };
 
 pub const DARK: Tokens = Tokens {
-    chrome: rgb(0x1E2023),
-    canvas: rgb(0x131416),
-    surface: rgb(0x2A2D32),
-    border: rgb(0x33363C),
-    border_strong: rgb(0x474B53),
-    text: rgb(0xE6E8EB),
-    text_muted: rgb(0x9AA0A9),
+    chrome: rgb(0x1F2023),
+    canvas: rgb(0x141517),
+    surface: rgb(0x2A2C30),
+    surface_sunken: rgba(0xFFFFFF, 0.06),
+    border: rgb(0x34363B),
+    border_strong: rgb(0x4A4D55),
+    text: rgb(0xE8E9EC),
+    text_muted: rgb(0x9CA1AA),
+    text_faint: rgb(0x62666E),
     hover: rgba(0xFFFFFF, 0.07),
     pressed: rgba(0xFFFFFF, 0.12),
     accent: rgb(0x5B7CFA),
@@ -68,7 +77,12 @@ pub const DARK: Tokens = Tokens {
     page_shadow: rgba(0x000000, 0.55),
 };
 
+/// Controls.
 pub const RADIUS: f32 = 6.0;
+/// Groups of controls and menus.
+pub const RADIUS_GROUP: f32 = 8.0;
+/// Dialogs.
+pub const RADIUS_DIALOG: f32 = 12.0;
 
 const fn rgb(hex: u32) -> Color {
     rgba(hex, 1.0)
@@ -152,21 +166,68 @@ pub fn page(theme: &Theme) -> container::Style {
     }
 }
 
-/// The frame around a sidebar thumbnail; a solid accent ring marks the current page.
+/// A thumbnail's paper: white with a hairline edge, so white pages stand out from the sidebar.
+pub fn thumbnail_paper(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::WHITE)),
+        border: border(tokens(theme).border_strong, 1.0, 2.0),
+        ..container::Style::default()
+    }
+}
+
+/// The frame around a sidebar thumbnail: a hairline normally, an accent ring when selected.
 pub fn thumbnail_ring(theme: &Theme, selected: bool) -> container::Style {
     let t = tokens(theme);
     container::Style {
-        background: selected.then_some(Background::Color(t.accent_soft)),
-        border: border(
-            if selected {
-                t.accent
-            } else {
-                Color::TRANSPARENT
-            },
-            2.0,
-            5.0,
-        ),
+        border: if selected {
+            border(t.accent, 2.0, 6.0)
+        } else {
+            border(Color::TRANSPARENT, 2.0, 6.0)
+        },
         ..container::Style::default()
+    }
+}
+
+/// A thumbnail's page number: an accent pill for the current page, plain otherwise.
+pub fn page_badge(theme: &Theme, current: bool) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: current.then_some(Background::Color(t.accent)),
+        text_color: Some(if current { t.on_accent } else { t.text_muted }),
+        border: border(Color::TRANSPARENT, 0.0, 9.0),
+        ..container::Style::default()
+    }
+}
+
+/// Related controls grouped on one sunken, rounded surface (page navigator, zoom).
+pub fn pill(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(tokens(theme).surface_sunken)),
+        border: border(Color::TRANSPARENT, 0.0, RADIUS_GROUP),
+        ..container::Style::default()
+    }
+}
+
+/// A popover menu, e.g. the toolbar's overflow menu.
+pub fn popover(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(Background::Color(t.surface)),
+        text_color: Some(t.text),
+        border: border(t.border, 1.0, 10.0),
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.18),
+            offset: Vector::new(0.0, 6.0),
+            blur_radius: 20.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Section headings inside menus and the sidebar.
+pub fn overline(theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(tokens(theme).text_muted),
     }
 }
 
@@ -211,7 +272,7 @@ pub fn card(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(t.surface)),
         text_color: Some(t.text),
-        border: border(t.border, 1.0, 10.0),
+        border: border(t.border, 1.0, RADIUS_DIALOG),
         shadow: Shadow {
             color: Color::BLACK.scale_alpha(0.25),
             offset: Vector::new(0.0, 8.0),
@@ -233,6 +294,23 @@ pub fn kbd(theme: &Theme) -> container::Style {
 
 // ── Buttons ───────────────────────────────────────────────────────────────────
 
+/// A row in a popover menu; `checked` rows show the accent text of the current choice.
+pub fn menu_item(checked: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let t = tokens(theme);
+        let background = match status {
+            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(t.hover)),
+            _ => None,
+        };
+        button::Style {
+            background,
+            text_color: if checked { t.accent } else { t.text },
+            border: border(Color::TRANSPARENT, 0.0, RADIUS),
+            ..button::Style::default()
+        }
+    }
+}
+
 /// Borderless toolbar button that only shows a background on hover/press.
 pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
@@ -244,7 +322,7 @@ pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background,
         text_color: if status == button::Status::Disabled {
-            t.text_muted.scale_alpha(0.5)
+            t.text_faint
         } else {
             t.text
         },
@@ -318,7 +396,7 @@ pub fn icon_for(
     move |theme, _| {
         let t = tokens(theme);
         let color = match (status, active) {
-            (button::Status::Disabled, _) => t.text_muted.scale_alpha(0.45),
+            (button::Status::Disabled, _) => t.text_faint,
             (_, true) => t.accent,
             _ => t.text,
         };
@@ -345,7 +423,7 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
         background: Background::Color(t.surface),
         border: border(border_color, 1.0, RADIUS),
         icon: t.text_muted,
-        placeholder: t.text_muted,
+        placeholder: t.text_faint,
         value: t.text,
         selection: t.accent_soft.scale_alpha(1.8),
     }
@@ -360,10 +438,26 @@ pub fn select(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
     };
     pick_list::Style {
         text_color: t.text,
-        placeholder_color: t.text_muted,
+        placeholder_color: t.text_faint,
         handle_color: t.text_muted,
         background: Background::Color(t.surface),
         border: border(border_color, 1.0, RADIUS),
+    }
+}
+
+/// A select without its own box, for use inside a [`pill`].
+pub fn select_flat(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let t = tokens(theme);
+    let background = match status {
+        pick_list::Status::Hovered | pick_list::Status::Opened { .. } => t.hover,
+        pick_list::Status::Active => Color::TRANSPARENT,
+    };
+    pick_list::Style {
+        text_color: t.text,
+        placeholder_color: t.text_faint,
+        handle_color: t.text_muted,
+        background: Background::Color(background),
+        border: border(Color::TRANSPARENT, 0.0, RADIUS),
     }
 }
 
@@ -371,10 +465,11 @@ pub fn select_menu(theme: &Theme) -> menu::Style {
     let t = tokens(theme);
     menu::Style {
         background: Background::Color(t.surface),
-        border: border(t.border, 1.0, RADIUS),
+        border: border(t.border, 1.0, RADIUS_GROUP),
         text_color: t.text,
-        selected_text_color: t.on_accent,
-        selected_background: Background::Color(t.accent),
+        // A soft highlight reads as "current" without shouting like a solid accent block.
+        selected_text_color: t.text,
+        selected_background: Background::Color(t.accent_soft),
         shadow: Shadow {
             color: Color::BLACK.scale_alpha(0.18),
             offset: Vector::new(0.0, 4.0),

@@ -1,7 +1,7 @@
 //! Renders the app headlessly to a PNG, for reviewing UI changes without a display.
 //!
 //! ```sh
-//! cargo run -p ferrix-app --example screenshot -- out.png [document] [--dark] [--new]
+//! cargo run -p ferrix-app --example screenshot -- out.png [document] [--dark] [--new] [--menu]
 //! ```
 //!
 //! `--write` starts a written document and types formatted text into it; `--fit-page` and
@@ -56,6 +56,9 @@ fn main() {
     }
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
+    }
+    if flag(&mut args, "--menu") {
+        script.push(Message::ToggleMenu);
     }
     if flag(&mut args, "--zoom-in") {
         script.extend([Message::ZoomIn, Message::ZoomIn, Message::ZoomIn]);

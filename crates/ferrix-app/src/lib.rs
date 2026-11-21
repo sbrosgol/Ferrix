@@ -17,7 +17,7 @@ mod writer_canvas;
 
 use std::path::PathBuf;
 
-pub use app::{App, Message, Recovery};
+pub use app::{App, Appearance, Message, Recovery};
 pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};
