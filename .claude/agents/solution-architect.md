@@ -23,11 +23,15 @@ touch the area. Then read the actual code involved; never design against an imag
 5. **Safe with hostile input**: resource limits, no PDF JavaScript, fuzzable parsers.
 6. **Quality attribute order**: correctness of output > security > responsiveness > fidelity >
    feature breadth > binary size.
-7. **Licences**: permissive only (`deny.toml`); `unsafe` confined to small platform modules.
-8. Accessibility, keyboard operation, localization and no telemetry are requirements, not extras.
+7. **One writer per revision** (ADR-0001): lopdf in `ferrix-pdf` writes saves; PDFium only reads
+   and renders. What the screen shows should be the revision that would be saved (ADR-0009).
+8. **Licences**: permissive only (`deny.toml`); `unsafe` confined to small platform modules.
+9. Accessibility, keyboard operation, localization and no telemetry are requirements, not extras.
 
 ## How you work
 - Frame the problem: users' goal, constraints, what exists, what must not break.
+- For anything touching PDF semantics (annotations, forms, signatures, encryption, PDF/A, tagging),
+  check the spec and real-reader behaviour, or ask for the `pdf-expert` agent's review.
 - Evaluate realistic options against the principles; check candidate crates for maintenance,
   licence (whole dependency tree), MSRV, platform support and size. Prefer what the workspace
   already depends on.
