@@ -253,8 +253,12 @@ fn outline_level(
 
 fn page_transform(page: &PdfPage<'_>) -> Result<(PageTransform, Rotation), EngineError> {
     let boundaries = page.boundaries();
+    // `bounding()` is the visible area (crop box clipped to the media box) with inheritance from
+    // the page tree resolved. `crop()` and `media()` read only the page's own dictionary, so they
+    // fail for the many files that put `/MediaBox` on the root; keep them as fallbacks only.
     let crop = boundaries
-        .crop()
+        .bounding()
+        .or_else(|_| boundaries.crop())
         .or_else(|_| boundaries.media())
         .map_err(backend)?;
     let rotation = match page.rotation().map_err(backend)? {
