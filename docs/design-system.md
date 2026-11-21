@@ -74,7 +74,8 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 - **Toolbar, left to right:**
   - the macOS window controls' space
   - sidebar toggle (PDFs only)
-  - document title, with an "Edited" dot when unsaved, then Undo and Redo
+  - Undo and Redo, then the document title with an "Edited" dot when unsaved. The title takes
+    the room left and clips, so it can never push buttons out of a narrow window
   - centre: the page navigator pill, `‹ [ 3 ] / 12 ›` (PDFs; a written document shows its
     page in the status bar)
   - right: the zoom pill `− 125 % ▾ +` with fit-width and fit-page inside it; file (New,

@@ -279,3 +279,49 @@ The constraints:
     CLI then also checks with PDFium.
 - **Still open:** annotations are not added to the structure tree of tagged PDFs (phase 4), so
   the app should say so when annotating a tagged file.
+
+## Implementation notes (phase 2, app editing, 2026-11-21)
+- **One model:** the app's `Document` holds a `DocState` and a `History<DocState>`, so page and
+  annotation edits share one undo history. `DocEdit` converts from `Edit` and `AnnotEdit`.
+- **Loading:** annotations, the document's policy (`DocMDP` permission; tagged or not), page
+  transforms (`ferrix_pdf::page_transforms`) and the file's bytes are read in the background
+  on open and when pages are inserted.
+- **Saving:** one revision with the page layout (only if pages changed) and the annotation
+  changes, verified with `ferrix_annot::verify`, then with PDFium. Tested in
+  `export_writes_annotations_with_page_edits_in_one_revision`.
+- **Preview (decision 7):** after an edit, undo or redo that changes annotations, the
+  document's own pages are written as an annotation-only update (`write_page_annotations`), and
+  PDFium reopens the result. Each rendered image and thumbnail remembers the engine document it
+  came from, so a new preview re-renders without blanking, and late results are re-rendered.
+  Previews are discarded by generation. The base bytes are kept in memory rather than the
+  parsed document; reparsing per edit is fast enough for now and can be cached later.
+- **Recovery:** the journal records the whole annotation set, including an empty set of loaded
+  pages, which means "all deleted". On replay it is validated (`AnnotSet::check`).
+  - **Bug fixed** (reported by the maintainer): recovered annotation edits weren't shown until
+    the next edit, because loading the file marked the screen as matching the model.
+    `Document::adopt_annotations` now asks for a preview when recovered pages exist.
+  - The journal also skipped empty sets, so deleting every annotation was lost after a crash.
+  - Both have regression tests.
+- **Markup mode** (`markup.rs` logic with unit tests, `annotate_ui.rs` updates,
+  `markup_canvas.rs` page overlay, `view_markup.rs` views):
+  - ⇧⌘A or the toolbar toggle, and tool letters V N P R O L A.
+  - Seven-colour palette, 1/2/4/8 pt widths, opacity.
+  - Select, move and resize (8 handles; line ends).
+  - Shift constrains, Alt draws from the centre.
+  - Pen strokes within 1 s join one ink annotation; other tools return to Select after one use.
+  - Delete removes the selection with its replies (`AnnotSet::thread`).
+  - Esc cancels a drag, then returns to Select, then deselects.
+  - Note editor anchored to the note.
+  - Sidebar Pages | Comments switch.
+  - The signed-document dialog (once per document), the certified strip, and the tagged-PDF
+    notice.
+  - `AnnotMsg::PointerAt` lets scripts draw (`--markup` screenshot flag).
+- **Open items from the design spec:**
+  - Tab cycling through annotations; arrow-key nudging.
+  - Keyboard navigation of the Comments list.
+  - Disabling opacity in PDF/A-1 files; saving refuses it with a message.
+  - An "Author name" preference (ADR-0005).
+  - Dates and reply counts in the list.
+  - Annotating pages inserted from another file before saving (refused with a notice, because
+    previews cover the document's own pages only).
+  - Replies shown in the note editor.

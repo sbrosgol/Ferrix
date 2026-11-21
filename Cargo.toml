@@ -29,7 +29,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 cosmic-text = { version = "0.15.0", default-features = false, features = ["std", "swash"] }
 unicode-segmentation = "1.13.3"
 flate2 = "1.1.11"
-iced = { version = "0.14.0", features = ["advanced", "image", "svg", "tokio"] }
+iced = { version = "0.14.0", features = ["advanced", "canvas", "image", "svg", "tokio"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
 lopdf = { version = "=0.46.0", default-features = false }

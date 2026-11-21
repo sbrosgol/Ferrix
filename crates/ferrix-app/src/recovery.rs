@@ -124,7 +124,9 @@ impl Journal {
             self.sources_recorded += 1;
         }
         self.write(&Record::Pages(doc.state.pages.clone()))?;
-        if !doc.state.annots.is_empty() {
+        // Also when empty: an empty set of loaded pages records that everything was deleted,
+        // where no record would bring the file's annotations back on recovery.
+        if !doc.state.annots.is_empty() || doc.state.annots.has_loaded() {
             self.write(&Record::Annotations(doc.state.annots.clone()))?;
         }
         Ok(())
@@ -512,6 +514,44 @@ mod tests {
             .expect("list")
             .collect();
         assert!(left.is_empty(), "discard removes the journal and its blobs");
+    }
+
+    /// Deleting every annotation is unsaved work too: the journal must say so, or recovery
+    /// would read the file's annotations again.
+    #[test]
+    fn deleting_every_annotation_survives_a_crash() {
+        let dir = scratch("annots");
+        let mut doc = edited_document(&dir);
+        let page = doc.key_at(0).expect("page");
+        let mut square = ferrix_core::Annotation::new(
+            ferrix_core::AnnotKind::Square,
+            ferrix_types::PdfBox::default(),
+        );
+        square.origin = ferrix_core::AnnotOrigin::Existing {
+            source: SourceId::BASE,
+            object: ferrix_core::ObjectRef {
+                number: 12,
+                generation: 0,
+            },
+        };
+        let id = doc.state.annots.insert_loaded(page, [square])[0];
+        doc.edit(
+            ferrix_core::AnnotEdit::Remove { id },
+            "Delete Annotation".into(),
+        )
+        .expect("delete");
+        assert!(doc.state.annots.is_empty());
+
+        let mut journal = Journal::start_in(dir.join("recovery"), &doc).expect("start");
+        journal.record(&doc).expect("record");
+        drop(journal);
+
+        let found = scan_in(&dir.join("recovery"));
+        let annots = found[0].annots.as_ref().expect("annotations journaled");
+        assert!(
+            annots.is_empty() && annots.is_loaded(page),
+            "the deletion is kept"
+        );
     }
 
     #[test]

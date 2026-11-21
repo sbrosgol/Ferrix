@@ -353,6 +353,22 @@ pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The chosen segment of a segmented switch: a raised surface within a pill.
+pub fn segment_active(theme: &Theme, _status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    button::Style {
+        background: Some(Background::Color(t.surface)),
+        text_color: t.text,
+        border: border(t.border, 1.0, RADIUS),
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.08),
+            offset: Vector::new(0.0, 1.0),
+            blur_radius: 2.0,
+        },
+        ..button::Style::default()
+    }
+}
+
 /// A ghost button that is currently switched on (e.g. sidebar shown, fit-width active).
 pub fn ghost_active(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

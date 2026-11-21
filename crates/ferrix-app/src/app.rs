@@ -289,6 +289,13 @@ pub struct App {
     system_dark: bool,
     /// The toolbar's overflow menu (`⋯`) is open.
     pub(crate) menu_open: bool,
+    /// Markup mode (annotation tools), while on.
+    pub(crate) markup: Option<crate::markup::Markup>,
+    /// The note whose text is being edited.
+    pub(crate) note: Option<crate::annotate_ui::NoteEditor>,
+    /// Asking whether to annotate a signed document.
+    pub(crate) signed_prompt: bool,
+    pub(crate) sidebar_tab: crate::annotate_ui::SidebarTab,
     pub(crate) sidebar: bool,
     pub(crate) zoom: Zoom,
     pub(crate) doc: Option<Document>,
@@ -302,7 +309,7 @@ pub struct App {
     after_save: Option<Proceed>,
     /// Page to return to when a document is reopened after saving.
     reopen_at: Option<usize>,
-    modifiers: keyboard::Modifiers,
+    pub(crate) modifiers: keyboard::Modifiers,
     /// Installed conversion tools, detected in the background at startup.
     pub(crate) converter: Option<Arc<Converter>>,
     /// The New Document dialog, while open.
@@ -347,6 +354,8 @@ pub enum Message {
     ToggleSidebar,
     ToggleTheme,
     ToggleMenu,
+    Annot(crate::annotate_ui::AnnotMsg),
+    SidebarTab(crate::annotate_ui::SidebarTab),
     SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
     Measured(DocId, Result<Vec<Size>, String>),
@@ -466,6 +475,10 @@ impl App {
             appearance: Appearance::System,
             system_dark: false,
             menu_open: false,
+            markup: None,
+            note: None,
+            signed_prompt: false,
+            sidebar_tab: crate::annotate_ui::SidebarTab::Pages,
             sidebar: true,
             zoom: Zoom::Auto,
             doc: None,
@@ -606,6 +619,11 @@ impl App {
                 };
             }
             Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::Annot(msg) => return self.annot_update(msg),
+            Message::SidebarTab(tab) => {
+                self.sidebar_tab = tab;
+                self.sidebar = true;
+            }
             Message::SetAppearance(appearance) => {
                 self.appearance = appearance;
                 self.menu_open = false;
@@ -756,6 +774,10 @@ impl App {
                 let keys = doc.targets();
                 let label = pages_label("Rotate", keys.len());
                 return self.apply(Edit::Rotate { keys, by }, label);
+            }
+            // With an annotation selected in Markup mode, Delete removes it, never the page.
+            Message::Delete if self.markup.as_ref().is_some_and(|m| m.selected.is_some()) => {
+                return self.delete_selected();
             }
             Message::Delete => {
                 let Some(doc) = self.editable() else {
@@ -928,37 +950,9 @@ impl App {
                 }
                 match result {
                     Ok(loaded) => {
-                        let entries: Vec<_> = doc
-                            .state
-                            .pages
-                            .entries()
-                            .iter()
-                            .filter(|e| e.source == source)
-                            .copied()
-                            .collect();
-                        for entry in entries {
-                            // Pages already holding recovered annotations keep them.
-                            if !doc.state.annots.is_loaded(entry.key) {
-                                let list = loaded
-                                    .pages
-                                    .get(entry.page.0 as usize)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                doc.state.annots.insert_loaded(entry.key, list);
-                            }
+                        if doc.adopt_annotations(source, loaded) {
+                            return self.refresh_preview();
                         }
-                        if let Some(s) = doc.sources.get_mut(source.0 as usize) {
-                            s.transforms = loaded.transforms;
-                        }
-                        if source == ferrix_core::SourceId::BASE {
-                            doc.annot_policy = Some(loaded.policy);
-                            doc.base_bytes = Some(loaded.bytes);
-                        }
-                        // What the file shows. Recovered changes need a preview right away.
-                        if doc.previewed.is_empty() {
-                            doc.previewed = doc.state.annots.clone();
-                        }
-                        return self.refresh_preview();
                     }
                     // Viewing still works; editing annotations stays off for this document.
                     Err(e) => tracing::warn!("couldn’t read annotations: {e}"),
@@ -1008,6 +1002,26 @@ impl App {
                 }
             }
             Message::Escape if self.menu_open => self.menu_open = false,
+            Message::Escape if self.signed_prompt => self.signed_prompt = false,
+            Message::Escape if self.note.is_some() => return self.close_note(),
+            // In Markup mode, Esc cancels a drag, then returns to Select, then deselects.
+            Message::Escape
+                if self.markup.as_ref().is_some_and(|m| {
+                    m.gesture.is_some()
+                        || m.tool != crate::markup::Tool::Select
+                        || m.selected.is_some()
+                }) =>
+            {
+                if let Some(m) = self.markup.as_mut()
+                    && m.gesture.take().is_none()
+                {
+                    if m.tool == crate::markup::Tool::Select {
+                        m.selected = None;
+                    } else {
+                        m.tool = crate::markup::Tool::Select;
+                    }
+                }
+            }
             Message::Escape => {
                 if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
                     self.find = None;
@@ -1645,6 +1659,9 @@ impl App {
         }
         self.page_setup = None;
         self.find = None;
+        self.markup = None;
+        self.note = None;
+        self.signed_prompt = false;
         if let Some(writer) = self.writer.take() {
             self.fonts = Some(writer.editor.into_fonts());
         }
@@ -1686,7 +1703,7 @@ impl App {
         }
     }
 
-    fn after_edit(&mut self) -> Task<Message> {
+    pub(crate) fn after_edit(&mut self) -> Task<Message> {
         self.sync_journal();
         self.sync_page_input();
         Task::batch([self.render(), self.next_thumbnail(), self.refresh_preview()])
@@ -2167,8 +2184,17 @@ impl App {
     // ── Navigation and rendering ──────────────────────────────────────────────
 
     /// Logical size available to a page inside the canvas.
+    /// The window minus the Markup bar while it shows, for page-layout sums.
+    fn view_window(&self) -> iced::Size {
+        let mut size = self.window_size;
+        if self.markup.is_some() {
+            size.height -= crate::view::BAR_HEIGHT + 1.0;
+        }
+        size
+    }
+
     pub(crate) fn canvas_size(&self) -> iced::Size {
-        crate::view::canvas_size(self.window_size, self.sidebar && self.doc.is_some())
+        crate::view::canvas_size(self.view_window(), self.sidebar && self.doc.is_some())
     }
 
     fn sync_page_input(&mut self) {
@@ -2216,7 +2242,7 @@ impl App {
         self.set_zoom(Zoom::Fixed(next))
     }
 
-    fn rerender_if_fitting(&mut self) -> Task<Message> {
+    pub(crate) fn rerender_if_fitting(&mut self) -> Task<Message> {
         // A fixed zoom keeps the layout, but a different window shows different pages.
         match self.zoom {
             Zoom::Fixed(_) => self.render_pages(),
@@ -2226,7 +2252,7 @@ impl App {
 
     /// Height of the scrolled page view, in logical pixels.
     fn viewport_height(&self) -> f32 {
-        crate::view::page_view_height(self.window_size)
+        crate::view::page_view_height(self.view_window())
     }
 
     fn step_page(&mut self, delta: isize) -> Task<Message> {
@@ -2237,7 +2263,7 @@ impl App {
         self.go_to(target)
     }
 
-    fn go_to(&mut self, index: usize) -> Task<Message> {
+    pub(crate) fn go_to(&mut self, index: usize) -> Task<Message> {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
@@ -2588,9 +2614,15 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         Key::Named(Named::End) => Some(Message::Last),
         Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         Key::Named(Named::Escape) => Some(Message::Escape),
+        // Tool letters; ignored unless Markup mode is on.
+        Key::Character(c) if !modifiers.command() && !modifiers.alt() && !modifiers.control() => {
+            crate::markup::Tool::from_key(&c.to_ascii_lowercase())
+                .map(|t| Message::Annot(crate::annotate_ui::AnnotMsg::Tool(t)))
+        }
         Key::Character(c) if modifiers.command() => {
             let shift = modifiers.shift();
             match c.to_ascii_lowercase().as_str() {
+                "a" if shift => Some(Message::Annot(crate::annotate_ui::AnnotMsg::Toggle)),
                 "o" => Some(Message::OpenDialog),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),

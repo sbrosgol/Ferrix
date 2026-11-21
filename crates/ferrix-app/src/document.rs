@@ -165,6 +165,10 @@ pub(crate) struct Document {
     pub(crate) previewed: AnnotSet,
     /// Increments per preview request; older results are discarded.
     pub(crate) preview_gen: u64,
+    /// The user agreed to annotate this signed document (asked once per document).
+    pub(crate) annotate_confirmed: bool,
+    /// The tagged-PDF notice was shown.
+    pub(crate) tagged_noted: bool,
 }
 
 impl Document {
@@ -192,6 +196,8 @@ impl Document {
             base_bytes: None,
             previewed: AnnotSet::new(),
             preview_gen: 0,
+            annotate_confirmed: false,
+            tagged_noted: false,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -423,8 +429,62 @@ impl Document {
             .collect()
     }
 
+    /// Takes in a source's annotations as read from its file. Pages that already hold
+    /// annotations (recovered after a crash) keep them. Returns whether the screen, which shows
+    /// the file, may now differ from the model and needs a preview (ADR-0009 §7).
+    pub(crate) fn adopt_annotations(
+        &mut self,
+        source: ferrix_core::SourceId,
+        loaded: crate::annotate::Loaded,
+    ) -> bool {
+        let entries: Vec<PageEntry> = self
+            .state
+            .pages
+            .entries()
+            .iter()
+            .filter(|e| e.source == source)
+            .copied()
+            .collect();
+        let mut recovered = false;
+        for entry in entries {
+            if self.state.annots.is_loaded(entry.key) {
+                recovered = true;
+            } else {
+                let list = loaded
+                    .pages
+                    .get(entry.page.0 as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                self.state.annots.insert_loaded(entry.key, list);
+            }
+        }
+        if let Some(s) = self.sources.get_mut(source.0 as usize) {
+            s.transforms = loaded.transforms;
+        }
+        if source == ferrix_core::SourceId::BASE {
+            self.annot_policy = Some(loaded.policy);
+            self.base_bytes = Some(loaded.bytes);
+        }
+        if recovered {
+            // The screen shows the file, not the recovered edits. An empty `previewed` never
+            // equals them, so a preview is built; it comes out empty if nothing differs.
+            self.previewed = AnnotSet::new();
+            true
+        } else {
+            // Nothing edited yet: the screen (the file) matches the model.
+            self.previewed = self.state.annots.clone();
+            false
+        }
+    }
+
+    /// Every engine document this document holds open: its sources, the original as well as an
+    /// annotation preview standing in for it.
     pub(crate) fn engine_docs(&self) -> Vec<DocId> {
-        self.sources.iter().map(|s| s.doc).collect()
+        let mut ids: Vec<DocId> = self.sources.iter().map(|s| s.doc).collect();
+        if !ids.contains(&self.info.id) {
+            ids.push(self.info.id);
+        }
+        ids
     }
 }
 
@@ -470,6 +530,56 @@ mod tests {
                 metadata: DocMetadata::default(),
             },
         )
+    }
+
+    fn loaded(pages: usize) -> crate::annotate::Loaded {
+        crate::annotate::Loaded {
+            pages: vec![
+                vec![ferrix_core::Annotation::new(
+                    ferrix_core::AnnotKind::Square,
+                    ferrix_types::PdfBox::default(),
+                )];
+                pages
+            ],
+            policy: crate::annotate::Policy {
+                permission: ferrix_annot::Permission::Allowed,
+                tagged: false,
+            },
+            transforms: Vec::new(),
+            bytes: std::sync::Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_freshly_opened_document_shows_its_annotations_without_a_preview() {
+        let mut doc = document(2);
+        assert!(!doc.adopt_annotations(ferrix_core::SourceId::BASE, loaded(2)));
+        assert_eq!(doc.state.annots.len(), 2);
+        assert_eq!(doc.previewed, doc.state.annots);
+    }
+
+    /// Regression: recovered annotation edits weren't shown until the next edit, because the
+    /// screen (the file) was taken to match the recovered model.
+    #[test]
+    fn recovered_annotations_need_a_preview_once_the_file_is_read() {
+        let fresh = document(2);
+        let mut annots = AnnotSet::new();
+        let first = fresh.key_at(0).expect("page");
+        annots.insert_loaded(first, []); // everything on page 1 was deleted before the crash
+        let mut doc = Document::recovered(
+            fresh.origin.clone(),
+            fresh.info.clone(),
+            Vec::new(),
+            fresh.state.pages.clone(),
+            Some(annots),
+        );
+        assert!(doc.adopt_annotations(ferrix_core::SourceId::BASE, loaded(2)));
+        assert_eq!(
+            doc.state.annots.page(first).len(),
+            0,
+            "the recovered page keeps its (deleted) state"
+        );
+        assert_ne!(doc.previewed, doc.state.annots, "a preview is due");
     }
 
     #[test]

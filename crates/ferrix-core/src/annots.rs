@@ -553,6 +553,12 @@ impl AnnotSet {
         Ok(())
     }
 
+    /// Whether any page's annotations were read from the file. A set can be empty yet still
+    /// mean something: "every annotation of these pages was deleted".
+    pub fn has_loaded(&self) -> bool {
+        !self.loaded.is_empty()
+    }
+
     /// Whether `page`'s annotations were read from the file (see [`Self::insert_loaded`]).
     pub fn is_loaded(&self, page: PageKey) -> bool {
         self.loaded.contains(&page)
