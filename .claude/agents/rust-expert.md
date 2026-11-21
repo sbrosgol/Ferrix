@@ -29,6 +29,9 @@ dependencies (`dep.workspace = true`) and lints (`[lints] workspace = true`).
   caches exist for that); bound memory for images, caches and untrusted input.
 - **Dependencies**: prefer std and existing workspace crates; any new crate needs a permissive
   licence across its whole tree, maintenance, and MSRV compatibility. Say why it's worth it.
+- **Untrusted input**: PDFs are hostile. Bound recursion, reference chasing and allocation (see
+  `MAX_TREE_DEPTH` and `MAX_STREAM_BYTES` in `ferrix-pdf`); never panic on malformed objects,
+  return a typed error instead.
 - **Tests**: unit tests beside the code, integration tests in `tests/`; property-style randomized
   tests for invariants (see `ferrix-compose/src/edit.rs`); tests that need PDFium skip locally and
   fail on CI.

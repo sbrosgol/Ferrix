@@ -4,9 +4,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use ferrix_core::{
+    AnnotEdit, AnnotKind, AnnotSet, Annotation, DocEdit, DocState, LineEnd, NoteIcon, PageKey,
+    PageList, Rgb, SourceId,
+};
 use ferrix_engine::{DocInfo, DocSource, OutlineItem, PdfEngine, RenderFlags, Secret, TileRequest};
 use ferrix_engine_pdfium::PdfiumEngine;
-use ferrix_types::{DocId, PageIndex, PixelRect, Rotation};
+use ferrix_types::{DocId, PageIndex, PdfBox, PdfPoint, PixelRect, Rotation};
 use image::RgbaImage;
 
 /// Tiles are rendered at most this large and stitched, exercising the same path as the viewer.
@@ -93,6 +97,98 @@ enum Command {
         /// PDF file.
         file: PathBuf,
     },
+    /// List, add or remove annotations. Coordinates are PDF points from the page's
+    /// bottom-left corner, as stored in the file (unrotated).
+    Annotate {
+        #[command(subcommand)]
+        action: AnnotateAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant, reason = "parsed once at startup")]
+enum AnnotateAction {
+    /// List the annotations of every page.
+    List {
+        #[command(flatten)]
+        doc: DocArgs,
+    },
+    /// Write a copy with one annotation added.
+    Add {
+        #[command(flatten)]
+        doc: DocArgs,
+        #[command(flatten)]
+        annot: AnnotArgs,
+        /// Output file; the input is never modified.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Write a copy with one annotation removed.
+    Remove {
+        #[command(flatten)]
+        doc: DocArgs,
+        /// Page number (1-based).
+        #[arg(long)]
+        page: u32,
+        /// Annotation number on that page, as `list` shows it (1-based).
+        #[arg(long)]
+        index: usize,
+        /// Output file; the input is never modified.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AnnotKindArg {
+    Note,
+    Square,
+    Circle,
+    Line,
+    Arrow,
+    Ink,
+}
+
+#[derive(Debug, Args)]
+struct AnnotArgs {
+    /// Page number (1-based).
+    #[arg(long)]
+    page: u32,
+    #[arg(long, value_enum)]
+    kind: AnnotKindArg,
+    /// Box for square and circle: `left,bottom,right,top`.
+    #[arg(long)]
+    rect: Option<String>,
+    /// Top-left corner of a note: `x,y`.
+    #[arg(long)]
+    at: Option<String>,
+    /// Start of a line or arrow: `x,y`.
+    #[arg(long)]
+    from: Option<String>,
+    /// End of a line, or the arrow's tip: `x,y`.
+    #[arg(long)]
+    to: Option<String>,
+    /// Ink strokes: points `x,y` separated by spaces, strokes separated by `;`.
+    #[arg(long)]
+    points: Option<String>,
+    /// Stroke colour, `#rrggbb`.
+    #[arg(long, default_value = "#d81b1b")]
+    color: String,
+    /// Fill colour for squares, circles and closed arrow heads, `#rrggbb`.
+    #[arg(long)]
+    fill: Option<String>,
+    /// Line width in points.
+    #[arg(long, default_value_t = 2.0)]
+    width: f32,
+    /// Opacity from 0 to 1.
+    #[arg(long, default_value_t = 1.0)]
+    opacity: f32,
+    /// Comment text.
+    #[arg(long)]
+    contents: Option<String>,
+    /// Author name; omitted unless given.
+    #[arg(long)]
+    author: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -119,11 +215,30 @@ fn main() -> Result<()> {
             system_fonts,
         } => return compose(&input, &output, system_fonts),
         Command::Source { file } => return source(&file),
+        Command::Annotate {
+            action: AnnotateAction::List { doc },
+        } => return annotate_list(&doc),
         _ => {}
     }
     let mut engine = PdfiumEngine::new()?;
     match cli.command {
-        Command::Compose { .. } | Command::Source { .. } => unreachable!("handled above"),
+        Command::Compose { .. }
+        | Command::Source { .. }
+        | Command::Annotate {
+            action: AnnotateAction::List { .. },
+        } => unreachable!("handled above"),
+        Command::Annotate {
+            action: AnnotateAction::Add { doc, annot, output },
+        } => annotate_add(&mut engine, &doc, &annot, &output),
+        Command::Annotate {
+            action:
+                AnnotateAction::Remove {
+                    doc,
+                    page,
+                    index,
+                    output,
+                },
+        } => annotate_remove(&mut engine, &doc, page, index, &output),
         Command::Info { doc, json } => info(&mut engine, &doc, json),
         Command::Render {
             doc,
@@ -344,6 +459,260 @@ fn organize(
     Ok(())
 }
 
+/// The file's bytes and its annotation editing state, as the app builds it on open.
+fn annotation_state(args: &DocArgs) -> Result<(Vec<u8>, DocState)> {
+    let bytes = std::fs::read(&args.file)
+        .with_context(|| format!("cannot read {}", args.file.display()))?;
+    let doc = ferrix_pdf::load(ferrix_pdf::Source {
+        bytes: &bytes,
+        password: args.password.as_deref(),
+    })?;
+    let per_page = ferrix_annot::read_annotations(&doc, SourceId::BASE);
+    let pages = PageList::identity(per_page.len() as u32);
+    let mut annots = AnnotSet::new();
+    for (entry, list) in pages.entries().iter().zip(per_page) {
+        annots.insert_loaded(entry.key, list);
+    }
+    Ok((bytes, DocState::new(pages, annots)))
+}
+
+fn annotate_list(args: &DocArgs) -> Result<()> {
+    let (_, state) = annotation_state(args)?;
+    for (n, entry) in state.pages.entries().iter().enumerate() {
+        for (i, (_, a)) in state.annots.page(entry.key).iter().enumerate() {
+            let r = a.props.rect;
+            let mut line = format!(
+                "page {} #{}: {} [{:.1} {:.1} {:.1} {:.1}]",
+                n + 1,
+                i + 1,
+                a.kind.subtype(),
+                r.left,
+                r.bottom,
+                r.right,
+                r.top
+            );
+            if !a.is_editable() {
+                line.push_str(" (read-only)");
+            }
+            if let Some(author) = &a.props.author {
+                line.push_str(&format!(" by {author:?}"));
+            }
+            if let Some(contents) = &a.props.contents {
+                line.push_str(&format!(": {contents:?}"));
+            }
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn annotate_add(
+    engine: &mut impl PdfEngine,
+    args: &DocArgs,
+    annot: &AnnotArgs,
+    output: &Path,
+) -> Result<()> {
+    let (bytes, mut state) = annotation_state(args)?;
+    let page = page_key(&state, annot.page)?;
+    let new = build_annotation(annot)?;
+    let id = state.annots.new_id();
+    let index = state.annots.page(page).len();
+    state.apply(&DocEdit::Annot(AnnotEdit::Add {
+        page,
+        index,
+        id,
+        annot: Box::new(new),
+    }))?;
+    save_annotations(engine, args, &bytes, &state, output)
+}
+
+fn annotate_remove(
+    engine: &mut impl PdfEngine,
+    args: &DocArgs,
+    page: u32,
+    index: usize,
+    output: &Path,
+) -> Result<()> {
+    let (bytes, mut state) = annotation_state(args)?;
+    let key = page_key(&state, page)?;
+    let Some((id, annot)) = index
+        .checked_sub(1)
+        .and_then(|i| state.annots.page(key).get(i))
+    else {
+        bail!("page {page} has no annotation #{index} (see `ferrix annotate list`)");
+    };
+    if !annot.is_deletable() {
+        bail!("annotation #{index} on page {page} is locked");
+    }
+    // A note's replies go with it, as in other readers (they must stay on its page).
+    let thread = state.annots.thread(*id);
+    if thread.len() > 1 {
+        eprintln!("also removing {} replies", thread.len() - 1);
+    }
+    let edits = thread
+        .into_iter()
+        .map(|id| DocEdit::Annot(AnnotEdit::Remove { id }))
+        .collect();
+    state.apply(&DocEdit::Batch(edits))?;
+    save_annotations(engine, args, &bytes, &state, output)
+}
+
+fn page_key(state: &DocState, page: u32) -> Result<PageKey> {
+    let count = state.pages.len();
+    page.checked_sub(1)
+        .and_then(|i| state.pages.get(i as usize))
+        .map(|e| e.key)
+        .with_context(|| format!("page {page} is out of range (document has {count} pages)"))
+}
+
+/// Writes the annotation changes as an incremental update, checks the result with PDFium and
+/// only then writes `output`.
+fn save_annotations(
+    engine: &mut impl PdfEngine,
+    args: &DocArgs,
+    bytes: &[u8],
+    state: &DocState,
+    output: &Path,
+) -> Result<()> {
+    let source = ferrix_pdf::Source {
+        bytes,
+        password: args.password.as_deref(),
+    };
+    let mut revision = ferrix_pdf::Revision::new(source, &[])?;
+    let now = ferrix_annot::pdf_date(std::time::SystemTime::now());
+    let report = ferrix_annot::write_annotations(&mut revision, &state.pages, &state.annots, &now)?;
+    let out = revision.finish()?;
+    ferrix_annot::verify(&out, args.password.as_deref(), &state.pages, &state.annots)?;
+
+    // PDFium must see exactly the annotations we meant to write, page by page.
+    let password = args.password.as_deref().map(Secret::new);
+    let check = engine.open(DocSource::Bytes(out.clone()), password.as_ref())?;
+    for (n, entry) in state.pages.entries().iter().enumerate() {
+        let seen: Vec<String> = engine
+            .annotations(check.id, PageIndex(n as u32))?
+            .into_iter()
+            .map(|a| a.subtype)
+            .filter(|s| !matches!(s.as_str(), "Popup" | "Link" | "Widget"))
+            .collect();
+        let expected: Vec<&str> = state
+            .annots
+            .page(entry.key)
+            .iter()
+            .map(|(_, a)| a.kind.subtype())
+            .collect();
+        if seen != expected {
+            bail!(
+                "verification failed on page {}: PDFium sees {seen:?}, expected {expected:?}",
+                n + 1
+            );
+        }
+    }
+    engine.close(check.id);
+    ferrix_io::write_atomic(output, &out)
+        .with_context(|| format!("cannot write {}", output.display()))?;
+    eprintln!(
+        "{} added, {} changed, {} removed → {} ({} bytes)",
+        report.added,
+        report.changed,
+        report.removed,
+        output.display(),
+        out.len()
+    );
+    Ok(())
+}
+
+fn build_annotation(args: &AnnotArgs) -> Result<Annotation> {
+    let need = |value: &Option<String>, flag: &str| -> Result<String> {
+        value
+            .clone()
+            .with_context(|| format!("--kind {:?} needs {flag}", args.kind))
+    };
+    let kind = match args.kind {
+        AnnotKindArg::Note => AnnotKind::Note {
+            icon: NoteIcon::Comment,
+            open: false,
+        },
+        AnnotKindArg::Square => AnnotKind::Square,
+        AnnotKindArg::Circle => AnnotKind::Circle,
+        AnnotKindArg::Line | AnnotKindArg::Arrow => AnnotKind::Line {
+            from: parse_point(&need(&args.from, "--from")?)?,
+            to: parse_point(&need(&args.to, "--to")?)?,
+            ends: if args.kind == AnnotKindArg::Arrow {
+                [LineEnd::None, LineEnd::OpenArrow]
+            } else {
+                [LineEnd::None, LineEnd::None]
+            },
+        },
+        AnnotKindArg::Ink => {
+            let strokes = need(&args.points, "--points")?
+                .split(';')
+                .map(|stroke| {
+                    stroke
+                        .split_whitespace()
+                        .map(parse_point)
+                        .collect::<Result<Vec<_>>>()
+                })
+                .filter(|s| !matches!(s, Ok(points) if points.is_empty()))
+                .collect::<Result<Vec<_>>>()?;
+            AnnotKind::Ink { strokes }
+        }
+    };
+    let rect = match args.kind {
+        AnnotKindArg::Note => ferrix_annot::note_rect(parse_point(&need(&args.at, "--at")?)?),
+        AnnotKindArg::Square | AnnotKindArg::Circle => {
+            let v = parse_numbers(&need(&args.rect, "--rect")?, 4)?;
+            PdfBox::from_corners(PdfPoint::new(v[0], v[1]), PdfPoint::new(v[2], v[3]))
+        }
+        // Computed from the geometry when written.
+        _ => PdfBox::default(),
+    };
+    let mut annot = Annotation::new(kind, rect);
+    let props = &mut annot.props;
+    props.color = Some(parse_color(&args.color)?);
+    props.interior = args.fill.as_deref().map(parse_color).transpose()?;
+    props.border_width = args.width;
+    props.opacity = args.opacity;
+    props.contents = args.contents.clone();
+    props.author = args.author.clone();
+    props.name = Some(ferrix_annot::unique_name());
+    Ok(annot)
+}
+
+fn parse_numbers(s: &str, count: usize) -> Result<Vec<f32>> {
+    let values = s
+        .split(',')
+        .map(|v| {
+            v.trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .with_context(|| format!("invalid number {v:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values.len() != count {
+        bail!("expected {count} comma-separated numbers, got {s:?}");
+    }
+    Ok(values)
+}
+
+fn parse_point(s: &str) -> Result<PdfPoint> {
+    let v = parse_numbers(s, 2)?;
+    Ok(PdfPoint::new(v[0], v[1]))
+}
+
+fn parse_color(s: &str) -> Result<Rgb> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let channel = |i: usize| {
+        hex.get(i..i + 2)
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .map(|v| f32::from(v) / 255.0)
+    };
+    match (hex.len(), channel(0), channel(2), channel(4)) {
+        (6, Some(r), Some(g), Some(b)) => Ok(Rgb::new(r, g, b)),
+        _ => bail!("invalid colour {s:?}; use #rrggbb"),
+    }
+}
+
 /// Parses a one-based page list such as `1,3,5-7` into indices, validating against `count`.
 fn parse_pages(spec: &str, count: u32) -> Result<Vec<PageIndex>> {
     let number = |s: &str| -> Result<u32> {
@@ -434,6 +803,22 @@ mod tests {
     fn parses_page_lists_and_ranges() {
         assert_eq!(numbers("1", 3), [1]);
         assert_eq!(numbers("1,3-5, 7", 10), [1, 3, 4, 5, 7]);
+    }
+
+    #[test]
+    fn parses_annotation_arguments() {
+        assert_eq!(
+            parse_point(" 10, 20.5").expect("valid point"),
+            PdfPoint::new(10.0, 20.5)
+        );
+        assert!(parse_point("10").is_err());
+        assert!(parse_point("1,inf").is_err());
+        assert_eq!(
+            parse_color("#ff8000").expect("valid colour"),
+            Rgb::new(1.0, 128.0 / 255.0, 0.0)
+        );
+        assert!(parse_color("#fff").is_err());
+        assert!(parse_color("#gg0000").is_err());
     }
 
     #[test]

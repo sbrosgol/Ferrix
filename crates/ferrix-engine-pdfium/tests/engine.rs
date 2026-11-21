@@ -87,6 +87,28 @@ fn page_info_applies_crop_box_and_rotation() {
     assert_eq!(info(&mut engine, 2).size, Size::new(500.0, 600.0));
 }
 
+/// Many real files put `/MediaBox` (and `/CropBox`, `/Rotate`) on the page-tree root.
+/// PDFium's box getters only read the page itself, so these pages used to fail outright.
+#[test]
+fn pages_inheriting_their_boxes_render_and_measure() {
+    let Some(mut engine) = engine() else { return };
+    let doc = open(
+        &mut engine,
+        &[Page::letter()
+            .cropped([50.0, 100.0, 550.0, 700.0])
+            .rotated(90)
+            .inherited()],
+    );
+    let info = engine.page_info(doc, PageIndex(0)).unwrap();
+    assert_eq!(
+        (info.size, info.rotation),
+        (Size::new(600.0, 500.0), Rotation::R90)
+    );
+    render(&mut engine, doc, Rotation::R0, PixelRect::new(0, 0, 64, 64));
+    let text = engine.text_page(doc, PageIndex(0)).unwrap();
+    assert!(text.text().contains("Hello"));
+}
+
 #[test]
 fn renders_tiles_at_the_requested_offset() {
     let Some(mut engine) = engine() else { return };

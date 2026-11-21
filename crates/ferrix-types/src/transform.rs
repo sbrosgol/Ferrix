@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{PdfBox, Point, Rect, Size};
+use crate::{PdfBox, PdfPoint, Point, Rect, Size};
 
 /// Clockwise page rotation in quarter turns, matching the PDF `/Rotate` convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -84,6 +84,29 @@ impl PageTransform {
     pub fn box_to_page(&self, b: PdfBox) -> Rect {
         Rect::from_corners(self.to_page(b.left, b.bottom), self.to_page(b.right, b.top))
     }
+
+    /// The inverse of [`Self::to_page`]: a page-space point in PDF user space.
+    pub fn to_pdf(&self, p: Point) -> PdfPoint {
+        let PdfBox {
+            left,
+            bottom,
+            right,
+            top,
+        } = self.crop;
+        match self.rotation {
+            Rotation::R0 => PdfPoint::new(p.x + left, top - p.y),
+            Rotation::R90 => PdfPoint::new(p.y + left, p.x + bottom),
+            Rotation::R180 => PdfPoint::new(right - p.x, p.y + bottom),
+            Rotation::R270 => PdfPoint::new(right - p.y, top - p.x),
+        }
+    }
+
+    pub fn rect_to_pdf(&self, r: Rect) -> PdfBox {
+        PdfBox::from_corners(
+            self.to_pdf(Point::new(r.x0, r.y0)),
+            self.to_pdf(Point::new(r.x1, r.y1)),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +164,34 @@ mod tests {
                 },
                 "{rotation:?}"
             );
+        }
+    }
+
+    #[test]
+    fn to_pdf_inverts_to_page_for_every_rotation_and_offset_crop() {
+        let crop = PdfBox {
+            left: 30.0,
+            bottom: -40.0,
+            right: 530.0,
+            top: 660.0,
+        };
+        for rotation in [Rotation::R0, Rotation::R90, Rotation::R180, Rotation::R270] {
+            let t = PageTransform::new(crop, rotation);
+            for (x, y) in [(30.0, -40.0), (530.0, 660.0), (100.0, 250.5), (512.25, 0.0)] {
+                let page = t.to_page(x, y);
+                assert_eq!(
+                    t.to_pdf(page),
+                    PdfPoint::new(x, y),
+                    "{rotation:?} ({x}, {y})"
+                );
+            }
+            let b = PdfBox {
+                left: 50.0,
+                bottom: 10.0,
+                right: 90.0,
+                top: 70.0,
+            };
+            assert_eq!(t.rect_to_pdf(t.box_to_page(b)), b, "{rotation:?}");
         }
     }
 

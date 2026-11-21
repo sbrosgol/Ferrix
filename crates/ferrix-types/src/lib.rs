@@ -7,7 +7,8 @@
 //!   (crop box, intrinsic `/Rotate` applied), y down. Everything above the engine boundary uses this.
 //! - **Device space** ([`PixelRect`]): integer pixels of a page rendered at a given scale.
 //!
-//! [`PageTransform`] converts PDF user space into page space.
+//! [`PageTransform`] converts between PDF user space and page space. Annotations are stored in
+//! user space, because that is what the file holds and it does not change when a view rotates.
 
 #![forbid(unsafe_code)]
 
@@ -15,6 +16,6 @@ mod geometry;
 mod ids;
 mod transform;
 
-pub use geometry::{PdfBox, PixelRect, Point, Rect, Size};
+pub use geometry::{PdfBox, PdfPoint, PixelRect, Point, Rect, Size};
 pub use ids::{DocId, PageIndex};
 pub use transform::{PageTransform, Rotation};

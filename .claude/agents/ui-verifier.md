@@ -1,6 +1,6 @@
 ---
 name: ui-verifier
-description: Visually verifies ferrix-app UI changes by scripting the app headlessly and inspecting screenshots, and reports layout or rendering problems with images. Use after changing views, the writer canvas, toolbars, dialogs or themes.
+description: Visually verifies ferrix-app UI changes by scripting the app headlessly and inspecting screenshots, and reports layout or rendering problems with images. Use after changing views, the writer canvas, annotation tools and overlays, toolbars, dialogs or themes.
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
@@ -15,7 +15,8 @@ For the change you are given:
 2. Capture light and dark (`--dark`), a normal size (1180x860) and a narrow one (e.g. 760x900),
    and a tall size when several pages matter.
 3. Read every PNG and look for: overlapping or clipped text in toolbars, misaligned overlays
-   (caret, selection, search highlights versus the text under them), blank pages (see the 512 px
+   (caret, selection, search highlights and annotation overlays versus what is under them; check
+   annotations on rotated pages and at several zoom levels), blank pages (see the 512 px
    tiling trap), wrong page counts or footers, dialogs that don't fit, low contrast in dark mode.
 4. Report findings with the screenshot paths (full absolute paths) and what is wrong where. If a
    cause is clear in code, point to file:line.
