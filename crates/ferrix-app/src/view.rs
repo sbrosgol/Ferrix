@@ -35,12 +35,14 @@ const TOOLBAR_HEIGHT: f32 = 48.0;
 const STATUS_HEIGHT: f32 = 28.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
 /// Space between groups of toolbar controls (design system: 12).
-const CLUSTER_GAP: f32 = 12.0;
+pub(crate) const CLUSTER_GAP: f32 = 12.0;
+/// Height of a bar under the toolbar (writer format bar, Markup bar).
+pub(crate) const BAR_HEIGHT: f32 = 42.0;
 const SCROLLBAR_ALLOWANCE: f32 = 12.0;
 /// Space for the macOS traffic lights, which sit over our toolbar.
 const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 72.0 } else { 0.0 };
 
-const SEMIBOLD: Font = Font {
+pub(crate) const SEMIBOLD: Font = Font {
     weight: font::Weight::Semibold,
     ..theme::UI_FONT
 };
@@ -79,6 +81,9 @@ impl App {
         };
 
         let mut window = column![self.toolbar(), horizontal_divider()];
+        if let (Some(doc), Some(_)) = (&self.doc, &self.markup) {
+            window = window.push(self.markup_bar(doc)).push(horizontal_divider());
+        }
         if let Some(writer) = &self.writer {
             window = window
                 .push(self.format_bar(writer))
@@ -114,6 +119,9 @@ impl App {
         }
         if self.menu_open {
             return stack![window, self.overflow_menu()].into();
+        }
+        if self.signed_prompt {
+            return stack![window, self.signed_dialog()].into();
         }
         if let Some(found) = self.recoveries.first() {
             return stack![window, self.recovery_dialog(found)].into();
@@ -161,7 +169,7 @@ impl App {
                 if dirty {
                     title = title.push(edited_badge());
                 }
-                container(title).max_width(320).clip(true).into()
+                title.into()
             }
             None => text("Ferrix").size(13).font(SEMIBOLD).into(),
         };
@@ -183,26 +191,28 @@ impl App {
                 self.sidebar,
             ));
         }
-        let mut left = left.push(Space::new().width(6)).push(title);
+        let mut left = left;
         if open {
-            // History sits with the document it belongs to, as in Pages and Word.
-            left = left
-                .push(Space::new().width(CLUSTER_GAP - 2.0))
-                .push(cluster([
-                    icon_button(
-                        Icon::Undo,
-                        undo_tip,
-                        (editable && undo_label.is_some()).then_some(Message::Undo),
-                        false,
-                    ),
-                    icon_button(
-                        Icon::Redo,
-                        redo_tip,
-                        (editable && redo_label.is_some()).then_some(Message::Redo),
-                        false,
-                    ),
-                ]));
+            // History comes before the title, which takes what room is left and clips, so a long
+            // name can never push the buttons out of a narrow window.
+            left = left.push(cluster([
+                icon_button(
+                    Icon::Undo,
+                    undo_tip,
+                    (editable && undo_label.is_some()).then_some(Message::Undo),
+                    false,
+                ),
+                icon_button(
+                    Icon::Redo,
+                    redo_tip,
+                    (editable && redo_label.is_some()).then_some(Message::Redo),
+                    false,
+                ),
+            ]));
         }
+        let left = left
+            .push(Space::new().width(8))
+            .push(container(title).width(Length::Fill).clip(true));
 
         // The page navigator: only for PDFs (a written document shows its page in the status bar).
         let center: Element<'_, Message> = match doc {
@@ -293,6 +303,14 @@ impl App {
                         Some(Message::FitPage),
                         self.zoom == Zoom::FitPage,
                     ));
+            }
+            if has_doc && writer.is_none() {
+                right = right.push(icon_button(
+                    Icon::Markup,
+                    "Markup (⇧⌘A)",
+                    Some(Message::Annot(crate::annotate_ui::AnnotMsg::Toggle)),
+                    self.markup.is_some(),
+                ));
             }
             right = right.push(container(zoom_row).padding(2).style(theme::pill));
         }
@@ -449,7 +467,7 @@ impl App {
         let targets = doc.targets();
         let positions: Vec<usize> = targets
             .iter()
-            .filter_map(|k| doc.pages.position(*k))
+            .filter_map(|k| doc.state.pages.position(*k))
             .collect();
         let can_move_up = positions.first().is_some_and(|&p| p > 0);
         let can_move_down = positions.last().is_some_and(|&p| p + 1 < doc.len());
@@ -504,15 +522,8 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
         let count = doc.len();
-        let header = container(
-            row![
-                text("Pages").size(13).font(SEMIBOLD),
-                Space::new().width(Length::Fill),
-                muted(count.to_string(), 12.0),
-            ]
-            .align_y(Alignment::Center),
-        )
-        .padding([12, 14]);
+        let _ = count;
+        let header = self.sidebar_switch(doc);
         let footer = container(
             column![
                 muted(
@@ -527,6 +538,7 @@ impl App {
         .padding([10, 12]);
 
         let thumbs = doc
+            .state
             .pages
             .entries()
             .iter()
@@ -569,27 +581,34 @@ impl App {
             .width(Length::Fill)
             .align_x(Alignment::Center);
 
-        container(column![
-            header,
-            scrollable(list)
-                .direction(scrollable::Direction::Vertical(thin_scrollbar()))
-                .id(sidebar_scroll_id())
-                .height(Length::Fill)
-                .style(theme::scrollbar),
-            horizontal_divider(),
-            footer,
-        ])
-        .width(SIDEBAR_WIDTH)
-        .height(Length::Fill)
-        .style(theme::chrome)
-        .into()
+        let body: Element<'a, Message> =
+            if self.sidebar_tab == crate::annotate_ui::SidebarTab::Comments {
+                self.comments_list(doc)
+            } else {
+                column![
+                    scrollable(list)
+                        .direction(scrollable::Direction::Vertical(thin_scrollbar()))
+                        .id(sidebar_scroll_id())
+                        .height(Length::Fill)
+                        .style(theme::scrollbar),
+                    horizontal_divider(),
+                    footer,
+                ]
+                .into()
+            };
+        container(column![header, body])
+            .width(SIDEBAR_WIDTH)
+            .height(Length::Fill)
+            .style(theme::chrome)
+            .into()
     }
 
     /// Every page in one scrolled column. Pages not rendered yet are blank paper; pages
     /// rendered at another zoom are scaled until their new rendering arrives.
-    fn page_view<'a>(&self, doc: &'a Document) -> Element<'a, Message> {
+    fn page_view<'a>(&'a self, doc: &'a Document) -> Element<'a, Message> {
         let strip = &doc.strip;
         let pages = doc
+            .state
             .pages
             .entries()
             .iter()
@@ -599,7 +618,7 @@ impl App {
                     Some(shown) if shown.rotation == entry.rotation => tiles_at(&shown.image, size),
                     _ => Space::new().width(size.width).height(size.height).into(),
                 };
-                container(paper).style(theme::page).into()
+                self.page_layers(doc, entry, size, container(paper).style(theme::page).into())
             });
         let column = column(pages)
             .spacing(PAGE_GAP)
@@ -1516,7 +1535,7 @@ fn tiles(page: &PageImage) -> Element<'_, Message> {
     .into()
 }
 
-fn icon_button<'a>(
+pub(crate) fn icon_button<'a>(
     icon: Icon,
     label: impl text::IntoFragment<'a>,
     on_press: Option<Message>,
@@ -1560,7 +1579,7 @@ fn dismissible(content: Element<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
-fn muted<'a>(content: impl text::IntoFragment<'a>, size: f32) -> text::Text<'a> {
+pub(crate) fn muted<'a>(content: impl text::IntoFragment<'a>, size: f32) -> text::Text<'a> {
     text(content).size(size).style(|theme: &Theme| text::Style {
         color: Some(theme::tokens(theme).text_muted),
     })
@@ -1586,14 +1605,14 @@ fn vertical_divider<'a>() -> Element<'a, Message> {
 }
 
 /// The thin dropdown arrow the design system asks for, instead of iced's large default.
-fn small_chevron<T>() -> pick_list::Handle<T> {
+pub(crate) fn small_chevron<T>() -> pick_list::Handle<T> {
     pick_list::Handle::Arrow {
         size: Some(9.into()),
     }
 }
 
 /// Controls grouped on one sunken, rounded surface (design system: pills).
-fn pill<'a>(content: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
+pub(crate) fn pill<'a>(content: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
     container(content.spacing(2).align_y(Alignment::Center))
         .padding(2)
         .style(theme::pill)

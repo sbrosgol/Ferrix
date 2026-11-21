@@ -16,7 +16,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use appearance::{Appearance, Item, PathEl, Stroke, appearance, note_rect};
 pub use read::{read_annotations, read_page};
-pub use write::{Permission, WriteReport, annotation_permission, verify, write_annotations};
+pub use write::{
+    Permission, WriteReport, annotation_permission, verify, write_annotations,
+    write_page_annotations,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AnnotError {

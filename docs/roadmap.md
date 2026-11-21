@@ -36,8 +36,9 @@ demo. Exit criteria are the definition of done, not the feature list.
 - Annotations, designed in [ADR-0009](adr/0009-annotations.md): sticky notes, ink,
   shapes, free text, highlight / underline / strikeout / squiggly, stamps; annotation list panel;
   edit/delete existing annotations from other apps. Phases: ~~headless core~~ (done:
-  `ferrix-core` annotation model, `ferrix-annot`, `ferrix annotate`; see ADR-0009 notes) → app
-  editing → text (free text; text markup waits for PDF text selection, M1) → stamps, replies,
+  `ferrix-core` annotation model, `ferrix-annot`, `ferrix annotate`; see ADR-0009 notes) →
+  ~~app editing~~ (done: Markup mode, Comments list, note editor; open items in ADR-0009
+  notes) → text (free text; text markup waits for PDF text selection, M1) → stamps, replies,
   tagging, pressure.
 - ~~Incremental + atomic + verified save; Save As~~ (done: `ferrix-pdf`, `ferrix-io`).
 - Engine moved out of process (ADR-0004) with crash recovery.

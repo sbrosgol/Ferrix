@@ -1,9 +1,13 @@
 //! Ferrix desktop application (iced, ADR-0002).
 
+pub mod annotate;
+pub mod annotate_ui;
 mod app;
 mod clipboard;
 mod document;
 mod icon;
+pub mod markup;
+pub mod markup_canvas;
 #[cfg(windows)]
 mod print;
 mod recovery;
@@ -12,6 +16,7 @@ mod strip;
 pub mod theme;
 mod titlebar;
 mod view;
+mod view_markup;
 mod worker;
 pub mod writer;
 mod writer_canvas;

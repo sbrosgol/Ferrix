@@ -10,6 +10,10 @@ What works today:
   thumbnails and light/dark themes
 - **Page organization**: reorder, rotate, delete and insert pages from other files, with
   undo/redo and safe incremental save / Save As
+- **Annotations** ([ADR-0009](docs/adr/0009-annotations.md)): Markup mode (⇧⌘A) adds notes,
+  freehand ink, rectangles, ellipses, lines and arrows; select, move, resize, recolour and
+  delete them, including other apps' annotations; a Comments list; saved as standard PDF
+  annotations that look the same in every reader
 - **Crash recovery**: unsaved edits are journaled and offered back after a crash
 - **Printing** through the operating system's print dialog
 - **Creating PDFs**: blank documents, or converted from images, Word, Excel, PowerPoint and
@@ -23,7 +27,7 @@ What works today:
   numbers, find and replace, formatted copy and paste), saved as tagged, accessible PDFs (or
   PDF/A-3 for archiving) that stay editable in Ferrix
 
-Not yet: annotating in the desktop app, forms, text selection and search in PDFs, the sandboxed engine process,
+Not yet: free text and highlights, forms, text selection and search in PDFs, the sandboxed engine process,
 and spell check in written documents.
 
 ## Goals

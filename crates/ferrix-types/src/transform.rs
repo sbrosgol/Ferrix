@@ -56,6 +56,14 @@ impl PageTransform {
         Self { crop, rotation }
     }
 
+    /// The same page shown with `by` more clockwise rotation (e.g. a page rotated in Ferrix).
+    pub fn rotated(self, by: Rotation) -> Self {
+        Self {
+            crop: self.crop,
+            rotation: self.rotation.then(by),
+        }
+    }
+
     /// Displayed page size in points.
     pub fn page_size(&self) -> Size {
         let (w, h) = (self.crop.width(), self.crop.height());

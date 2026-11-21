@@ -57,6 +57,9 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--markup") {
+        script.extend(markup_script());
+    }
     if flag(&mut args, "--menu") {
         script.push(Message::ToggleMenu);
     }
@@ -108,6 +111,38 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Turns on Markup, draws a rectangle and an arrow, places a note and types into it, then
+/// shows the Comments list.
+fn markup_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_types::PdfPoint;
+    let at = |p: P| Message::Annot(A::PointerAt(0, p));
+    let pt = PdfPoint::new;
+    let mut s = vec![
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::Rectangle)),
+        at(P::Press(pt(90.0, 560.0))),
+        at(P::Drag(pt(250.0, 640.0))),
+        at(P::Release(pt(250.0, 640.0))),
+        Message::Annot(A::Tool(Tool::Arrow)),
+        at(P::Press(pt(400.0, 520.0))),
+        at(P::Drag(pt(260.0, 590.0))),
+        at(P::Release(pt(260.0, 590.0))),
+        Message::Annot(A::Color(4)),
+        Message::Annot(A::Tool(Tool::Note)),
+        at(P::Press(pt(470.0, 700.0))),
+    ];
+    for c in "Check these figures".chars() {
+        s.push(Message::Annot(A::NoteEdit(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert(c)),
+        )));
+    }
+    s.push(Message::SidebarTab(
+        ferrix_app::annotate_ui::SidebarTab::Comments,
+    ));
+    s
 }
 
 /// Creates a document and types a short formatted letter into it.

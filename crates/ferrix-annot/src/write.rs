@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ferrix_core::{AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageList};
+use ferrix_core::{AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageEntry, PageList};
 use ferrix_pdf::Revision;
 use ferrix_types::PdfBox;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -153,9 +153,20 @@ pub fn write_annotations(
     annots: &AnnotSet,
     now: &str,
 ) -> Result<WriteReport, AnnotError> {
+    write_page_annotations(revision, pages.entries(), annots, now)
+}
+
+/// [`write_annotations`] for some pages only, e.g. the document's own pages when building the
+/// on-screen preview of a revision (ADR-0009 §7).
+pub fn write_page_annotations(
+    revision: &mut Revision,
+    pages: &[PageEntry],
+    annots: &AnnotSet,
+    now: &str,
+) -> Result<WriteReport, AnnotError> {
     let mut report = WriteReport::default();
     let pdfa = pdfa_rules(revision.source(0)?);
-    for entry in pages.entries() {
+    for entry in pages {
         let source = entry.source.0 as usize;
         let page_id = revision.page_id(source, entry.page.0)?;
         let doc = revision.source(source)?;

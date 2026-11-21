@@ -35,6 +35,18 @@ pub enum DocEdit {
     Batch(Vec<DocEdit>),
 }
 
+impl From<Edit> for DocEdit {
+    fn from(edit: Edit) -> Self {
+        Self::Pages(edit)
+    }
+}
+
+impl From<AnnotEdit> for DocEdit {
+    fn from(edit: AnnotEdit) -> Self {
+        Self::Annot(edit)
+    }
+}
+
 /// The pages of the document being edited and their annotations (ADR-0003, ADR-0009).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocState {

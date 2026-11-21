@@ -48,6 +48,16 @@ pub(crate) enum Icon {
     MatchCase,
     More,
     Check,
+    Markup,
+    Pointer,
+    StickyNote,
+    Pencil,
+    Square,
+    Circle,
+    Minus,
+    ArrowUpRight,
+    Lock,
+    Comments,
 }
 
 macro_rules! icons {
@@ -108,6 +118,16 @@ icons! {
     MatchCase => "case-sensitive",
     More => "ellipsis",
     Check => "check",
+    Markup => "pen-line",
+    Pointer => "mouse-pointer-2",
+    StickyNote => "sticky-note",
+    Pencil => "pencil",
+    Square => "square",
+    Circle => "circle",
+    Minus => "minus",
+    ArrowUpRight => "move-up-right",
+    Lock => "lock",
+    Comments => "message-square-text",
 }
 
 fn load(source: &str) -> svg::Handle {

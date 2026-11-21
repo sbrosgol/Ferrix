@@ -74,7 +74,8 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 - **Toolbar, left to right:**
   - the macOS window controls' space
   - sidebar toggle (PDFs only)
-  - document title, with an "Edited" dot when unsaved, then Undo and Redo
+  - Undo and Redo, then the document title with an "Edited" dot when unsaved. The title takes
+    the room left and clips, so it can never push buttons out of a narrow window
   - centre: the page navigator pill, `‹ [ 3 ] / 12 ›` (PDFs; a written document shows its
     page in the status bar)
   - right: the zoom pill `− 125 % ▾ +` with fit-width and fit-page inside it; file (New,
@@ -119,6 +120,42 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - keyboard hints beside the buttons they belong to
 - **Dropdowns (pick lists):** surface, `border` outline, thin chevron, menu with `accent_soft`
   selection (not a solid accent block).
+
+## Annotations
+
+Phase 2 of ADR-0009. Annotating is a mode, as in Preview: reading stays uncluttered, and tools
+appear only when asked for.
+
+- **Markup toggle:** an icon button (`pen-line`, "Markup (⇧⌘A)") in the toolbar's right side,
+  before the zoom pill; toggled-on style while the mode is on. It never folds into `⋯`.
+- **Annotation bar:** 42 high under the toolbar (same height, `chrome` fill and bottom hairline as
+  the writer format bar), pills 12 apart, padding [0, 10]:
+  1. tools pill: Select · Note · Pen · Rectangle · Ellipse · Line · Arrow (icon buttons 30, 2 apart)
+  2. colour pill: seven 20 px swatches in 28 px targets
+  3. width pill: 1, 2, 4, 8 pt as icon buttons showing a line of that weight (lines, shapes, ink)
+  4. opacity select (`select_flat`, 72 wide): 100 %, 75 %, 50 %, 25 %
+  5. right-aligned: Delete (`trash-2`), only with a selection
+
+  The properties (2–4) edit the selection if there is one, otherwise the active tool's defaults
+  (remembered per tool for the session). A control that doesn't apply is hidden (width for notes).
+  Below 820 px the colour pill becomes one swatch with a chevron that opens the seven in a popover.
+- **Annotation palette** (`theme::ANNOT_COLORS`, paper colours, the same in both themes):
+  Red `#E03131`, Orange `#E8590C`, Yellow `#F2C200`, Green `#2F9E44`, Blue `#1C7ED6`,
+  Purple `#7048E8`, Black `#1B1D21`. All but yellow reach 3:1 on white; yellow is for notes,
+  whose icon has a dark outline. Defaults: notes yellow, everything else red. Swatches always
+  have a 1 px `border_strong` ring (black vanishes on dark chrome otherwise); the chosen one gets
+  a 2 px `text` ring outside a 2 px gap. Each swatch has a tooltip with its name, so colour is
+  never the only cue. A colour from a file that isn't in the palette shows as an eighth swatch.
+- **Selection on the page:** 1 px `accent` box, 8 × 8 handles (`surface` fill, 1 px `accent`
+  border, 16 px hit area); lines get two 10 px round end handles; notes have no handles.
+  Annotations Ferrix can't edit get a dashed `text_muted` box and no handles.
+- **Sidebar:** the header's segmented switch gains Comments (Pages | Outline | Comments; with
+  three segments, the segments are icons with tooltips). Comment rows: 8 × 12 padding, radius 6,
+  selected row `accent_soft`; grouped under "Page 3" overlines.
+- **Note editor:** a 280-wide popover (`theme::popover`, menu elevation) beside the note.
+
+Why: a mode keeps the reading toolbar unchanged; reusing the format bar's height and pill rules
+means no new chrome tokens. The only new constants are the paper palette and handle sizes.
 
 ## Writing rules
 
