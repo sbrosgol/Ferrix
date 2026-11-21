@@ -5,7 +5,7 @@
 
 use ferrix_core::{
     AnnotFlags, AnnotKind, AnnotOrigin, AnnotProps, Annotation, LineEnd, MAX_STROKE_POINTS,
-    MAX_STROKES, MAX_TEXT_BYTES, NoteIcon, ObjectRef, Rgb, SourceId,
+    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, Rgb, SourceId,
 };
 use ferrix_types::{PdfBox, PdfPoint};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -123,6 +123,16 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
                 }
             }
             "Ink" => ink_list(doc, dict).map_or_else(other, |strokes| AnnotKind::Ink { strokes }),
+            "FreeText" if free_text_is_plain(doc, dict) => {
+                let (size, color) = default_appearance(doc, dict);
+                AnnotKind::FreeText { size, color }
+            }
+            name @ ("Highlight" | "Underline" | "StrikeOut" | "Squiggly") => {
+                match (MarkupStyle::from_subtype(name), quad_points(doc, dict)) {
+                    (Some(style), Some(quads)) => AnnotKind::Markup { style, quads },
+                    _ => other(),
+                }
+            }
             "Line" if has_line_extras(doc, dict) => other(),
             "Line" => line(doc, dict).unwrap_or_else(other),
             _ => other(),
@@ -137,6 +147,116 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
         reply_to,
     }
     .sanitized()
+}
+
+/// Text boxes Ferrix can redraw faithfully: plain or typewriter boxes without callouts, line
+/// ends, rotation, cloudy borders, a fill or styled rich text (the PDF review of phase 3).
+fn free_text_is_plain(doc: &Document, dict: &Dictionary) -> bool {
+    let intent_ok = name(doc, dict, b"IT").is_none_or(|it| it == "FreeTextTypeWriter");
+    let rotated = deref(doc, dict, b"Rotate")
+        .and_then(|r| r.as_i64().ok())
+        .is_some_and(|r| r % 360 != 0);
+    let filled = numbers(doc, dict, b"C").is_some_and(|c| !c.is_empty());
+    let styled = text(doc, dict, b"RC").is_some_and(|rc| {
+        let rc = rc.to_ascii_lowercase();
+        [
+            "<b>",
+            "<b ",
+            "<i>",
+            "<i ",
+            "<span",
+            "font-weight",
+            "font-style",
+        ]
+        .iter()
+        .any(|tag| rc.contains(tag))
+    });
+    intent_ok
+        && !dict.has(b"CL")
+        && !dict.has(b"LE")
+        && !rotated
+        && !filled
+        && !styled
+        && !has_cloudy_border(doc, dict)
+}
+
+/// Font size and colour from `/DA` (e.g. `/Helv 12 Tf 0 0 1 rg`); 12 pt black if absent.
+fn default_appearance(doc: &Document, dict: &Dictionary) -> (f32, Rgb) {
+    let da = text(doc, dict, b"DA").unwrap_or_default();
+    let tokens: Vec<&str> = da.split_whitespace().collect();
+    let mut size = 12.0;
+    let mut color = Rgb::BLACK;
+    for (i, op) in tokens.iter().enumerate() {
+        let arg = |back: usize| {
+            i.checked_sub(back)
+                .and_then(|j| tokens.get(j))
+                .and_then(|t| t.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+        };
+        match *op {
+            "Tf" => {
+                if let Some(s) = arg(1).filter(|s| (4.0..=144.0).contains(s)) {
+                    size = s;
+                }
+            }
+            "rg" => {
+                if let (Some(r), Some(g), Some(b)) = (arg(3), arg(2), arg(1)) {
+                    color = Rgb::new(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+                }
+            }
+            "g" => {
+                if let Some(v) = arg(1) {
+                    let v = v.clamp(0.0, 1.0);
+                    color = Rgb::new(v, v, v);
+                }
+            }
+            "k" => {
+                if let (Some(c), Some(m), Some(y), Some(k)) = (arg(4), arg(3), arg(2), arg(1)) {
+                    let f = |x: f32| ((1.0 - x) * (1.0 - k)).clamp(0.0, 1.0);
+                    color = Rgb::new(f(c), f(m), f(y));
+                }
+            }
+            _ => {}
+        }
+    }
+    (size, color)
+}
+
+/// `/QuadPoints` as top-left, top-right, bottom-left, bottom-right quads. Acrobat and most
+/// writers use that order; quads in the specification's counter-clockwise order are reordered.
+fn quad_points(doc: &Document, dict: &Dictionary) -> Option<Vec<[PdfPoint; 4]>> {
+    let n = numbers(doc, dict, b"QuadPoints")?;
+    if n.is_empty() || n.len() % 8 != 0 || n.len() / 8 > ferrix_core::MAX_QUADS {
+        return None;
+    }
+    Some(
+        n.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|q| {
+                let p = |i: usize| PdfPoint::new(q[2 * i], q[2 * i + 1]);
+                let (a, b, c, d) = (p(0), p(1), p(2), p(3));
+                // In the Z order a→b→c→d draws a bow tie: b–c crosses d–a.
+                if segments_cross(b, c, d, a) {
+                    [a, b, c, d]
+                } else {
+                    // Counter-clockwise from bottom-left: a=BL, b=BR, c=TR, d=TL.
+                    [d, c, a, b]
+                }
+            })
+            .collect(),
+    )
+}
+
+fn segments_cross(p1: PdfPoint, p2: PdfPoint, q1: PdfPoint, q2: PdfPoint) -> bool {
+    let side = |a: PdfPoint, b: PdfPoint, c: PdfPoint| {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    };
+    let d1 = side(q1, q2, p1);
+    let d2 = side(q1, q2, p2);
+    let d3 = side(p1, p2, q1);
+    let d4 = side(p1, p2, q2);
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
 }
 
 /// A cloudy border (`/BE /S /C`, ISO 32000-2 Table 168).

@@ -35,6 +35,11 @@ const fn rgb(hex: u32) -> Rgb {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     Select,
+    Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+    TextBox,
     Note,
     Pen,
     Rectangle,
@@ -44,8 +49,17 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Self; 7] = [
+    /// Tools that work on text, in their own pill.
+    pub(crate) const TEXT: [Self; 5] = [
         Self::Select,
+        Self::Highlight,
+        Self::Underline,
+        Self::StrikeOut,
+        Self::Squiggly,
+    ];
+    /// Tools that add things.
+    pub(crate) const ADD: [Self; 7] = [
+        Self::TextBox,
         Self::Note,
         Self::Pen,
         Self::Rectangle,
@@ -57,6 +71,11 @@ impl Tool {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Select => "Select (V)",
+            Self::Highlight => "Highlight (H)",
+            Self::Underline => "Underline (U)",
+            Self::StrikeOut => "Strikethrough (S)",
+            Self::Squiggly => "Squiggly underline (W)",
+            Self::TextBox => "Text box (T)",
             Self::Note => "Note (N)",
             Self::Pen => "Pen (P)",
             Self::Rectangle => "Rectangle (R)",
@@ -69,6 +88,11 @@ impl Tool {
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         Some(match key {
             "v" => Self::Select,
+            "h" => Self::Highlight,
+            "u" => Self::Underline,
+            "s" => Self::StrikeOut,
+            "w" => Self::Squiggly,
+            "t" => Self::TextBox,
             "n" => Self::Note,
             "p" => Self::Pen,
             "r" => Self::Rectangle,
@@ -81,11 +105,19 @@ impl Tool {
 
     /// Tools that stay active after use; the others return to Select (as in Preview).
     pub(crate) fn sticky(self) -> bool {
-        matches!(self, Self::Select | Self::Pen)
+        matches!(self, Self::Select | Self::Pen) || self.marks_text()
     }
 
+    /// Tools that draw shapes with a crosshair (not Select or the text tools).
     pub(crate) fn draws(self) -> bool {
-        self != Self::Select
+        self != Self::Select && !self.marks_text()
+    }
+
+    pub(crate) fn marks_text(self) -> bool {
+        matches!(
+            self,
+            Self::Highlight | Self::Underline | Self::StrikeOut | Self::Squiggly
+        )
     }
 }
 
@@ -148,10 +180,11 @@ impl Markup {
     /// The style new annotations of `tool` get: notes yellow, everything else red, 2 pt.
     pub(crate) fn style(&self, tool: Tool) -> Style {
         self.styles.get(&tool).copied().unwrap_or(Style {
-            color: if tool == Tool::Note {
-                COLORS[2].1
-            } else {
-                COLORS[0].1
+            // Notes and highlights yellow, text black, everything else red.
+            color: match tool {
+                Tool::Note | Tool::Highlight => COLORS[2].1,
+                Tool::TextBox => COLORS[6].1,
+                _ => COLORS[0].1,
             },
             width: 2.0,
             opacity: 1.0,
@@ -191,7 +224,19 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
     let (dx, dy) = (end.x - start.x, end.y - start.y);
     let moved = dx.abs().max(dy.abs()) >= min;
     let kind_rect = match tool {
-        Tool::Select => return None,
+        Tool::Select | Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
+            return None;
+        }
+        Tool::TextBox => {
+            let (w, h) = ferrix_annot::free_text::measure("", 12.0, None);
+            (
+                AnnotKind::FreeText {
+                    size: 12.0,
+                    color: COLORS[6].1,
+                },
+                PdfBox::from_corners(start, PdfPoint::new(start.x + w, start.y - h)),
+            )
+        }
         Tool::Note => (
             AnnotKind::Note {
                 icon: NoteIcon::Comment,
@@ -258,9 +303,18 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
         }
     };
     let (kind, rect) = kind_rect;
+    let is_text = matches!(kind, AnnotKind::FreeText { .. });
     let mut annot = Annotation::new(kind, rect);
     annot.props.color = Some(style.color);
     annot.props.border_width = style.width;
+    if is_text {
+        // The text's colour is in the kind; a text box has no border.
+        annot.props.color = None;
+        annot.props.border_width = 0.0;
+        if let AnnotKind::FreeText { color, .. } = &mut annot.kind {
+            *color = style.color;
+        }
+    }
     annot.props.opacity = style.opacity;
     annot.props.name = Some(ferrix_annot::unique_name());
     Some(annot)
@@ -340,7 +394,11 @@ pub(crate) fn moved(annot: &Annotation, dx: f32, dy: f32) -> Annotation {
 /// The handles of `annot`'s selection; none for notes, which keep their size.
 pub(crate) fn handles(annot: &Annotation) -> Vec<(Handle, PdfPoint)> {
     match &annot.kind {
-        AnnotKind::Note { .. } | AnnotKind::Other { .. } => Vec::new(),
+        // Notes keep their size, text boxes fit their text, text markup follows its text.
+        AnnotKind::Note { .. }
+        | AnnotKind::FreeText { .. }
+        | AnnotKind::Markup { .. }
+        | AnnotKind::Other { .. } => Vec::new(),
         AnnotKind::Line { from, to, .. } => vec![(Handle::LineFrom, *from), (Handle::LineTo, *to)],
         _ => {
             let r = shape_box(annot);
@@ -467,6 +525,11 @@ fn map_points(annot: &Annotation, f: impl Fn(PdfPoint) -> PdfPoint) -> Annotatio
         AnnotKind::Line { from, to, .. } => {
             *from = f(*from);
             *to = f(*to);
+        }
+        AnnotKind::Markup { quads, .. } => {
+            for p in quads.iter_mut().flatten() {
+                *p = f(*p);
+            }
         }
         _ => {}
     }

@@ -23,6 +23,16 @@ use crate::{
     view::{BAR_HEIGHT, CLUSTER_GAP, SEMIBOLD, icon_button, muted, pill, small_chevron},
 };
 
+/// A text box font size for the pick list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TextSize(u8);
+
+impl std::fmt::Display for TextSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} pt", self.0)
+    }
+}
+
 /// An opacity choice for the pick list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Opacity(u8);
@@ -43,6 +53,11 @@ const OPACITY_CHOICES: [Opacity; 4] = [
 fn tool_icon(tool: Tool) -> Icon {
     match tool {
         Tool::Select => Icon::Pointer,
+        Tool::Highlight => Icon::Highlighter,
+        Tool::Underline => Icon::Underline,
+        Tool::StrikeOut => Icon::Strikethrough,
+        Tool::Squiggly => Icon::UnderlineWavy,
+        Tool::TextBox => Icon::TextBox,
         Tool::Note => Icon::StickyNote,
         Tool::Pen => Icon::Pencil,
         Tool::Rectangle => Icon::Square,
@@ -60,6 +75,12 @@ fn kind_icon(annot: &Annotation) -> Icon {
         AnnotKind::Circle => Icon::Circle,
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => Icon::ArrowUpRight,
         AnnotKind::Line { .. } => Icon::Minus,
+        AnnotKind::FreeText { .. } => Icon::TextBox,
+        AnnotKind::Markup { style, .. } => match style {
+            ferrix_core::MarkupStyle::Highlight => Icon::Highlighter,
+            ferrix_core::MarkupStyle::StrikeOut => Icon::Strikethrough,
+            _ => Icon::Underline,
+        },
         AnnotKind::Other { .. } => Icon::Comments,
     }
 }
@@ -73,6 +94,13 @@ pub(crate) fn kind_name(annot: &Annotation) -> String {
         AnnotKind::Circle => "Ellipse".into(),
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => "Arrow".into(),
         AnnotKind::Line { .. } => "Line".into(),
+        AnnotKind::FreeText { .. } => "Text box".into(),
+        AnnotKind::Markup { style, .. } => match style {
+            ferrix_core::MarkupStyle::Highlight => "Highlight".into(),
+            ferrix_core::MarkupStyle::Underline => "Underline".into(),
+            ferrix_core::MarkupStyle::StrikeOut => "Strikethrough".into(),
+            ferrix_core::MarkupStyle::Squiggly => "Squiggly underline".into(),
+        },
         AnnotKind::Other { subtype } => match subtype.as_str() {
             "FreeText" => "Text box".into(),
             "Highlight" => "Highlight".into(),
@@ -110,14 +138,19 @@ impl App {
         if let Some(Permission::Forbidden(_)) = doc.annot_policy.as_ref().map(|p| &p.permission) {
             return bar(muted(CERTIFIED, 12.0).into());
         }
-        let tools = pill(row(Tool::ALL.into_iter().map(|tool| {
-            icon_button(
-                tool_icon(tool),
-                tool.label(),
-                Some(Message::Annot(AnnotMsg::Tool(tool))),
-                m.tool == tool,
-            )
-        })));
+        let tool_pill = |tools: &[Tool]| {
+            pill(row(tools.iter().map(|&tool| {
+                icon_button(
+                    tool_icon(tool),
+                    tool.label(),
+                    Some(Message::Annot(AnnotMsg::Tool(tool))),
+                    m.tool == tool,
+                )
+            })))
+        };
+        let tools = row![tool_pill(&Tool::TEXT), tool_pill(&Tool::ADD)]
+            .spacing(CLUSTER_GAP)
+            .align_y(Alignment::Center);
 
         let selected = m
             .selected
@@ -139,14 +172,28 @@ impl App {
                     m.tool
                 };
                 let style = m.style(tool);
-                let (color, width, opacity, is_note) = match selected {
-                    Some((_, a)) => (
-                        a.props.color.unwrap_or(Rgb::BLACK),
-                        a.props.border_width,
-                        a.props.opacity,
-                        matches!(a.kind, AnnotKind::Note { .. }),
+                // Text boxes show a font size instead of a line width.
+                let (color, width, opacity, is_note, text_size) = match selected {
+                    Some((_, a)) => {
+                        let (color, text_size) = match a.kind {
+                            AnnotKind::FreeText { size, color } => (color, Some(size)),
+                            _ => (a.props.color.unwrap_or(Rgb::BLACK), None),
+                        };
+                        (
+                            color,
+                            a.props.border_width,
+                            a.props.opacity,
+                            matches!(a.kind, AnnotKind::Note { .. }),
+                            text_size,
+                        )
+                    }
+                    None => (
+                        style.color,
+                        style.width,
+                        style.opacity,
+                        tool == Tool::Note,
+                        (tool == Tool::TextBox).then_some(12.0),
                     ),
-                    None => (style.color, style.width, style.opacity, tool == Tool::Note),
                 };
                 content = content.push(pill(row(COLORS.iter().enumerate().map(
                     |(i, (name, c))| {
@@ -158,7 +205,23 @@ impl App {
                         )
                     },
                 ))));
-                if !is_note {
+                if let Some(size) = text_size {
+                    let sizes: Vec<TextSize> = ferrix_annot::free_text::SIZES
+                        .iter()
+                        .map(|s| TextSize(*s as u8))
+                        .collect();
+                    content = content.push(
+                        pick_list(sizes, Some(TextSize(size.round() as u8)), |s: TextSize| {
+                            Message::Annot(AnnotMsg::TextSize(f32::from(s.0)))
+                        })
+                        .text_size(13)
+                        .padding([4, 8])
+                        .width(76)
+                        .handle(small_chevron())
+                        .style(theme::select)
+                        .menu_style(theme::select_menu),
+                    );
+                } else if !is_note {
                     content = content.push(pill(row(WIDTHS
                         .iter()
                         .map(|w| width_button(*w, (w - width).abs() < 0.01)))));
@@ -199,9 +262,6 @@ impl App {
         size: iced::Size,
         page: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        let Some(m) = self.markup.as_ref() else {
-            return page;
-        };
         let Some(transform) = doc
             .sources
             .get(entry.source.0 as usize)
@@ -211,28 +271,111 @@ impl App {
             return page;
         };
         let scale = doc.strip.zoom * LOGICAL_PX_PER_POINT;
-        let tool = m.tool;
+        // Outside Markup mode the overlay only selects text.
+        let m = self.markup.as_ref();
+        let tool = m.map_or(Tool::Select, |m| m.tool);
+        let intrinsic = doc
+            .sources
+            .get(entry.source.0 as usize)
+            .and_then(|s| s.transforms.get(entry.page.0 as usize))
+            .copied();
+        let selection_quads = match self.selection_quads() {
+            Some((page, quads)) if page == entry.key => quads,
+            _ => Vec::new(),
+        };
         let overlay = Overlay {
             page: entry.key,
             transform,
             scale,
-            annots: doc.state.annots.page(entry.key),
-            selected: m.selected,
+            annots: if m.is_some() {
+                doc.state.annots.page(entry.key)
+            } else {
+                &[]
+            },
+            selected: m.and_then(|m| m.selected),
             gesture: m
-                .gesture
-                .as_ref()
+                .and_then(|m| m.gesture.as_ref())
                 .filter(|(p, _)| *p == entry.key)
                 .map(|(_, g)| g),
             tool,
-            style: m.style(tool),
+            style: m.map_or(markup::Markup::default().style(tool), |m| m.style(tool)),
             shift: self.modifiers.shift(),
             alt: self.modifiers.alt(),
+            text: doc.texts.get(&entry.key).map(|t| t.as_ref()).zip(intrinsic),
+            selection_quads: selection_quads.clone(),
         };
         let mut layers = stack![page, canvas(overlay).width(size.width).height(size.height)];
+        // The selection bar, just above the selection once the pointer is up.
+        if let Some(first) = selection_quads.first()
+            && self.text_selection.is_some_and(|s| !s.dragging)
+        {
+            let top_left = transform.to_page(first[0].x, first[0].y);
+            let (x, y) = (top_left.x * scale, top_left.y * scale);
+            let certified = matches!(
+                doc.annot_policy.as_ref().map(|p| &p.permission),
+                Some(Permission::Forbidden(_))
+            );
+            const HEIGHT: f32 = 40.0;
+            let y = if y > HEIGHT + 8.0 {
+                y - HEIGHT - 8.0
+            } else {
+                y + 24.0
+            };
+            layers = layers.push(
+                container(opaque(selection_bar(certified)))
+                    .width(size.width)
+                    .height(size.height)
+                    .padding(iced::Padding {
+                        top: y.clamp(0.0, (size.height - HEIGHT).max(0.0)),
+                        left: x.clamp(0.0, (size.width - 320.0).max(0.0)),
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
+            );
+        }
         if let Some(note) = self.note.as_ref().filter(|n| n.page == entry.key)
             && let Some((_, annot)) = doc.state.annots.get(note.id)
         {
             let r = annot.props.rect;
+            if let AnnotKind::FreeText { size: font, color } = annot.kind {
+                // Text boxes are edited in place, over the box, at the page's zoom.
+                let corner = transform.to_page(r.left, r.top);
+                let (x, y) = (corner.x * scale, corner.y * scale);
+                let width = (r.width() * scale)
+                    .max(160.0)
+                    .min((size.width - x).max(80.0));
+                let editor = text_editor(&note.content)
+                    .placeholder("Type here")
+                    .size(font * scale)
+                    .padding(ferrix_annot::free_text::PADDING * scale)
+                    .width(width)
+                    .on_action(|a| Message::Annot(AnnotMsg::NoteEdit(a)))
+                    .style(move |theme: &Theme, status| {
+                        let t = theme::tokens(theme);
+                        let mut style = text_editor::default(theme, status);
+                        // Paper white hides the committed text PDFium draws underneath.
+                        style.background = Background::Color(Color::WHITE);
+                        style.border = Border {
+                            color: t.accent,
+                            width: 1.0,
+                            radius: 0.0.into(),
+                        };
+                        style.value = iced_color(color);
+                        style
+                    });
+                layers = layers.push(
+                    container(opaque(editor))
+                        .width(size.width)
+                        .height(size.height)
+                        .padding(iced::Padding {
+                            top: y.clamp(0.0, size.height),
+                            left: x.clamp(0.0, size.width),
+                            right: 0.0,
+                            bottom: 0.0,
+                        }),
+                );
+                return layers.into();
+            }
             let corner = transform.to_page(r.right, r.top);
             let (x, y) = (corner.x * scale + 8.0, corner.y * scale);
             const WIDTH: f32 = 280.0;
@@ -369,6 +512,51 @@ impl App {
                 .style(theme::backdrop),
         )
     }
+}
+
+/// Highlight colours, underline styles and Copy, over a text selection.
+fn selection_bar<'a>(certified: bool) -> Element<'a, Message> {
+    use ferrix_core::MarkupStyle as S;
+    let mut items = row![].spacing(2).align_y(Alignment::Center);
+    if !certified {
+        for i in crate::text_select::HIGHLIGHTS {
+            let (name, c) = COLORS[i];
+            items = items.push(swatch(
+                c,
+                false,
+                name,
+                Message::MarkSelection(S::Highlight, i),
+            ));
+        }
+        items = items
+            .push(Space::new().width(6))
+            .push(icon_button(
+                Icon::Underline,
+                "Underline",
+                Some(Message::MarkSelection(S::Underline, 0)),
+                false,
+            ))
+            .push(icon_button(
+                Icon::Strikethrough,
+                "Strikethrough",
+                Some(Message::MarkSelection(S::StrikeOut, 0)),
+                false,
+            ))
+            .push(icon_button(
+                Icon::UnderlineWavy,
+                "Squiggly underline",
+                Some(Message::MarkSelection(S::Squiggly, 0)),
+                false,
+            ))
+            .push(Space::new().width(6));
+    }
+    items = items.push(icon_button(
+        Icon::Copy,
+        "Copy (⌘C)",
+        Some(Message::CopyText),
+        false,
+    ));
+    container(items).padding(4).style(theme::popover).into()
 }
 
 fn close(a: Rgb, b: Rgb) -> bool {

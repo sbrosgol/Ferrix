@@ -250,10 +250,54 @@ pub enum AnnotKind {
         to: PdfPoint,
         ends: [LineEnd; 2],
     },
-    /// Any other subtype (free text, highlights, stamps, attachments…). Shown, listed and
-    /// deletable, never rewritten.
+    /// A text box (`FreeText`): its text is `/Contents` (in [`AnnotProps::contents`]), set in
+    /// the bundled sans-serif at `size` points in `color`, inside `rect`.
+    FreeText { size: f32, color: Rgb },
+    /// Highlight, underline, strike-out or squiggly underline over text: one quadrilateral per
+    /// line run (`/QuadPoints`), each as top-left, top-right, bottom-left, bottom-right (the
+    /// order Acrobat writes and readers expect).
+    Markup {
+        style: MarkupStyle,
+        quads: Vec<[PdfPoint; 4]>,
+    },
+    /// Any other subtype (free text, stamps, attachments…). Shown, listed and deletable, never
+    /// rewritten.
     Other { subtype: String },
 }
+
+/// Which text-markup annotation (ISO 32000-2 §12.5.6.10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MarkupStyle {
+    Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+}
+
+impl MarkupStyle {
+    pub const ALL: [Self; 4] = [
+        Self::Highlight,
+        Self::Underline,
+        Self::StrikeOut,
+        Self::Squiggly,
+    ];
+
+    pub fn subtype(self) -> &'static str {
+        match self {
+            Self::Highlight => "Highlight",
+            Self::Underline => "Underline",
+            Self::StrikeOut => "StrikeOut",
+            Self::Squiggly => "Squiggly",
+        }
+    }
+
+    pub fn from_subtype(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.subtype() == name)
+    }
+}
+
+/// Most quadrilaterals in one text-markup annotation.
+pub const MAX_QUADS: usize = 10_000;
 
 impl AnnotKind {
     /// The PDF `/Subtype` name.
@@ -264,6 +308,8 @@ impl AnnotKind {
             Self::Square => "Square",
             Self::Circle => "Circle",
             Self::Line { .. } => "Line",
+            Self::Markup { style, .. } => style.subtype(),
+            Self::FreeText { .. } => "FreeText",
             Self::Other { subtype } => subtype,
         }
     }
@@ -415,6 +461,19 @@ impl Annotation {
                 icon: NoteIcon::Other(name),
                 ..
             } if !name_ok(name) => return invalid("note icon"),
+            AnnotKind::FreeText { size, color } => {
+                if !(4.0..=144.0).contains(size) || !color.is_valid() {
+                    return invalid("text box");
+                }
+            }
+            AnnotKind::Markup { quads, .. } => {
+                if quads.is_empty() || quads.len() > MAX_QUADS {
+                    return invalid("text markup");
+                }
+                if !quads.iter().flatten().all(finite) {
+                    return invalid("text markup point");
+                }
+            }
             AnnotKind::Other { subtype } if subtype.is_empty() => return invalid("subtype"),
             _ => {}
         }

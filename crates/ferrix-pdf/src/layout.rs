@@ -169,6 +169,54 @@ impl Revision {
         self.replaced.insert(id, object);
     }
 
+    /// Copies page `page` (zero-based) of the PDF `bytes` into this revision as a form XObject
+    /// with `bbox` (in the page's own space), returning its id. Everything the page draws with
+    /// (fonts, images, graphics states) comes along, renumbered after this revision's objects.
+    /// Used for appearance streams laid out by another PDF writer (ADR-0009 §5).
+    pub fn import_page_as_form(
+        &mut self,
+        bytes: &[u8],
+        page: u32,
+        bbox: [f32; 4],
+    ) -> Result<ObjectId, PdfError> {
+        let mut doc = parse(bytes, None)?;
+        doc.renumber_objects_with(self.inc.new_document.max_id + 1);
+        let page_id = *doc
+            .get_pages()
+            .get(&(page + 1))
+            .ok_or_else(|| PdfError::InvalidLayout(format!("no page {}", page + 1)))?;
+        let content = doc
+            .get_page_content_with_limit(page_id, crate::MAX_STREAM_BYTES)
+            .map_err(|e| PdfError::Parse(e.to_string()))?;
+        let page_dict = flattened_page(&doc, page_id)?;
+        let resources = match page_dict.get(b"Resources") {
+            Ok(Object::Reference(id)) => doc.get_dictionary(*id)?.clone(),
+            Ok(Object::Dictionary(d)) => d.clone(),
+            _ => Dictionary::new(),
+        };
+        let mut ids = BTreeSet::new();
+        collect_references(&doc, &Object::Dictionary(resources.clone()), &mut ids)?;
+        for id in ids {
+            if let Ok(object) = doc.get_object(id) {
+                self.inc.new_document.set_object(id, object.clone());
+            }
+        }
+        self.inc.new_document.max_id = self.inc.new_document.max_id.max(doc.max_id);
+
+        let mut form = Dictionary::new();
+        form.set("Type", Object::Name(b"XObject".to_vec()));
+        form.set("Subtype", Object::Name(b"Form".to_vec()));
+        form.set(
+            "BBox",
+            Object::Array(bbox.iter().map(|v| Object::Real(*v)).collect()),
+        );
+        form.set("Resources", Object::Dictionary(resources));
+        let mut stream = lopdf::Stream::new(form, content);
+        // Compression only fails on filters we didn't ask for; uncompressed is still valid.
+        let _ = stream.compress();
+        Ok(self.add_object(Object::Stream(stream)))
+    }
+
     /// Sets the final `/Annots` array of a page.
     pub fn set_page_annots(
         &mut self,

@@ -38,6 +38,7 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 | `danger` | destructive actions, errors |
 | `focus` | focus ring |
 | `page_shadow` | paper shadow |
+| `page_selection` | selected text on a page, viewer and writer: `#3563E9` at 28 %, the same in both themes (paper stays white) |
 
 ## Scales
 
@@ -123,22 +124,30 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
 
 ## Annotations
 
-Phase 2 of ADR-0009. Annotating is a mode, as in Preview: reading stays uncluttered, and tools
-appear only when asked for.
+Phases 2 and 3 of ADR-0009. Annotating is a mode, as in Preview: reading stays uncluttered, and
+tools appear only when asked for.
 
 - **Markup toggle:** an icon button (`pen-line`, "Markup (⇧⌘A)") in the toolbar's right side,
   before the zoom pill; toggled-on style while the mode is on. It never folds into `⋯`.
 - **Annotation bar:** 42 high under the toolbar (same height, `chrome` fill and bottom hairline as
   the writer format bar), pills 12 apart, padding [0, 10]:
-  1. tools pill: Select · Note · Pen · Rectangle · Ellipse · Line · Arrow (icon buttons 30, 2 apart)
+  1. two tool pills (icon buttons 30, 2 apart). Text: Select (V) · Highlight (H) · Underline (U)
+     · Strikethrough (S) · Squiggly underline (W). Add: Text box (T) · Note (N) · Pen (P) ·
+     Rectangle (R) · Ellipse (O) · Line (L) · Arrow (A)
   2. colour pill: seven 20 px swatches in 28 px targets
   3. width pill: 1, 2, 4, 8 pt as icon buttons showing a line of that weight (lines, shapes, ink)
-  4. opacity select (`select_flat`, 72 wide): 100 %, 75 %, 50 %, 25 %
-  5. right-aligned: Delete (`trash-2`), only with a selection
+  4. font size select (text boxes, `select_flat`, 72 wide): 8, 10, 12, 14, 18, 24, 36 pt
+  5. opacity select (`select_flat`, 72 wide): 100 %, 75 %, 50 %, 25 %
+  6. right-aligned: Delete (`trash-2`), only with a selection
 
-  The properties (2–4) edit the selection if there is one, otherwise the active tool's defaults
-  (remembered per tool for the session). A control that doesn't apply is hidden (width for notes).
-  Below 820 px the colour pill becomes one swatch with a chevron that opens the seven in a popover.
+  Properties (2–5) edit the selection, else the active tool's defaults (remembered per tool for
+  the session). Controls that don't apply are hidden. Narrow windows fold controls, never shrink
+  them: below 980 px (`is_compact`) the four text-markup tools fold into one 42-wide button (last
+  used, with a chevron opening a popover of all four); below 820 px (`is_narrow`) the four shapes
+  fold the same way and the colour pill becomes one swatch with a chevron. Tool keys work in
+  Markup when no text has focus, folded or not. Highlight, the underlines and Pen stay active.
+- **Icons** (Lucide, 16): `type`, `highlighter`, `underline`, `strikethrough`, `copy`, and our own
+  `underline-wavy` (Lucide `underline` with a wavy rule, same grid and stroke).
 - **Annotation palette** (`theme::ANNOT_COLORS`, paper colours, the same in both themes):
   Red `#E03131`, Orange `#E8590C`, Yellow `#F2C200`, Green `#2F9E44`, Blue `#1C7ED6`,
   Purple `#7048E8`, Black `#1B1D21`. All but yellow reach 3:1 on white; yellow is for notes,
@@ -153,9 +162,53 @@ appear only when asked for.
   three segments, the segments are icons with tooltips). Comment rows: 8 × 12 padding, radius 6,
   selected row `accent_soft`; grouped under "Page 3" overlines.
 - **Note editor:** a 280-wide popover (`theme::popover`, menu elevation) beside the note.
+- **Comment rows for text:** a text box shows its first two lines; text markup shows the text it
+  covers (read from the page, in curly quotes, two lines, “…” if cut), both 13 `text_muted`.
+  Empty state: "Turn on Markup to add notes, highlights and drawings."
 
-Why: a mode keeps the reading toolbar unchanged; reusing the format bar's height and pill rules
-means no new chrome tokens. The only new constants are the paper palette and handle sizes.
+### Text selection (every mode)
+
+- **Pointer:** I-beam over text, arrow elsewhere. Drag selects in text order, across pages;
+  double-click selects a word, triple-click a line, Shift-click extends. A press elsewhere or Esc
+  clears it. Painted in `page_selection`, one rect per line.
+- **Keys:** ⌘A selects the document's text (the sidebar's pages when it has focus). ⌘C copies
+  plain text, lines joined by line breaks, end-of-line hyphens dropped. When Find closes, the
+  current match stays selected: ⌘F, Esc, ⌘C is the keyboard path.
+- **With Markup's Select:** the topmost thing under the press wins: an annotation, then text, then
+  nothing (clears). A drag that starts on a highlight selects text; a click selects the highlight.
+- **No text** (scans): no I-beam; a markup tool shows “not allowed” and the status bar says "This
+  page has no selectable text. It may be a scan." **Copying forbidden** by the file: Copy is
+  disabled, tooltip "The document’s author doesn’t allow copying."
+
+### Text markup
+
+- **Tool first:** drag (or double- or triple-click) with a markup tool; the result paints live in
+  the tool's colour, and release adds one annotation, one quad per line.
+- **Selection first:** releasing a selection shows the **selection bar**, 8 above the first line,
+  centred, clamped to the page, flipped below when there's no room. `theme::popover`, height 32,
+  padding 2: Yellow · Green · Blue · Red highlight swatches (tooltips "Highlight yellow"…), 8 gap,
+  Underline · Strikethrough · Squiggly underline, 8 gap, Copy (⌘C); 28 targets. It appears in
+  every mode (markup buttons hidden in certified files). In Markup, H U S W also apply to it.
+- **Existing markup:** outside Markup a click opens the same bar, with swatches recolouring and
+  Delete (`trash-2`) instead of the underline buttons. In Markup it selects, without handles.
+- **Defaults:** highlight yellow at 50 % with Multiply (text stays black); the others red at
+  100 %, rule a tenth of the line height, at least 1 pt.
+
+### Text box
+
+- **Placing:** a click starts an auto-width box that grows as you type (Return breaks lines); a
+  drag sets the width (at least 24 pt). Height always fits the text.
+- **Look:** Liberation Sans (metrics of the `/DA` Helvetica), 12 pt, black by default (filling
+  in, not marking up). No border, fill or alignment control; boxes from other apps keep theirs.
+- **Editing in place:** a transparent `text_editor` over the page at the current zoom, 1 px
+  `accent` frame, no handles. Esc, Tab, ⌘Return or a click outside commits; a box left empty
+  disappears. One session, one undo step. Double-click, or Return on a selected box, edits again.
+- **Selected:** drag the body to move; two side handles change the width (an auto-width box
+  becomes fixed). Bar: colour and font size.
+
+Why: a mode keeps reading uncluttered, and reusing the format bar's rules adds no chrome tokens,
+only the paper palette, `page_selection` and handle sizes. Selection lives outside Markup
+because copying is reading.
 
 ## Writing rules
 

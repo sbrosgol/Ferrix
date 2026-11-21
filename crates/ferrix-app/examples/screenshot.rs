@@ -57,6 +57,12 @@ fn main() {
     if flag(&mut args, "--next") {
         script.extend([Message::Next, Message::Next, Message::Next]);
     }
+    if flag(&mut args, "--textbox") {
+        script.extend(textbox_script());
+    }
+    if flag(&mut args, "--select") {
+        script.extend(select_script());
+    }
     if flag(&mut args, "--markup") {
         script.extend(markup_script());
     }
@@ -111,6 +117,49 @@ fn main() {
         shot.size.width,
         shot.size.height
     );
+}
+
+/// Adds a text box, types into it and commits it.
+fn textbox_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_types::PdfPoint;
+    let mut s = vec![
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::TextBox)),
+        Message::Annot(A::Color(4)),
+        Message::Annot(A::PointerAt(0, P::Press(PdfPoint::new(330.0, 770.0)))),
+    ];
+    for c in "Approved — see the notes below".chars() {
+        s.push(Message::Annot(A::NoteEdit(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert(c)),
+        )));
+    }
+    s.push(Message::Annot(A::NoteDone));
+    s
+}
+
+/// Highlights a line (triple-click, then the selection bar), underlines another with the
+/// Underline tool, then double-clicks a word to show the selection bar. Coordinates suit the
+/// first page of Apple's ENERGY STAR notice.
+fn select_script() -> Vec<Message> {
+    use ferrix_app::{annotate_ui::AnnotMsg as A, markup::Tool, markup_canvas::Pointer as P};
+    use ferrix_core::MarkupStyle;
+    use ferrix_types::PdfPoint;
+    let at = |p: P| Message::Annot(A::PointerAt(0, p));
+    let pt = PdfPoint::new;
+    vec![
+        at(P::Click(pt(150.0, 658.0), 3)),
+        at(P::Release(pt(150.0, 658.0))),
+        Message::MarkSelection(MarkupStyle::Highlight, 2),
+        Message::Annot(A::Toggle),
+        Message::Annot(A::Tool(Tool::Underline)),
+        at(P::Press(pt(42.0, 602.0))),
+        at(P::Drag(pt(300.0, 602.0))),
+        at(P::Release(pt(300.0, 602.0))),
+        Message::Annot(A::Tool(Tool::Select)),
+        at(P::Click(pt(120.0, 510.0), 2)),
+        at(P::Release(pt(120.0, 510.0))),
+    ]
 }
 
 /// Turns on Markup, draws a rectangle and an arrow, places a note and types into it, then

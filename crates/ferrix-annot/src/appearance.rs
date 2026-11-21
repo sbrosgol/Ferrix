@@ -7,7 +7,7 @@
 use std::f32::consts::PI;
 use std::fmt::Write as _;
 
-use ferrix_core::{AnnotKind, Annotation, LineEnd, NoteIcon, Rgb};
+use ferrix_core::{AnnotKind, Annotation, LineEnd, MarkupStyle, NoteIcon, Rgb};
 use ferrix_types::{PdfBox, PdfPoint};
 
 /// Bézier control-point distance for a quarter circle of radius 1.
@@ -48,6 +48,8 @@ pub struct Appearance {
     pub bbox: PdfBox,
     /// Applied to the whole appearance.
     pub opacity: f32,
+    /// Blend with the page by multiplying (highlights: the text under them stays dark).
+    pub multiply: bool,
     pub items: Vec<Item>,
 }
 
@@ -118,6 +120,16 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
                 .outset(width / 2.0 + 1.0);
             (items, bbox)
         }
+        // Text is set by `free_text` when writing; the display list has only the box.
+        AnnotKind::FreeText { .. } => (Vec::new(), props.rect),
+        AnnotKind::Markup { style, quads } => {
+            let color = props.color.unwrap_or(Rgb::new(1.0, 0.82, 0.2));
+            let items = markup_items(*style, quads, color);
+            let bbox = PdfBox::bounding(quads.iter().flatten().copied())
+                .unwrap_or(props.rect)
+                .outset(1.0);
+            (items, bbox)
+        }
         AnnotKind::Line { from, to, ends } => {
             let mut items = vec![Item {
                 path: vec![PathEl::MoveTo(*from), PathEl::LineTo(*to)],
@@ -138,8 +150,95 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
     Some(Appearance {
         bbox,
         opacity: props.opacity,
+        multiply: matches!(
+            annot.kind,
+            AnnotKind::Markup {
+                style: MarkupStyle::Highlight,
+                ..
+            }
+        ),
         items,
     })
+}
+
+/// Text markup over `quads` (each top-left, top-right, bottom-left, bottom-right).
+///
+/// Highlights fill every quad in one path, so overlapping lines aren't darkened twice. Lines
+/// use butt caps and stay inside their quads (thickness about a fourteenth of the line height).
+fn markup_items(style: MarkupStyle, quads: &[[PdfPoint; 4]], color: Rgb) -> Vec<Item> {
+    if style == MarkupStyle::Highlight {
+        let mut path = Vec::with_capacity(quads.len() * 5);
+        for &[tl, tr, bl, br] in quads {
+            path.extend([
+                PathEl::MoveTo(tl),
+                PathEl::LineTo(tr),
+                PathEl::LineTo(br),
+                PathEl::LineTo(bl),
+                PathEl::Close,
+            ]);
+        }
+        return vec![Item {
+            path,
+            fill: Some(color),
+            stroke: None,
+        }];
+    }
+    let mut path = Vec::new();
+    let mut thickness = f32::INFINITY;
+    for &[tl, _tr, bl, br] in quads {
+        let (bx, by) = (br.x - bl.x, br.y - bl.y);
+        let len = bx.hypot(by);
+        let (hx, hy) = (tl.x - bl.x, tl.y - bl.y);
+        let height = hx.hypot(hy);
+        if len <= f32::EPSILON || height <= f32::EPSILON {
+            continue;
+        }
+        // Along the text (u) and towards its top (n), so rotated text works too.
+        let (ux, uy) = (bx / len, by / len);
+        let (nx, ny) = (hx / height, hy / height);
+        let at = |along: f32, up: f32| {
+            PdfPoint::new(bl.x + ux * along + nx * up, bl.y + uy * along + ny * up)
+        };
+        let t = (height / 14.0).max(0.5);
+        thickness = thickness.min(t);
+        match style {
+            MarkupStyle::Underline => {
+                path.push(PathEl::MoveTo(at(0.0, t / 2.0)));
+                path.push(PathEl::LineTo(at(len, t / 2.0)));
+            }
+            MarkupStyle::StrikeOut => {
+                path.push(PathEl::MoveTo(at(0.0, height / 2.0)));
+                path.push(PathEl::LineTo(at(len, height / 2.0)));
+            }
+            MarkupStyle::Squiggly | MarkupStyle::Highlight => {
+                // A zigzag in the bottom eighth of the line, period a quarter of its height.
+                let period = (height / 4.0).max(1.0);
+                let (low, high) = (t / 2.0, height / 8.0);
+                path.push(PathEl::MoveTo(at(0.0, low)));
+                let mut x = period / 2.0;
+                let mut up = true;
+                while x < len {
+                    path.push(PathEl::LineTo(at(x, if up { high } else { low })));
+                    up = !up;
+                    x += period / 2.0;
+                }
+                path.push(PathEl::LineTo(at(len, if up { high } else { low })));
+            }
+        }
+    }
+    if path.is_empty() {
+        return Vec::new();
+    }
+    vec![Item {
+        path,
+        fill: None,
+        stroke: Some(Stroke {
+            color,
+            width: thickness,
+            dash: Vec::new(),
+            round: false,
+        }),
+    }]
 }
 
 impl Appearance {

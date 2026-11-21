@@ -296,6 +296,8 @@ pub struct App {
     /// Asking whether to annotate a signed document.
     pub(crate) signed_prompt: bool,
     pub(crate) sidebar_tab: crate::annotate_ui::SidebarTab,
+    /// Text selected on a page.
+    pub(crate) text_selection: Option<crate::text_select::TextSelection>,
     pub(crate) sidebar: bool,
     pub(crate) zoom: Zoom,
     pub(crate) doc: Option<Document>,
@@ -355,6 +357,16 @@ pub enum Message {
     ToggleTheme,
     ToggleMenu,
     Annot(crate::annotate_ui::AnnotMsg),
+    /// A page's text arrived (document, page, text).
+    TextLoaded(
+        DocId,
+        PageKey,
+        Result<std::sync::Arc<ferrix_text::PageText>, String>,
+    ),
+    CopyText,
+    SelectAllText,
+    /// Mark the selected text: style and palette colour index.
+    MarkSelection(ferrix_core::MarkupStyle, usize),
     SidebarTab(crate::annotate_ui::SidebarTab),
     SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
@@ -479,6 +491,7 @@ impl App {
             note: None,
             signed_prompt: false,
             sidebar_tab: crate::annotate_ui::SidebarTab::Pages,
+            text_selection: None,
             sidebar: true,
             zoom: Zoom::Auto,
             doc: None,
@@ -620,6 +633,16 @@ impl App {
             }
             Message::ToggleMenu => self.menu_open = !self.menu_open,
             Message::Annot(msg) => return self.annot_update(msg),
+            Message::TextLoaded(doc_id, page, result) => {
+                return self.text_loaded(doc_id, page, result);
+            }
+            Message::CopyText => return self.copy_text(),
+            Message::SelectAllText => self.select_page_text(),
+            Message::MarkSelection(style, color) => {
+                if let Some((_, color)) = crate::markup::COLORS.get(color) {
+                    return self.mark_selection(style, *color);
+                }
+            }
             Message::SidebarTab(tab) => {
                 self.sidebar_tab = tab;
                 self.sidebar = true;
@@ -666,7 +689,7 @@ impl App {
                         doc.render_failed.insert(key);
                     }
                 }
-                return self.render_pages();
+                return Task::batch([self.render_pages(), self.load_texts()]);
             }
             Message::PageScrolled(top) => return self.page_scrolled(top),
             Message::Thumbnail(doc_id, key, rotation, source, result) => {
@@ -1004,6 +1027,7 @@ impl App {
             Message::Escape if self.menu_open => self.menu_open = false,
             Message::Escape if self.signed_prompt => self.signed_prompt = false,
             Message::Escape if self.note.is_some() => return self.close_note(),
+            Message::Escape if self.text_selection.is_some() => self.text_selection = None,
             // In Markup mode, Esc cancels a drag, then returns to Select, then deselects.
             Message::Escape
                 if self.markup.as_ref().is_some_and(|m| {
@@ -1661,6 +1685,7 @@ impl App {
         self.find = None;
         self.markup = None;
         self.note = None;
+        self.text_selection = None;
         self.signed_prompt = false;
         if let Some(writer) = self.writer.take() {
             self.fonts = Some(writer.editor.into_fonts());
@@ -2251,7 +2276,7 @@ impl App {
     }
 
     /// Height of the scrolled page view, in logical pixels.
-    fn viewport_height(&self) -> f32 {
+    pub(crate) fn viewport_height(&self) -> f32 {
         crate::view::page_view_height(self.view_window())
     }
 
@@ -2623,6 +2648,8 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
             let shift = modifiers.shift();
             match c.to_ascii_lowercase().as_str() {
                 "a" if shift => Some(Message::Annot(crate::annotate_ui::AnnotMsg::Toggle)),
+                "a" => Some(Message::SelectAllText),
+                "c" => Some(Message::CopyText),
                 "o" => Some(Message::OpenDialog),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
