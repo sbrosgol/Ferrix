@@ -971,3 +971,106 @@ fn translucent_shapes_are_painted_as_one_group() {
     let px = &tile.pixels[at..at + 3];
     assert!(px[0] > 110 && px[0] < 145 && px[2] > 110, "{px:?}");
 }
+
+#[test]
+fn text_markup_round_trips_and_highlights_multiply() {
+    use ferrix_core::MarkupStyle;
+    let base = fixture();
+    let mut state = open_state(&base, None);
+    // One quad per style, Acrobat order: top-left, top-right, bottom-left, bottom-right.
+    let quad = |y: f32| {
+        [
+            pt(100.0, y + 12.0),
+            pt(300.0, y + 12.0),
+            pt(100.0, y),
+            pt(300.0, y),
+        ]
+    };
+    for (i, style) in MarkupStyle::ALL.into_iter().enumerate() {
+        let mut a = Annotation::new(
+            AnnotKind::Markup {
+                style,
+                quads: vec![quad(500.0 + 30.0 * i as f32)],
+            },
+            PdfBox::default(),
+        );
+        a.props.color = Some(Rgb::new(1.0, 0.85, 0.0));
+        add(&mut state, 0, a);
+    }
+    let out = save_state(&base, None, &state);
+    let reread = open_state(&out, None);
+    let page = reread.pages.entries()[0].key;
+    let marks: Vec<&Annotation> = reread
+        .annots
+        .page(page)
+        .iter()
+        .map(|(_, a)| a)
+        .filter(|a| matches!(a.kind, AnnotKind::Markup { .. }))
+        .collect();
+    assert_eq!(marks.len(), 4);
+    let AnnotKind::Markup { style, quads } = &marks[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(
+        (*style, quads.as_slice()),
+        (MarkupStyle::Highlight, &[quad(500.0)][..])
+    );
+
+    let Some(mut engine) = pdfium() else { return };
+    let seen = pdfium_annotations(&mut engine, &out, None);
+    for subtype in ["Highlight", "Underline", "StrikeOut", "Squiggly"] {
+        assert!(
+            seen[0].iter().any(|(s, _)| s == subtype),
+            "PDFium sees {subtype}"
+        );
+    }
+    // The fixture's page content fills everything with blue (0 0 1 rg but draws nothing), so
+    // over white paper a multiplied yellow highlight is yellow: red and green high, blue low.
+    let doc = engine.open(DocSource::Bytes(out), None).unwrap();
+    let tile = engine
+        .render_tile(&TileRequest {
+            doc: doc.id,
+            page: PageIndex(0),
+            scale: 1.0,
+            rotation: Rotation::R0,
+            // User (200, 506) → page (200, 792 - 506).
+            region: PixelRect::new(196, 282, 8, 8),
+            flags: RenderFlags::default(),
+        })
+        .unwrap();
+    let at = (4 * 8 + 4) * 4;
+    let px = &tile.pixels[at..at + 3];
+    assert!(px[0] > 230 && px[1] > 200 && px[2] < 40, "{px:?}");
+}
+
+#[test]
+fn quad_points_in_specification_order_are_reordered() {
+    let base = fixture_with(|doc, page| {
+        // Counter-clockwise from bottom-left: BL, BR, TR, TL.
+        let quads: Vec<Object> = [100, 500, 300, 500, 300, 512, 100, 512]
+            .iter()
+            .map(|v| Object::Integer(*v))
+            .collect();
+        let h = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Highlight", "P" => page,
+            "Rect" => vec![100.into(), 500.into(), 300.into(), 512.into()],
+            "QuadPoints" => quads,
+        });
+        vec![h.into()]
+    });
+    let state = open_state(&base, None);
+    let page = state.pages.entries()[0].key;
+    let (_, h) = state.annots.page(page).last().unwrap();
+    let AnnotKind::Markup { quads, .. } = &h.kind else {
+        panic!("not markup: {:?}", h.kind)
+    };
+    assert_eq!(
+        quads[0],
+        [
+            pt(100.0, 512.0),
+            pt(300.0, 512.0),
+            pt(100.0, 500.0),
+            pt(300.0, 500.0)
+        ]
+    );
+}

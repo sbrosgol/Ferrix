@@ -14,8 +14,8 @@ mod state;
 
 pub use annots::{
     AnnotEdit, AnnotFlags, AnnotId, AnnotKind, AnnotOrigin, AnnotProps, AnnotSet, Annotation,
-    LineEnd, MAX_COORD, MAX_INK_POINTS, MAX_STROKE_POINTS, MAX_STROKES, MAX_TEXT_BYTES, NoteIcon,
-    ObjectRef, Rgb,
+    LineEnd, MAX_COORD, MAX_INK_POINTS, MAX_QUADS, MAX_STROKE_POINTS, MAX_STROKES, MAX_TEXT_BYTES,
+    MarkupStyle, NoteIcon, ObjectRef, Rgb,
 };
 pub use history::History;
 pub use pages::{Edit, EditError, PageEntry, PageKey, PageList, SourceId};

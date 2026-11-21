@@ -1517,6 +1517,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrix-text"
+version = "0.0.1"
+dependencies = [
+ "ferrix-compose",
+ "ferrix-engine",
+ "ferrix-engine-pdfium",
+ "ferrix-types",
+]
+
+[[package]]
 name = "ferrix-types"
 version = "0.0.1"
 dependencies = [

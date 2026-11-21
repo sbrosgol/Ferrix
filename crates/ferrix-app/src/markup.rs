@@ -340,7 +340,8 @@ pub(crate) fn moved(annot: &Annotation, dx: f32, dy: f32) -> Annotation {
 /// The handles of `annot`'s selection; none for notes, which keep their size.
 pub(crate) fn handles(annot: &Annotation) -> Vec<(Handle, PdfPoint)> {
     match &annot.kind {
-        AnnotKind::Note { .. } | AnnotKind::Other { .. } => Vec::new(),
+        // Notes keep their size; text markup follows the text it marks.
+        AnnotKind::Note { .. } | AnnotKind::Markup { .. } | AnnotKind::Other { .. } => Vec::new(),
         AnnotKind::Line { from, to, .. } => vec![(Handle::LineFrom, *from), (Handle::LineTo, *to)],
         _ => {
             let r = shape_box(annot);
@@ -467,6 +468,11 @@ fn map_points(annot: &Annotation, f: impl Fn(PdfPoint) -> PdfPoint) -> Annotatio
         AnnotKind::Line { from, to, .. } => {
             *from = f(*from);
             *to = f(*to);
+        }
+        AnnotKind::Markup { quads, .. } => {
+            for p in quads.iter_mut().flatten() {
+                *p = f(*p);
+            }
         }
         _ => {}
     }

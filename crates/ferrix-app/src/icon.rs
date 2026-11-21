@@ -58,6 +58,8 @@ pub(crate) enum Icon {
     ArrowUpRight,
     Lock,
     Comments,
+    Highlighter,
+    TextBox,
 }
 
 macro_rules! icons {
@@ -128,6 +130,8 @@ icons! {
     ArrowUpRight => "move-up-right",
     Lock => "lock",
     Comments => "message-square-text",
+    Highlighter => "highlighter",
+    TextBox => "type",
 }
 
 fn load(source: &str) -> svg::Handle {

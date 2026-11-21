@@ -22,6 +22,7 @@ ferrix-engine-pdfium = { path = "crates/ferrix-engine-pdfium" }
 ferrix-io = { path = "crates/ferrix-io" }
 ferrix-pdf = { path = "crates/ferrix-pdf" }
 ferrix-print = { path = "crates/ferrix-print" }
+ferrix-text = { path = "crates/ferrix-text" }
 
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 anyhow = "1.0.104"

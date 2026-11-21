@@ -364,6 +364,22 @@ fn appearance_stream(revision: &mut Revision, ap: &Appearance, cmyk: bool) -> Ob
         Object::Stream(stream)
     };
     let shapes = ap.content(cmyk);
+    if ap.multiply {
+        // Multiply must blend with the page itself, so no isolating group here: the shapes
+        // are drawn directly through a graphics state with the blend mode and opacity.
+        let mut gs = Dictionary::new();
+        gs.set("Type", Object::Name(b"ExtGState".to_vec()));
+        gs.set("BM", Object::Name(b"Multiply".to_vec()));
+        gs.set("CA", Object::Real(ap.opacity));
+        gs.set("ca", Object::Real(ap.opacity));
+        let mut states = Dictionary::new();
+        states.set("GS0", Object::Dictionary(gs));
+        let mut resources = Dictionary::new();
+        resources.set("ExtGState", Object::Dictionary(states));
+        let mut content = b"/GS0 gs\n".to_vec();
+        content.extend(shapes);
+        return revision.add_object(form(content, resources, false));
+    }
     if !ap.needs_group() {
         return revision.add_object(form(shapes, Dictionary::new(), false));
     }
@@ -470,6 +486,18 @@ fn apply_model(
                 Object::Array(
                     ends.iter()
                         .map(|e| Object::Name(e.name().as_bytes().to_vec()))
+                        .collect(),
+                ),
+            );
+        }
+        AnnotKind::Markup { quads, .. } => {
+            dict.set(
+                "QuadPoints",
+                Object::Array(
+                    quads
+                        .iter()
+                        .flatten()
+                        .flat_map(|p| [Object::Real(p.x), Object::Real(p.y)])
                         .collect(),
                 ),
             );

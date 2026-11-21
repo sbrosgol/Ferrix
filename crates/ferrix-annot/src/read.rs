@@ -5,7 +5,7 @@
 
 use ferrix_core::{
     AnnotFlags, AnnotKind, AnnotOrigin, AnnotProps, Annotation, LineEnd, MAX_STROKE_POINTS,
-    MAX_STROKES, MAX_TEXT_BYTES, NoteIcon, ObjectRef, Rgb, SourceId,
+    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, Rgb, SourceId,
 };
 use ferrix_types::{PdfBox, PdfPoint};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -123,6 +123,12 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
                 }
             }
             "Ink" => ink_list(doc, dict).map_or_else(other, |strokes| AnnotKind::Ink { strokes }),
+            name @ ("Highlight" | "Underline" | "StrikeOut" | "Squiggly") => {
+                match (MarkupStyle::from_subtype(name), quad_points(doc, dict)) {
+                    (Some(style), Some(quads)) => AnnotKind::Markup { style, quads },
+                    _ => other(),
+                }
+            }
             "Line" if has_line_extras(doc, dict) => other(),
             "Line" => line(doc, dict).unwrap_or_else(other),
             _ => other(),
@@ -137,6 +143,41 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
         reply_to,
     }
     .sanitized()
+}
+
+/// `/QuadPoints` as top-left, top-right, bottom-left, bottom-right quads. Acrobat and most
+/// writers use that order; quads in the specification's counter-clockwise order are reordered.
+fn quad_points(doc: &Document, dict: &Dictionary) -> Option<Vec<[PdfPoint; 4]>> {
+    let n = numbers(doc, dict, b"QuadPoints")?;
+    if n.is_empty() || n.len() % 8 != 0 || n.len() / 8 > ferrix_core::MAX_QUADS {
+        return None;
+    }
+    Some(
+        n.chunks_exact(8)
+            .map(|q| {
+                let p = |i: usize| PdfPoint::new(q[2 * i], q[2 * i + 1]);
+                let (a, b, c, d) = (p(0), p(1), p(2), p(3));
+                // In the Z order a→b→c→d draws a bow tie: b–c crosses d–a.
+                if segments_cross(b, c, d, a) {
+                    [a, b, c, d]
+                } else {
+                    // Counter-clockwise from bottom-left: a=BL, b=BR, c=TR, d=TL.
+                    [d, c, a, b]
+                }
+            })
+            .collect(),
+    )
+}
+
+fn segments_cross(p1: PdfPoint, p2: PdfPoint, q1: PdfPoint, q2: PdfPoint) -> bool {
+    let side = |a: PdfPoint, b: PdfPoint, c: PdfPoint| {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    };
+    let d1 = side(q1, q2, p1);
+    let d2 = side(q1, q2, p2);
+    let d3 = side(p1, p2, q1);
+    let d4 = side(p1, p2, q2);
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
 }
 
 /// A cloudy border (`/BE /S /C`, ISO 32000-2 Table 168).

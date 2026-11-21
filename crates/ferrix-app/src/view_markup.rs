@@ -60,6 +60,11 @@ fn kind_icon(annot: &Annotation) -> Icon {
         AnnotKind::Circle => Icon::Circle,
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => Icon::ArrowUpRight,
         AnnotKind::Line { .. } => Icon::Minus,
+        AnnotKind::Markup { style, .. } => match style {
+            ferrix_core::MarkupStyle::Highlight => Icon::Highlighter,
+            ferrix_core::MarkupStyle::StrikeOut => Icon::Strikethrough,
+            _ => Icon::Underline,
+        },
         AnnotKind::Other { .. } => Icon::Comments,
     }
 }
@@ -73,6 +78,12 @@ pub(crate) fn kind_name(annot: &Annotation) -> String {
         AnnotKind::Circle => "Ellipse".into(),
         AnnotKind::Line { ends, .. } if ends[1] != ferrix_core::LineEnd::None => "Arrow".into(),
         AnnotKind::Line { .. } => "Line".into(),
+        AnnotKind::Markup { style, .. } => match style {
+            ferrix_core::MarkupStyle::Highlight => "Highlight".into(),
+            ferrix_core::MarkupStyle::Underline => "Underline".into(),
+            ferrix_core::MarkupStyle::StrikeOut => "Strikethrough".into(),
+            ferrix_core::MarkupStyle::Squiggly => "Squiggly underline".into(),
+        },
         AnnotKind::Other { subtype } => match subtype.as_str() {
             "FreeText" => "Text box".into(),
             "Highlight" => "Highlight".into(),
