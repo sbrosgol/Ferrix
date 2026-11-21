@@ -87,6 +87,8 @@ pub(crate) struct Source {
     pub(crate) doc: DocId,
     /// Size of each page in points, without extra rotation; empty until measured.
     pub(crate) sizes: Vec<Size>,
+    /// Each page's user space → page space mapping; empty until annotations are read.
+    pub(crate) transforms: Vec<ferrix_types::PageTransform>,
 }
 
 impl Source {
@@ -95,6 +97,7 @@ impl Source {
             origin,
             doc,
             sizes: Vec::new(),
+            transforms: Vec::new(),
         }
     }
 }
@@ -102,6 +105,8 @@ impl Source {
 #[derive(Debug)]
 pub(crate) struct Thumbnail {
     pub(crate) rotation: Rotation,
+    /// The engine document it was rendered from; a newer annotation preview makes it stale.
+    pub(crate) source: DocId,
     pub(crate) image: PageImage,
 }
 
@@ -110,6 +115,7 @@ pub(crate) struct Thumbnail {
 #[derive(Debug)]
 pub(crate) struct Shown {
     pub(crate) rotation: Rotation,
+    pub(crate) source: DocId,
     pub(crate) zoom: f32,
     pub(crate) scale_factor: f32,
     pub(crate) image: PageImage,
@@ -153,6 +159,12 @@ pub(crate) struct Document {
     pub(crate) thumbnail_busy: bool,
     /// What the document allows for annotations; `None` until read (ADR-0009).
     pub(crate) annot_policy: Option<crate::annotate::Policy>,
+    /// The document's own bytes, once read for annotations; previews are built from them.
+    pub(crate) base_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// The annotations the screen shows (the file's, or the last preview's).
+    pub(crate) previewed: AnnotSet,
+    /// Increments per preview request; older results are discarded.
+    pub(crate) preview_gen: u64,
 }
 
 impl Document {
@@ -177,6 +189,9 @@ impl Document {
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
             annot_policy: None,
+            base_bytes: None,
+            previewed: AnnotSet::new(),
+            preview_gen: 0,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -377,9 +392,10 @@ impl Document {
             .iter()
             .take(MAX_THUMBNAILS)
             .find(|e| {
+                let source = self.sources.get(e.source.0 as usize).map(|s| s.doc);
                 self.thumbnails
                     .get(&e.key)
-                    .is_none_or(|t| t.rotation != e.rotation)
+                    .is_none_or(|t| t.rotation != e.rotation || Some(t.source) != source)
             })
             .and_then(|e| Some((e.key, self.page_ref(e)?)))
     }

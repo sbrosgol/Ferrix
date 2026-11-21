@@ -1,6 +1,6 @@
 //! Reading things back out of a PDF: embedded files and a digest of page content (ADR-0008 §7).
 
-use lopdf::{Dictionary, Document, Object};
+use lopdf::{Dictionary, Document, Object, ObjectId};
 use sha2::{Digest, Sha256};
 
 use crate::{MAX_STREAM_BYTES, PdfError, Source, parse};
@@ -123,4 +123,102 @@ pub fn content_digest(source: Source<'_>) -> Result<ContentDigest, PdfError> {
         pages: pages.len(),
         has_annotations,
     })
+}
+
+/// Each page's visible area (crop box clipped to the media box, inheritance resolved) and its
+/// `/Rotate`, as a transform from PDF user space to page space. In page order.
+pub fn page_transforms(doc: &Document) -> Vec<ferrix_types::PageTransform> {
+    use ferrix_types::{PageTransform, PdfBox, Rotation};
+    const LETTER: PdfBox = PdfBox {
+        left: 0.0,
+        bottom: 0.0,
+        right: 612.0,
+        top: 792.0,
+    };
+    let inherited = |page: ObjectId, key: &[u8]| -> Option<Object> {
+        let mut node = doc.get_dictionary(page).ok()?;
+        for _ in 0..MAX_TREE_DEPTH {
+            if let Ok(value) = node.get(key) {
+                return doc.dereference(value).ok().map(|(_, v)| v.clone());
+            }
+            node = doc
+                .get_dictionary(node.get(b"Parent").ok()?.as_reference().ok()?)
+                .ok()?;
+        }
+        None
+    };
+    let rect = |object: Option<Object>| -> Option<PdfBox> {
+        let array = object?.as_array().ok()?.clone();
+        let n: Vec<f32> = array
+            .iter()
+            .filter_map(|o| doc.dereference(o).ok()?.1.as_float().ok())
+            .collect();
+        let [a, b, c, d] = n.as_slice() else {
+            return None;
+        };
+        let b = PdfBox {
+            left: a.min(*c),
+            bottom: b.min(*d),
+            right: a.max(*c),
+            top: b.max(*d),
+        };
+        (b.width() > 0.0 && b.height() > 0.0).then_some(b)
+    };
+    doc.get_pages()
+        .into_values()
+        .map(|page| {
+            let media = rect(inherited(page, b"MediaBox")).unwrap_or(LETTER);
+            let crop = rect(inherited(page, b"CropBox"))
+                .map(|c| PdfBox {
+                    left: c.left.max(media.left),
+                    bottom: c.bottom.max(media.bottom),
+                    right: c.right.min(media.right),
+                    top: c.top.min(media.top),
+                })
+                .filter(|c| c.width() > 0.0 && c.height() > 0.0)
+                .unwrap_or(media);
+            let rotation = inherited(page, b"Rotate")
+                .and_then(|r| r.as_i64().ok())
+                .and_then(|r| Rotation::from_degrees(((r / 90) * 90) as i32))
+                .unwrap_or_default();
+            PageTransform::new(crop, rotation)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use ferrix_types::{PdfPoint, Point};
+    use lopdf::dictionary;
+
+    use super::*;
+
+    #[test]
+    fn transforms_resolve_inherited_boxes_and_rotation() {
+        let mut doc = Document::with_version("1.7");
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages,
+            "CropBox" => vec![50.into(), 100.into(), 550.into(), 900.into()],
+        });
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Rotate" => 90,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        doc.trailer.set("Root", catalog);
+        let t = page_transforms(&doc);
+        assert_eq!(t.len(), 1);
+        // The crop box is clipped to the media box (top 900 → 792) and the rotation inherited.
+        assert_eq!(t[0].page_size(), ferrix_types::Size::new(692.0, 500.0));
+        assert_eq!(t[0].to_page(50.0, 100.0), Point::new(0.0, 0.0));
+        assert_eq!(
+            t[0].to_pdf(Point::new(0.0, 0.0)),
+            PdfPoint::new(50.0, 100.0)
+        );
+    }
 }

@@ -11,7 +11,7 @@ mod inspect;
 mod layout;
 
 pub use create::{ImageData, ImagePage, PaperSize, blank_document, image_document};
-pub use inspect::{ContentDigest, content_digest, embedded_file};
+pub use inspect::{ContentDigest, content_digest, embedded_file, page_transforms};
 pub use layout::{LayoutPage, Revision, load, write_page_layout};
 /// The lopdf version this crate's API exposes, for crates that build objects for a [`Revision`].
 pub use lopdf;

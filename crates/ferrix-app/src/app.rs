@@ -350,9 +350,18 @@ pub enum Message {
     SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
     Measured(DocId, Result<Vec<Size>, String>),
-    Rendered(DocId, PageKey, Rotation, f32, Result<Rendered, String>),
+    /// A page image: (document, page, rotation, the engine document it was rendered from,
+    /// scale factor, result).
+    Rendered(
+        DocId,
+        PageKey,
+        Rotation,
+        DocId,
+        f32,
+        Result<Rendered, String>,
+    ),
     PageScrolled(f32),
-    Thumbnail(DocId, PageKey, Rotation, Result<Rendered, String>),
+    Thumbnail(DocId, PageKey, Rotation, DocId, Result<Rendered, String>),
     WindowOpened(Option<window::Id>),
     ScaleFactor(f32),
     Resized(iced::Size),
@@ -380,6 +389,9 @@ pub enum Message {
     SaveAs,
     SaveAsPicked(Option<PathBuf>),
     Saved(Result<PathBuf, String>),
+    /// A preview of the document with its annotation changes is open in the engine
+    /// (document, generation, preview engine document or `None` for the original).
+    PreviewReady(DocId, u64, Result<Option<DocInfo>, String>),
     /// A source's annotations were read (engine document, source index).
     AnnotationsLoaded(
         DocId,
@@ -612,7 +624,7 @@ impl App {
                 }
                 return self.render();
             }
-            Message::Rendered(doc_id, key, rotation, scale_factor, result) => {
+            Message::Rendered(doc_id, key, rotation, source, scale_factor, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none();
                 };
@@ -623,6 +635,7 @@ impl App {
                             key,
                             Shown {
                                 rotation,
+                                source,
                                 zoom: r.zoom,
                                 scale_factor,
                                 image: r.into_image(),
@@ -638,7 +651,7 @@ impl App {
                 return self.render_pages();
             }
             Message::PageScrolled(top) => return self.page_scrolled(top),
-            Message::Thumbnail(doc_id, key, rotation, result) => {
+            Message::Thumbnail(doc_id, key, rotation, source, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none(); // the document was closed meanwhile
                 };
@@ -648,6 +661,7 @@ impl App {
                         key,
                         Thumbnail {
                             rotation,
+                            source,
                             image: r.into_image(),
                         },
                     );
@@ -933,12 +947,45 @@ impl App {
                                 doc.state.annots.insert_loaded(entry.key, list);
                             }
                         }
+                        if let Some(s) = doc.sources.get_mut(source.0 as usize) {
+                            s.transforms = loaded.transforms;
+                        }
                         if source == ferrix_core::SourceId::BASE {
                             doc.annot_policy = Some(loaded.policy);
+                            doc.base_bytes = Some(loaded.bytes);
                         }
+                        // What the file shows. Recovered changes need a preview right away.
+                        if doc.previewed.is_empty() {
+                            doc.previewed = doc.state.annots.clone();
+                        }
+                        return self.refresh_preview();
                     }
                     // Viewing still works; editing annotations stays off for this document.
                     Err(e) => tracing::warn!("couldn’t read annotations: {e}"),
+                }
+            }
+            Message::PreviewReady(doc_id, generation, result) => {
+                let engine = self.engine.clone().ok();
+                let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
+                    return close_engine_doc(engine, result);
+                };
+                if generation != doc.preview_gen {
+                    return close_engine_doc(engine, result); // a newer preview is on its way
+                }
+                match result {
+                    Ok(info) => {
+                        let shown = info.map_or(doc.info.id, |i| i.id);
+                        let Some(base) = doc.sources.first_mut() else {
+                            return Task::none();
+                        };
+                        let old = std::mem::replace(&mut base.doc, shown);
+                        // The original stays open (it is the document's identity); previews go.
+                        let close = (old != doc.info.id && old != shown).then_some(old);
+                        let task = self.render_pages();
+                        let thumbs = self.next_thumbnail();
+                        return Task::batch([task, thumbs, close_engine_id(engine, close)]);
+                    }
+                    Err(e) => self.error = Some(format!("Couldn’t show the annotations: {e}")),
                 }
             }
             Message::Saved(Err(e)) => {
@@ -1642,7 +1689,51 @@ impl App {
     fn after_edit(&mut self) -> Task<Message> {
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([self.render(), self.next_thumbnail()])
+        Task::batch([self.render(), self.next_thumbnail(), self.refresh_preview()])
+    }
+
+    /// Rebuilds the on-screen revision when the annotations differ from what is shown.
+    fn refresh_preview(&mut self) -> Task<Message> {
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let Some(bytes) = doc.base_bytes.clone() else {
+            return Task::none();
+        };
+        if doc.state.annots == doc.previewed {
+            return Task::none();
+        }
+        doc.previewed = doc.state.annots.clone();
+        doc.preview_gen += 1;
+        let (doc_id, generation) = (doc.info.id, doc.preview_gen);
+        let pages: Vec<_> = doc
+            .state
+            .pages
+            .entries()
+            .iter()
+            .filter(|e| e.source == ferrix_core::SourceId::BASE)
+            .copied()
+            .collect();
+        let annots = doc.state.annots.clone();
+        Task::perform(
+            async move {
+                let Some(bytes) = crate::annotate::build_preview(bytes, pages, annots).await?
+                else {
+                    return Ok(None);
+                };
+                let info = flatten(
+                    engine
+                        .call(move |e| e.open(DocSource::Bytes(bytes), None))
+                        .await,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Some(info))
+            },
+            move |result| Message::PreviewReady(doc_id, generation, result),
+        )
     }
 
     fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
@@ -2292,14 +2383,15 @@ impl App {
                 if doc.render_failed.contains(&entry.key) {
                     return None;
                 }
+                let page = doc.page_ref(entry)?;
+                // Also stale once the source shows a newer annotation preview (ADR-0009 §7).
                 let fresh = doc.images.get(&entry.key).is_some_and(|s| {
-                    s.rotation == entry.rotation && s.zoom == zoom && s.scale_factor == scale_factor
+                    s.rotation == entry.rotation
+                        && s.source == page.doc
+                        && s.zoom == zoom
+                        && s.scale_factor == scale_factor
                 });
-                if fresh {
-                    None
-                } else {
-                    Some((entry.key, doc.page_ref(entry)?))
-                }
+                if fresh { None } else { Some((entry.key, page)) }
             });
         let Some((key, page)) = next else {
             return Task::none();
@@ -2315,7 +2407,9 @@ impl App {
                     .await;
                 flatten(result)
             },
-            move |result| Message::Rendered(doc_id, key, page.rotation, scale_factor, result),
+            move |result| {
+                Message::Rendered(doc_id, key, page.rotation, page.doc, scale_factor, result)
+            },
         )
     }
 
@@ -2360,7 +2454,7 @@ impl App {
                     .await;
                 flatten(result)
             },
-            move |result| Message::Thumbnail(doc_id, key, page.rotation, result),
+            move |result| Message::Thumbnail(doc_id, key, page.rotation, page.doc, result),
         )
     }
 }
@@ -2374,6 +2468,23 @@ fn render_thumbnail(
     // Fit a box THUMB_WIDTH wide, and not much taller, whatever the orientation.
     let scale = (THUMB_WIDTH / size.width).min(THUMB_WIDTH * 1.4 / size.height);
     render_page(engine, page, scale, scale_factor, 0.0)
+}
+
+/// Closes a preview that is no longer wanted.
+fn close_engine_doc(
+    engine: Option<Worker>,
+    result: Result<Option<DocInfo>, String>,
+) -> Task<Message> {
+    close_engine_id(engine, result.ok().flatten().map(|i| i.id))
+}
+
+fn close_engine_id(engine: Option<Worker>, id: Option<DocId>) -> Task<Message> {
+    match (engine, id) {
+        (Some(engine), Some(id)) => {
+            Task::future(async move { engine.call(move |e| e.close(id)).await }).discard()
+        }
+        _ => Task::none(),
+    }
 }
 
 /// Reads a source's annotations in the background.
