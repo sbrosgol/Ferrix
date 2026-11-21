@@ -26,6 +26,11 @@ To script something new, add a flag and a `Vec<Message>` builder next to `writin
 
 ## Traps
 
+- **Use a new, empty `FERRIX_DATA_DIR` for every run**, not one per session: `--write` and
+  `--features` leave a recovery journal behind, and the next run then opens on the recovery
+  dialog instead of what you meant to capture.
+- The software renderer may not draw shadows or blur; judge elevation on a real run.
+
 - **Always isolate `FERRIX_DATA_DIR`.** The real recovery directory
   (`~/Library/Application Support/Ferrix/recovery` on macOS) may hold the user's crash journals:
   a recovery dialog blocks every scripted keystroke, and a run killed with unsaved changes leaves
