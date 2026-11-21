@@ -134,7 +134,7 @@ impl App {
     }
 
     /// Whether annotations may be added on `page` now; explains why not otherwise.
-    fn may_annotate(&mut self, page: PageKey) -> bool {
+    pub(crate) fn may_annotate(&mut self, page: PageKey) -> bool {
         if !self.can_edit() {
             return false;
         }
@@ -179,15 +179,38 @@ impl App {
     fn pointer(&mut self, page: PageKey, pointer: Pointer) -> Task<Message> {
         let scale = self.markup_scale();
         let (shift, alt) = (self.modifiers.shift(), self.modifiers.alt());
-        let Some(tool) = self.markup.as_ref().map(|m| m.tool) else {
-            return Task::none();
-        };
+        // Outside Markup mode the pointer selects text.
+        let tool = self.markup.as_ref().map_or(Tool::Select, |m| m.tool);
+        let text_gesture = self.text_selection.is_some_and(|s| s.dragging);
         match pointer {
+            Pointer::Click(at, clicks) => {
+                let close = self.close_note();
+                if (tool == Tool::Select || tool.marks_text()) && self.over_text(page, at) {
+                    self.text_press(page, at, clicks);
+                }
+                return close;
+            }
+            Pointer::Drag(at) if text_gesture => self.text_drag(page, at),
+            Pointer::Release(_) if text_gesture => return self.text_release(),
             Pointer::Press(at) => {
                 // Clicking anywhere else keeps the open note's text and closes it.
                 let close = self.close_note();
+                if tool.marks_text() {
+                    if !self.over_text(page, at) || !self.text_press(page, at, 1) {
+                        self.text_selection = None;
+                        self.notice =
+                            Some("No selectable text here. The page may be a scan.".into());
+                    }
+                    return close;
+                }
                 if tool == Tool::Select {
-                    self.press_select(page, at, scale);
+                    // An annotation on top wins; otherwise the press selects text.
+                    let hit = self.markup.is_some() && self.press_select(page, at, scale);
+                    if !hit && self.over_text(page, at) {
+                        self.text_press(page, at, 1);
+                    } else {
+                        self.text_selection = None;
+                    }
                     return close;
                 }
                 if !self.may_annotate(page) {
@@ -238,13 +261,14 @@ impl App {
         Task::none()
     }
 
-    fn press_select(&mut self, page: PageKey, at: ferrix_types::PdfPoint, scale: f32) {
+    /// Selects the annotation under `at` (or grabs a handle); whether anything was hit.
+    fn press_select(&mut self, page: PageKey, at: ferrix_types::PdfPoint, scale: f32) -> bool {
         let Some(doc) = self.doc.as_ref() else {
-            return;
+            return false;
         };
         let list = doc.state.annots.page(page);
         let Some(m) = self.markup.as_mut() else {
-            return;
+            return false;
         };
         // A handle of the current selection wins over whatever lies beneath it.
         if let Some(sel) = m.selected
@@ -263,7 +287,7 @@ impl App {
                         current: at,
                     },
                 ));
-                return;
+                return true;
             }
         }
         m.selected = markup::hit(list, at, 4.0 / scale);
@@ -283,6 +307,7 @@ impl App {
         if let Some(id) = selected {
             self.open_note(page, id);
         }
+        selected.is_some()
     }
 
     /// Opens the editor of note `id`; other annotation types have none.
@@ -593,7 +618,7 @@ impl App {
         )
     }
 
-    fn apply_annot(&mut self, edit: impl Into<DocEdit>, label: &str) -> Task<Message> {
+    pub(crate) fn apply_annot(&mut self, edit: impl Into<DocEdit>, label: &str) -> Task<Message> {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };

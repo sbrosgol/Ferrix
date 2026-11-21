@@ -13,6 +13,7 @@ mod print;
 mod recovery;
 mod render;
 mod strip;
+mod text_select;
 pub mod theme;
 mod titlebar;
 mod view;

@@ -160,78 +160,83 @@ pub fn appearance(annot: &Annotation) -> Option<Appearance> {
 }
 
 /// Text markup over `quads` (each top-left, top-right, bottom-left, bottom-right).
+///
+/// Highlights fill every quad in one path, so overlapping lines aren't darkened twice. Lines
+/// use butt caps and stay inside their quads (thickness about a fourteenth of the line height).
 fn markup_items(style: MarkupStyle, quads: &[[PdfPoint; 4]], color: Rgb) -> Vec<Item> {
-    quads
-        .iter()
-        .filter_map(|&[tl, tr, bl, br]| {
-            let (bx, by) = (br.x - bl.x, br.y - bl.y);
-            let len = bx.hypot(by);
-            let (hx, hy) = (tl.x - bl.x, tl.y - bl.y);
-            let height = hx.hypot(hy);
-            if len <= f32::EPSILON || height <= f32::EPSILON {
-                return None;
+    if style == MarkupStyle::Highlight {
+        let mut path = Vec::with_capacity(quads.len() * 5);
+        for &[tl, tr, bl, br] in quads {
+            path.extend([
+                PathEl::MoveTo(tl),
+                PathEl::LineTo(tr),
+                PathEl::LineTo(br),
+                PathEl::LineTo(bl),
+                PathEl::Close,
+            ]);
+        }
+        return vec![Item {
+            path,
+            fill: Some(color),
+            stroke: None,
+        }];
+    }
+    let mut path = Vec::new();
+    let mut thickness = f32::INFINITY;
+    for &[tl, _tr, bl, br] in quads {
+        let (bx, by) = (br.x - bl.x, br.y - bl.y);
+        let len = bx.hypot(by);
+        let (hx, hy) = (tl.x - bl.x, tl.y - bl.y);
+        let height = hx.hypot(hy);
+        if len <= f32::EPSILON || height <= f32::EPSILON {
+            continue;
+        }
+        // Along the text (u) and towards its top (n), so rotated text works too.
+        let (ux, uy) = (bx / len, by / len);
+        let (nx, ny) = (hx / height, hy / height);
+        let at = |along: f32, up: f32| {
+            PdfPoint::new(bl.x + ux * along + nx * up, bl.y + uy * along + ny * up)
+        };
+        let t = (height / 14.0).max(0.5);
+        thickness = thickness.min(t);
+        match style {
+            MarkupStyle::Underline => {
+                path.push(PathEl::MoveTo(at(0.0, t / 2.0)));
+                path.push(PathEl::LineTo(at(len, t / 2.0)));
             }
-            // Along the text (u) and towards its top (n), so rotated text works too.
-            let (ux, uy) = (bx / len, by / len);
-            let (nx, ny) = (hx / height, hy / height);
-            let at = |along: f32, up: f32| {
-                PdfPoint::new(bl.x + ux * along + nx * up, bl.y + uy * along + ny * up)
-            };
-            let line = |up: f32, width: f32| Item {
-                path: vec![PathEl::MoveTo(at(0.0, up)), PathEl::LineTo(at(len, up))],
-                fill: None,
-                stroke: Some(Stroke {
-                    color,
-                    width,
-                    dash: Vec::new(),
-                    round: false,
-                }),
-            };
-            let thin = (height / 14.0).max(0.5);
-            Some(match style {
-                MarkupStyle::Highlight => Item {
-                    path: vec![
-                        PathEl::MoveTo(tl),
-                        PathEl::LineTo(tr),
-                        PathEl::LineTo(br),
-                        PathEl::LineTo(bl),
-                        PathEl::Close,
-                    ],
-                    fill: Some(color),
-                    stroke: None,
-                },
-                MarkupStyle::Underline => line(height * 0.06, thin),
-                MarkupStyle::StrikeOut => line(height * 0.45, thin),
-                MarkupStyle::Squiggly => {
-                    // A zigzag under the text: period a quarter of the line height.
-                    let period = (height / 4.0).max(1.0);
-                    let amplitude = height / 16.0;
-                    let mut path = vec![PathEl::MoveTo(at(0.0, amplitude))];
-                    let mut x = period / 2.0;
-                    let mut up = false;
-                    while x < len {
-                        path.push(PathEl::LineTo(at(
-                            x,
-                            if up { amplitude * 2.0 } else { 0.0 },
-                        )));
-                        up = !up;
-                        x += period / 2.0;
-                    }
-                    path.push(PathEl::LineTo(at(len, amplitude)));
-                    Item {
-                        path,
-                        fill: None,
-                        stroke: Some(Stroke {
-                            color,
-                            width: thin,
-                            dash: Vec::new(),
-                            round: true,
-                        }),
-                    }
+            MarkupStyle::StrikeOut => {
+                path.push(PathEl::MoveTo(at(0.0, height / 2.0)));
+                path.push(PathEl::LineTo(at(len, height / 2.0)));
+            }
+            MarkupStyle::Squiggly | MarkupStyle::Highlight => {
+                // A zigzag in the bottom eighth of the line, period a quarter of its height.
+                let period = (height / 4.0).max(1.0);
+                let (low, high) = (t / 2.0, height / 8.0);
+                path.push(PathEl::MoveTo(at(0.0, low)));
+                let mut x = period / 2.0;
+                let mut up = true;
+                while x < len {
+                    path.push(PathEl::LineTo(at(x, if up { high } else { low })));
+                    up = !up;
+                    x += period / 2.0;
                 }
-            })
-        })
-        .collect()
+                path.push(PathEl::LineTo(at(len, if up { high } else { low })));
+            }
+        }
+    }
+    if path.is_empty() {
+        return Vec::new();
+    }
+    vec![Item {
+        path,
+        fill: None,
+        stroke: Some(Stroke {
+            color,
+            width: thickness,
+            dash: Vec::new(),
+            round: false,
+        }),
+    }]
 }
 
 impl Appearance {

@@ -236,10 +236,20 @@ pub fn write_page_annotations(
             && added
                 .iter()
                 .chain(changed.iter().map(|(_, a, _)| a))
-                .any(|a| a.props.opacity < 1.0)
+                .any(|a| {
+                    // Highlights blend with Multiply, which PDF/A-1 forbids (ISO 19005-1 §6.4).
+                    a.props.opacity < 1.0
+                        || matches!(
+                            a.kind,
+                            AnnotKind::Markup {
+                                style: ferrix_core::MarkupStyle::Highlight,
+                                ..
+                            }
+                        )
+                })
         {
             return Err(AnnotError::NotAllowed(
-                "this is a PDF/A-1 archival file, which allows no transparency; use full opacity"
+                "this is a PDF/A-1 archival file, which allows no transparency or highlights"
                     .into(),
             ));
         }
@@ -434,8 +444,11 @@ fn apply_model(
             Object::Array(p.dash.iter().map(|d| Object::Real(*d)).collect()),
         );
     }
-    // Notes have no border style (Table 175 defines none for `Text`).
-    if !matches!(annot.kind, AnnotKind::Note { .. }) {
+    // Notes and text markup have no border style (Tables 175 and 182 define none).
+    if !matches!(
+        annot.kind,
+        AnnotKind::Note { .. } | AnnotKind::Markup { .. }
+    ) {
         dict.set("BS", Object::Dictionary(bs));
         // `/BS` takes precedence, but a stale `/Border` would mislead readers that only know it.
         dict.remove(b"Border");

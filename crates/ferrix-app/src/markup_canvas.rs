@@ -22,6 +22,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pointer {
     Press(PdfPoint),
+    /// A double (2) or triple (3) click: select a word or a line.
+    Click(PdfPoint, u8),
     Drag(PdfPoint),
     Release(PdfPoint),
 }
@@ -41,11 +43,17 @@ pub(crate) struct Overlay<'a> {
     pub(crate) style: Style,
     pub(crate) shift: bool,
     pub(crate) alt: bool,
+    /// The page's text and its intrinsic transform, for the I-beam pointer.
+    pub(crate) text: Option<(&'a ferrix_text::PageText, PageTransform)>,
+    /// Selected text on this page, as quads in user space.
+    pub(crate) selection_quads: Vec<[PdfPoint; 4]>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct State {
     pressed: bool,
+    /// The last press, to tell double and triple clicks apart.
+    last_click: Option<iced::advanced::mouse::Click>,
 }
 
 impl Overlay<'_> {
@@ -187,12 +195,20 @@ impl canvas::Program<Message> for Overlay<'_> {
                     .map(|p| iced::Point::new(p.x + bounds.x, p.y + bounds.y))?;
                 state.pressed = true;
                 let at = self.to_pdf(bounds, position);
+                let click = iced::advanced::mouse::Click::new(
+                    position,
+                    mouse::Button::Left,
+                    state.last_click,
+                );
+                state.last_click = Some(click);
+                let pointer = match click.kind() {
+                    iced::advanced::mouse::click::Kind::Single => Pointer::Press(at),
+                    iced::advanced::mouse::click::Kind::Double => Pointer::Click(at, 2),
+                    iced::advanced::mouse::click::Kind::Triple => Pointer::Click(at, 3),
+                };
                 Some(
-                    canvas::Action::publish(Message::Annot(AnnotMsg::Pointer(
-                        page,
-                        Pointer::Press(at),
-                    )))
-                    .and_capture(),
+                    canvas::Action::publish(Message::Annot(AnnotMsg::Pointer(page, pointer)))
+                        .and_capture(),
                 )
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.pressed => {
@@ -231,6 +247,17 @@ impl canvas::Program<Message> for Overlay<'_> {
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
         let t = theme::tokens(theme);
+        for quad in &self.selection_quads {
+            let [tl, tr, bl, br] = quad.map(|p| self.to_px(p));
+            let path = Path::new(|p| {
+                p.move_to(tl);
+                p.line_to(tr);
+                p.line_to(br);
+                p.line_to(bl);
+                p.close();
+            });
+            frame.fill(&path, t.page_selection);
+        }
         let draft = self.draft();
         if let Some(ap) = draft.as_ref().and_then(ferrix_annot::appearance) {
             self.draw_appearance(&mut frame, &ap);
@@ -275,11 +302,22 @@ impl canvas::Program<Message> for Overlay<'_> {
             bounds,
             iced::Point::new(position.x + bounds.x, position.y + bounds.y),
         );
+        let on_text = self
+            .text
+            .is_some_and(|(text, t)| text.is_over_text(t.to_page(at.x, at.y)));
+        if self.tool.marks_text() {
+            return if on_text {
+                mouse::Interaction::Text
+            } else {
+                mouse::Interaction::NotAllowed
+            };
+        }
         match markup::hit(self.annots, at, 4.0 / self.scale) {
             Some(_) if matches!(self.gesture, Some(Gesture::Move { .. })) => {
                 mouse::Interaction::Grabbing
             }
             Some(_) => mouse::Interaction::Grab,
+            None if on_text => mouse::Interaction::Text,
             None => mouse::Interaction::default(),
         }
     }

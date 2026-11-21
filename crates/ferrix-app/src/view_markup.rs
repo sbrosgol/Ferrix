@@ -43,6 +43,10 @@ const OPACITY_CHOICES: [Opacity; 4] = [
 fn tool_icon(tool: Tool) -> Icon {
     match tool {
         Tool::Select => Icon::Pointer,
+        Tool::Highlight => Icon::Highlighter,
+        Tool::Underline => Icon::Underline,
+        Tool::StrikeOut => Icon::Strikethrough,
+        Tool::Squiggly => Icon::UnderlineWavy,
         Tool::Note => Icon::StickyNote,
         Tool::Pen => Icon::Pencil,
         Tool::Rectangle => Icon::Square,
@@ -121,14 +125,19 @@ impl App {
         if let Some(Permission::Forbidden(_)) = doc.annot_policy.as_ref().map(|p| &p.permission) {
             return bar(muted(CERTIFIED, 12.0).into());
         }
-        let tools = pill(row(Tool::ALL.into_iter().map(|tool| {
-            icon_button(
-                tool_icon(tool),
-                tool.label(),
-                Some(Message::Annot(AnnotMsg::Tool(tool))),
-                m.tool == tool,
-            )
-        })));
+        let tool_pill = |tools: &[Tool]| {
+            pill(row(tools.iter().map(|&tool| {
+                icon_button(
+                    tool_icon(tool),
+                    tool.label(),
+                    Some(Message::Annot(AnnotMsg::Tool(tool))),
+                    m.tool == tool,
+                )
+            })))
+        };
+        let tools = row![tool_pill(&Tool::TEXT), tool_pill(&Tool::ADD)]
+            .spacing(CLUSTER_GAP)
+            .align_y(Alignment::Center);
 
         let selected = m
             .selected
@@ -210,9 +219,6 @@ impl App {
         size: iced::Size,
         page: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        let Some(m) = self.markup.as_ref() else {
-            return page;
-        };
         let Some(transform) = doc
             .sources
             .get(entry.source.0 as usize)
@@ -222,24 +228,68 @@ impl App {
             return page;
         };
         let scale = doc.strip.zoom * LOGICAL_PX_PER_POINT;
-        let tool = m.tool;
+        // Outside Markup mode the overlay only selects text.
+        let m = self.markup.as_ref();
+        let tool = m.map_or(Tool::Select, |m| m.tool);
+        let intrinsic = doc
+            .sources
+            .get(entry.source.0 as usize)
+            .and_then(|s| s.transforms.get(entry.page.0 as usize))
+            .copied();
+        let selection_quads = match self.selection_quads() {
+            Some((page, quads)) if page == entry.key => quads,
+            _ => Vec::new(),
+        };
         let overlay = Overlay {
             page: entry.key,
             transform,
             scale,
-            annots: doc.state.annots.page(entry.key),
-            selected: m.selected,
+            annots: if m.is_some() {
+                doc.state.annots.page(entry.key)
+            } else {
+                &[]
+            },
+            selected: m.and_then(|m| m.selected),
             gesture: m
-                .gesture
-                .as_ref()
+                .and_then(|m| m.gesture.as_ref())
                 .filter(|(p, _)| *p == entry.key)
                 .map(|(_, g)| g),
             tool,
-            style: m.style(tool),
+            style: m.map_or(markup::Markup::default().style(tool), |m| m.style(tool)),
             shift: self.modifiers.shift(),
             alt: self.modifiers.alt(),
+            text: doc.texts.get(&entry.key).map(|t| t.as_ref()).zip(intrinsic),
+            selection_quads: selection_quads.clone(),
         };
         let mut layers = stack![page, canvas(overlay).width(size.width).height(size.height)];
+        // The selection bar, just above the selection once the pointer is up.
+        if let Some(first) = selection_quads.first()
+            && self.text_selection.is_some_and(|s| !s.dragging)
+        {
+            let top_left = transform.to_page(first[0].x, first[0].y);
+            let (x, y) = (top_left.x * scale, top_left.y * scale);
+            let certified = matches!(
+                doc.annot_policy.as_ref().map(|p| &p.permission),
+                Some(Permission::Forbidden(_))
+            );
+            const HEIGHT: f32 = 40.0;
+            let y = if y > HEIGHT + 8.0 {
+                y - HEIGHT - 8.0
+            } else {
+                y + 24.0
+            };
+            layers = layers.push(
+                container(opaque(selection_bar(certified)))
+                    .width(size.width)
+                    .height(size.height)
+                    .padding(iced::Padding {
+                        top: y.clamp(0.0, (size.height - HEIGHT).max(0.0)),
+                        left: x.clamp(0.0, (size.width - 320.0).max(0.0)),
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
+            );
+        }
         if let Some(note) = self.note.as_ref().filter(|n| n.page == entry.key)
             && let Some((_, annot)) = doc.state.annots.get(note.id)
         {
@@ -380,6 +430,51 @@ impl App {
                 .style(theme::backdrop),
         )
     }
+}
+
+/// Highlight colours, underline styles and Copy, over a text selection.
+fn selection_bar<'a>(certified: bool) -> Element<'a, Message> {
+    use ferrix_core::MarkupStyle as S;
+    let mut items = row![].spacing(2).align_y(Alignment::Center);
+    if !certified {
+        for i in crate::text_select::HIGHLIGHTS {
+            let (name, c) = COLORS[i];
+            items = items.push(swatch(
+                c,
+                false,
+                name,
+                Message::MarkSelection(S::Highlight, i),
+            ));
+        }
+        items = items
+            .push(Space::new().width(6))
+            .push(icon_button(
+                Icon::Underline,
+                "Underline",
+                Some(Message::MarkSelection(S::Underline, 0)),
+                false,
+            ))
+            .push(icon_button(
+                Icon::Strikethrough,
+                "Strikethrough",
+                Some(Message::MarkSelection(S::StrikeOut, 0)),
+                false,
+            ))
+            .push(icon_button(
+                Icon::UnderlineWavy,
+                "Squiggly underline",
+                Some(Message::MarkSelection(S::Squiggly, 0)),
+                false,
+            ))
+            .push(Space::new().width(6));
+    }
+    items = items.push(icon_button(
+        Icon::Copy,
+        "Copy (⌘C)",
+        Some(Message::CopyText),
+        false,
+    ));
+    container(items).padding(4).style(theme::popover).into()
 }
 
 fn close(a: Rgb, b: Rgb) -> bool {

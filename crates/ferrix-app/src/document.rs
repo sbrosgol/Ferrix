@@ -169,6 +169,9 @@ pub(crate) struct Document {
     pub(crate) annotate_confirmed: bool,
     /// The tagged-PDF notice was shown.
     pub(crate) tagged_noted: bool,
+    /// Each page's text, loaded as pages come into view (`ferrix-text`).
+    pub(crate) texts: HashMap<PageKey, std::sync::Arc<ferrix_text::PageText>>,
+    pub(crate) text_busy: bool,
 }
 
 impl Document {
@@ -198,6 +201,8 @@ impl Document {
             preview_gen: 0,
             annotate_confirmed: false,
             tagged_noted: false,
+            texts: HashMap::new(),
+            text_busy: false,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);

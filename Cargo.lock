@@ -1395,6 +1395,7 @@ dependencies = [
  "ferrix-io",
  "ferrix-pdf",
  "ferrix-print",
+ "ferrix-text",
  "ferrix-types",
  "iced",
  "iced_test",

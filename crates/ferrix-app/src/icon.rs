@@ -60,6 +60,8 @@ pub(crate) enum Icon {
     Comments,
     Highlighter,
     TextBox,
+    UnderlineWavy,
+    Copy,
 }
 
 macro_rules! icons {
@@ -132,6 +134,8 @@ icons! {
     Comments => "message-square-text",
     Highlighter => "highlighter",
     TextBox => "type",
+    UnderlineWavy => "underline-wavy",
+    Copy => "copy",
 }
 
 fn load(source: &str) -> svg::Handle {

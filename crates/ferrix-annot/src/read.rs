@@ -153,7 +153,9 @@ fn quad_points(doc: &Document, dict: &Dictionary) -> Option<Vec<[PdfPoint; 4]>> 
         return None;
     }
     Some(
-        n.chunks_exact(8)
+        n.as_chunks::<8>()
+            .0
+            .iter()
             .map(|q| {
                 let p = |i: usize| PdfPoint::new(q[2 * i], q[2 * i + 1]);
                 let (a, b, c, d) = (p(0), p(1), p(2), p(3));

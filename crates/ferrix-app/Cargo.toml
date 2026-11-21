@@ -28,6 +28,7 @@ ferrix-engine.workspace = true
 ferrix-engine-pdfium.workspace = true
 ferrix-io.workspace = true
 ferrix-pdf.workspace = true
+ferrix-text.workspace = true
 lopdf.workspace = true
 ferrix-print.workspace = true
 ferrix-types.workspace = true
