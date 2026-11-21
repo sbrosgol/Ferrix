@@ -13,10 +13,11 @@ What works today:
 - **Text selection**: select text on PDF pages (drag, double-click a word, triple-click a
   line) and copy it
 - **Annotations** ([ADR-0009](docs/adr/0009-annotations.md)): Markup mode (⇧⌘A) adds notes,
-  text boxes, highlights, underlines, strikethrough, freehand ink, rectangles, ellipses, lines
-  and arrows; select, move, resize, recolour and
-  delete them, including other apps' annotations; a Comments list; saved as standard PDF
-  annotations that look the same in every reader
+  text boxes, highlights, underlines, strikethrough, freehand ink, rectangles, ellipses, lines,
+  arrows and stamps (standard or a picture); select, move, resize, recolour and delete them,
+  including other apps' annotations; reply to any annotation in a comment thread; a Comments
+  list; saved as standard PDF annotations that look the same in every reader, and added to
+  the accessibility tags of tagged PDFs
 - **Crash recovery**: unsaved edits are journaled and offered back after a crash
 - **Printing** through the operating system's print dialog
 - **Creating PDFs**: blank documents, or converted from images, Word, Excel, PowerPoint and

@@ -40,7 +40,9 @@ demo. Exit criteria are the definition of done, not the feature list.
   `ferrix-core` annotation model, `ferrix-annot`, `ferrix annotate`; see ADR-0009 notes) →
   ~~app editing~~ (done: Markup mode, Comments list, note editor; open items in ADR-0009
   notes) → ~~text~~ (done: text boxes, highlight/underline/strikethrough/squiggly, text
-  selection) → stamps, replies, tagging, pressure.
+  selection) → ~~stamps, replies, tagging~~ (done: standard and picture stamps, other apps'
+  stamps movable, comment threads, annotations tagged in tagged PDFs; see ADR-0009 phase 4
+  notes). Pen pressure is deferred: iced has no pressure input.
 - ~~Incremental + atomic + verified save; Save As~~ (done: `ferrix-pdf`, `ferrix-io`).
 - Engine moved out of process (ADR-0004) with crash recovery.
 
