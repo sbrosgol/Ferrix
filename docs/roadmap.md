@@ -20,7 +20,9 @@ demo. Exit criteria are the definition of done, not the feature list.
 - `ferrix-render`: continuous/single/two-page layouts, tiled progressive rendering, zoom
   (fit width/page, pinch, ctrl+wheel), rotation, HiDPI, memory budget.
 - Thumbnails sidebar, outline/bookmarks, internal & external links (with confirmation).
-- Text selection + copy, find-in-document with streaming results.
+- ~~Text selection + copy~~ (done with ADR-0009 phase 3: `ferrix-text`, single page; drag,
+  double/triple click, ⌘A/⌘C); ~~find-in-document with streaming results~~ (done:
+  `ferrix_text::Query` and `PageText::find`, the app's PDF find bar; see architecture §5.5).
 - Password-protected PDFs, light/dark/system theme, page-inversion reading mode.
 - Keyboard navigation and basic a11y for chrome.
 - `ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom.
@@ -33,8 +35,15 @@ demo. Exit criteria are the definition of done, not the feature list.
   (done: `ferrix-io::journal`, see ADR-0003 notes).
 - ~~Page organizer: reorder, rotate, delete, insert from file~~ — delivered early (see ADR-0003
   notes); remaining: drag-and-drop reordering, extract/split, blank pages.
-- Highlight / underline / strikeout / squiggly, sticky notes, free text, ink (pressure), shapes, stamps.
-- Annotation list panel; edit/delete existing annotations from other apps.
+- Annotations, designed in [ADR-0009](adr/0009-annotations.md): sticky notes, ink,
+  shapes, free text, highlight / underline / strikeout / squiggly, stamps; annotation list panel;
+  edit/delete existing annotations from other apps. Phases: ~~headless core~~ (done:
+  `ferrix-core` annotation model, `ferrix-annot`, `ferrix annotate`; see ADR-0009 notes) →
+  ~~app editing~~ (done: Markup mode, Comments list, note editor; open items in ADR-0009
+  notes) → ~~text~~ (done: text boxes, highlight/underline/strikethrough/squiggly, text
+  selection) → ~~stamps, replies, tagging~~ (done: standard and picture stamps, other apps'
+  stamps movable, comment threads, annotations tagged in tagged PDFs; see ADR-0009 phase 4
+  notes). Pen pressure is deferred: iced has no pressure input.
 - ~~Incremental + atomic + verified save; Save As~~ (done: `ferrix-pdf`, `ferrix-io`).
 - Engine moved out of process (ADR-0004) with crash recovery.
 

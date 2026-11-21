@@ -12,8 +12,8 @@ mod model;
 
 pub use error::EngineError;
 pub use model::{
-    DocInfo, DocMetadata, DocSource, EngineCaps, OutlineItem, PageInfo, RenderFlags, RenderedTile,
-    Secret, TextChar, TextPage, TileRequest,
+    AnnotSummary, DocInfo, DocMetadata, DocSource, EngineCaps, OutlineItem, PageInfo, RenderFlags,
+    RenderedTile, Secret, TextChar, TextPage, TileRequest,
 };
 
 use ferrix_types::{DocId, PageIndex};
@@ -44,4 +44,13 @@ pub trait PdfEngine: Send {
     fn text_page(&mut self, doc: DocId, page: PageIndex) -> Result<TextPage, EngineError>;
 
     fn outline(&mut self, doc: DocId) -> Result<Vec<OutlineItem>, EngineError>;
+
+    /// The annotations of a page in the engine's order, popups and form widgets included.
+    fn annotations(
+        &mut self,
+        _doc: DocId,
+        _page: PageIndex,
+    ) -> Result<Vec<AnnotSummary>, EngineError> {
+        Err(EngineError::Unsupported("annotations".into()))
+    }
 }

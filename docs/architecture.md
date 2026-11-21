@@ -112,6 +112,7 @@ ferrix/
 │  ├─ ferrix-render/          # page layout, tile grid, render scheduler, caches
 │  ├─ ferrix-text/            # text model, selection, search, extraction
 │  ├─ ferrix-core/            # sessions, commands, undo, tools, view state, events
+│  ├─ ferrix-annot/           # annotations: read, appearance streams, object writing (ADR-0009)
 │  ├─ ferrix-io/              # file I/O, atomic save, autosave journal, recovery
 │  ├─ ferrix-store/           # settings.json + SQLite state.db (ADR-0005)
 │  ├─ ferrix-print/           # native print dialogs per platform (ADR-0006)
@@ -244,6 +245,14 @@ pub trait Command: Serialize + DeserializeOwned {
   (handles rotation/skew), copy with reading-order heuristics and ligature/hyphen normalization.
 - Search: background indexer extracts text page-by-page (low priority), builds an in-memory index
   (Unicode NFKC + case folding, diacritic-insensitive option). Results stream in as found.
+  *Built (2026-11-21):* `ferrix_text::Query` folds query and page alike (NFKD, combining
+  marks dropped and lower case unless "match case"; whitespace runs and line breaks become one
+  space; PDFium's end-of-line hyphen mark joins words) and `PageText::find` returns character
+  ranges, so matches draw and select like selections. There is no separate index yet: the app
+  loads page text one page at a time (visible pages first, then onward from the current page),
+  matches each page as it arrives, and shows the first match at or after the current page as
+  soon as the pages before it are searched. Page texts stay cached per document. Not done:
+  matching across page boundaries, whole-word search, a results list.
 - Also feeds **accessibility**: tagged PDF structure tree when present, otherwise heuristic
   reading order → exposed as an AccessKit subtree of the canvas.
 
@@ -265,7 +274,7 @@ pub trait Command: Serialize + DeserializeOwned {
 
 | Module | Approach |
 |---|---|
-| Annotations | PDF-native annotation dictionaries (Highlight, Underline, StrikeOut, Squiggly, Text/Note, FreeText, Ink, Square, Circle, Line, Polygon, Stamp). Always generate appearance streams so other viewers render them identically. |
+| Annotations | PDF-native annotation dictionaries (Highlight, Underline, StrikeOut, Squiggly, Text/Note, FreeText, Ink, Square, Circle, Line, Polygon, Stamp). Always generate appearance streams so other viewers render them identically. Model and edits in `ferrix-core`, appearances and writing in `ferrix-annot`, saved by `ferrix-pdf` as one incremental revision; PDFium only renders ([ADR-0009](adr/0009-annotations.md)). |
 | Forms (AcroForm) | Fill, tab order, validation per field flags; formatting via a small built-in subset (date/number masks), no JS. XFA: display static fallback only. |
 | Page organizer | Thumbnail grid with drag-reorder, multi-select, insert from file, extract, split by ranges/bookmarks. |
 | Redaction | Mark → review → apply. Applying removes underlying text/image/vector content (not just a black box), scrubs metadata, forces Full save. Verified by re-extracting text in tests. |

@@ -7,6 +7,8 @@ pub(crate) struct Page {
     pub(crate) crop: Option<[f32; 4]>,
     pub(crate) rotate: i32,
     pub(crate) content: String,
+    /// Put the boxes and rotation on the page-tree root, for the page to inherit.
+    pub(crate) inherit: bool,
 }
 
 impl Page {
@@ -17,7 +19,14 @@ impl Page {
             crop: None,
             rotate: 0,
             content: "1 0 0 rg 0 0 100 100 re f\nBT /F1 24 Tf 0 g 72 700 Td (Hello) Tj ET".into(),
+            inherit: false,
         }
+    }
+
+    /// Moves this page's boxes and rotation onto the page-tree root (one such page per fixture).
+    pub(crate) fn inherited(mut self) -> Self {
+        self.inherit = true;
+        self
     }
 
     pub(crate) fn rotated(mut self, degrees: i32) -> Self {
@@ -43,8 +52,25 @@ pub(crate) fn pdf(title: &str, pages: &[Page]) -> Vec<u8> {
     let kids: Vec<_> = (0..pages.len())
         .map(|i| format!("{} 0 R", page_obj(i)))
         .collect();
+    let rect = |r: [f32; 4]| format!("[{} {} {} {}]", r[0], r[1], r[2], r[3]);
+    let boxes = |page: &Page| {
+        let crop = page
+            .crop
+            .map(|c| format!(" /CropBox {}", rect(c)))
+            .unwrap_or_default();
+        format!(
+            " /MediaBox {}{crop} /Rotate {}",
+            rect(page.media),
+            page.rotate
+        )
+    };
+    let inherited = pages
+        .iter()
+        .find(|p| p.inherit)
+        .map(boxes)
+        .unwrap_or_default();
     objects.push(format!(
-        "<< /Type /Pages /Kids [{}] /Count {} >>",
+        "<< /Type /Pages /Kids [{}] /Count {}{inherited} >>",
         kids.join(" "),
         pages.len()
     ));
@@ -58,16 +84,14 @@ pub(crate) fn pdf(title: &str, pages: &[Page]) -> Vec<u8> {
 
     for (i, page) in pages.iter().enumerate() {
         let n = page_obj(i);
-        let rect = |r: [f32; 4]| format!("[{} {} {} {}]", r[0], r[1], r[2], r[3]);
-        let crop = page
-            .crop
-            .map(|c| format!(" /CropBox {}", rect(c)))
-            .unwrap_or_default();
+        let own = if page.inherit {
+            String::new()
+        } else {
+            boxes(page)
+        };
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox {}{crop} /Rotate {} \
+            "<< /Type /Page /Parent 2 0 R{own} \
              /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
-            rect(page.media),
-            page.rotate,
             n + 1
         ));
         objects.push(format!(

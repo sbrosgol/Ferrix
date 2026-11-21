@@ -18,13 +18,18 @@ Then Read `$S/shot.png`.
 
 Flags: `--dark`, `--new` (New Document dialog), `--rotate`, `--recover`, `--write` (types a
 formatted letter), `--features` (lists, picture, page break, table, footer, find bar),
-`--fit-page`, `--fit-width`, `--zoom-in`, `--next` (three pages forward). A tall `SHOT_SIZE` (e.g. `760x1700`) shows several
+`--fit-page`, `--fit-width`, `--zoom-in`, `--next` (three pages forward), `--menu` (the toolbar’s `⋯` menu). A tall `SHOT_SIZE` (e.g. `760x1700`) shows several
 pages. Increase `SHOT_SECS` for long scripts (each scripted step waits a little).
 
 To script something new, add a flag and a `Vec<Message>` builder next to `writing_script()` /
 `features_script()`; `ferrix_app::{WriteAction, KeyCommand, writer::*}` are public for this.
 
 ## Traps
+
+- **Use a new, empty `FERRIX_DATA_DIR` for every run**, not one per session: `--write` and
+  `--features` leave a recovery journal behind, and the next run then opens on the recovery
+  dialog instead of what you meant to capture.
+- The software renderer may not draw shadows or blur; judge elevation on a real run.
 
 - **Always isolate `FERRIX_DATA_DIR`.** The real recovery directory
   (`~/Library/Application Support/Ferrix/recovery` on macOS) may hold the user's crash journals:

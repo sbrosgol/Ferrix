@@ -10,20 +10,31 @@ What works today:
   thumbnails and light/dark themes
 - **Page organization**: reorder, rotate, delete and insert pages from other files, with
   undo/redo and safe incremental save / Save As
+- **Text selection**: select text on PDF pages (drag, double-click a word, triple-click a
+  line) and copy it
+- **Find in PDFs** (⌘F): results stream in as pages are searched; case- and accent-insensitive
+  unless asked, line breaks and end-of-line hyphens ignored; ⌘G / ⇧⌘G step through matches
+- **Annotations** ([ADR-0009](docs/adr/0009-annotations.md)): Markup mode (⇧⌘A) adds notes,
+  text boxes, highlights, underlines, strikethrough, freehand ink, rectangles, ellipses, lines,
+  arrows and stamps (standard or a picture); select, move, resize, recolour and delete them,
+  including other apps' annotations; reply to any annotation in a comment thread; a Comments
+  list; saved as standard PDF annotations that look the same in every reader, and added to
+  the accessibility tags of tagged PDFs
 - **Crash recovery**: unsaved edits are journaled and offered back after a crash
 - **Printing** through the operating system's print dialog
 - **Creating PDFs**: blank documents, or converted from images, Word, Excel, PowerPoint and
   OpenDocument files (Office formats need LibreOffice installed)
-- **CLI** (`ferrix`): `info`, `render`, `text`, `outline`, `organize`, and `compose` /
-  `source` for documents written from scratch
+- **CLI** (`ferrix`): `info`, `render`, `text`, `outline`, `organize`, `annotate` (list, add
+  and remove notes, shapes, lines, arrows and ink), and `compose` / `source` for documents
+  written from scratch
 - **Writing documents** ([ADR-0008](docs/adr/0008-writing-documents.md)): type and format
   letters and reports (styles, fonts, bold/italic/underline, colour, alignment, spacing,
   bulleted and numbered lists, tables, pictures, page breaks, headers and footers with page
   numbers, find and replace, formatted copy and paste), saved as tagged, accessible PDFs (or
   PDF/A-3 for archiving) that stay editable in Ferrix
 
-Not yet: annotations, forms, text selection and search in PDFs, the sandboxed engine process,
-and spell check in written documents.
+Not yet: forms, the sandboxed engine process, and spell check in written
+documents.
 
 ## Goals
 - Fast, faithful rendering of real-world PDFs

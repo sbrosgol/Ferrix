@@ -44,11 +44,24 @@ pub(crate) const THUMB_WIDTH: f32 = 112.0;
 
 pub(crate) type Worker = EngineWorker<PdfiumEngine>;
 
+/// Light, dark, or whatever the operating system uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Appearance {
+pub enum Appearance {
     System,
     Light,
     Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Match System",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -272,8 +285,23 @@ pub struct App {
     window: Option<window::Id>,
     pub(crate) window_size: iced::Size,
     scale_factor: f32,
-    appearance: Appearance,
+    pub(crate) appearance: Appearance,
     system_dark: bool,
+    /// The toolbar's overflow menu (`⋯`) is open.
+    pub(crate) menu_open: bool,
+    /// Markup mode (annotation tools), while on.
+    pub(crate) markup: Option<crate::markup::Markup>,
+    /// The note whose text is being edited.
+    pub(crate) note: Option<crate::annotate_ui::NoteEditor>,
+    /// Asking whether to annotate a signed document.
+    pub(crate) signed_prompt: bool,
+    pub(crate) sidebar_tab: crate::annotate_ui::SidebarTab,
+    /// The author name for new annotations and replies, asked for once per session (the
+    /// settings store of ADR-0005 doesn't exist yet), and the field asking for it.
+    pub(crate) author: Option<String>,
+    pub(crate) author_input: String,
+    /// Text selected on a page.
+    pub(crate) text_selection: Option<crate::text_select::TextSelection>,
     pub(crate) sidebar: bool,
     pub(crate) zoom: Zoom,
     pub(crate) doc: Option<Document>,
@@ -287,7 +315,7 @@ pub struct App {
     after_save: Option<Proceed>,
     /// Page to return to when a document is reopened after saving.
     reopen_at: Option<usize>,
-    modifiers: keyboard::Modifiers,
+    pub(crate) modifiers: keyboard::Modifiers,
     /// Installed conversion tools, detected in the background at startup.
     pub(crate) converter: Option<Arc<Converter>>,
     /// The New Document dialog, while open.
@@ -331,16 +359,42 @@ pub enum Message {
     FitPage,
     ToggleSidebar,
     ToggleTheme,
+    ToggleMenu,
+    Annot(crate::annotate_ui::AnnotMsg),
+    /// A page's text arrived (document, page, text).
+    TextLoaded(
+        DocId,
+        PageKey,
+        Result<std::sync::Arc<ferrix_text::PageText>, String>,
+    ),
+    CopyText,
+    SelectAllText,
+    /// Mark the selected text: style and palette colour index.
+    MarkSelection(ferrix_core::MarkupStyle, usize),
+    SidebarTab(crate::annotate_ui::SidebarTab),
+    SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
     Measured(DocId, Result<Vec<Size>, String>),
-    Rendered(DocId, PageKey, Rotation, f32, Result<Rendered, String>),
+    /// A page image: (document, page, rotation, the engine document it was rendered from,
+    /// scale factor, result).
+    Rendered(
+        DocId,
+        PageKey,
+        Rotation,
+        DocId,
+        f32,
+        Result<Rendered, String>,
+    ),
     PageScrolled(f32),
-    Thumbnail(DocId, PageKey, Rotation, Result<Rendered, String>),
+    Thumbnail(DocId, PageKey, Rotation, DocId, Result<Rendered, String>),
     WindowOpened(Option<window::Id>),
     ScaleFactor(f32),
     Resized(iced::Size),
     ModifiersChanged(keyboard::Modifiers),
     DragWindow,
+    /// The title bar (the toolbar on macOS) was double-clicked.
+    TitleBarDoubleClick,
+    TitleBarAction(crate::titlebar::TitleBarAction),
     DismissStatus,
     Print,
     PrintReady(Result<PathBuf, String>),
@@ -348,7 +402,9 @@ pub enum Message {
     ThumbnailClicked(PageKey),
     Rotate(Rotation),
     Delete,
-    Move { earlier: bool },
+    Move {
+        earlier: bool,
+    },
     InsertDialog,
     Insert(PathBuf),
     Inserted(Origin, Result<DocInfo, String>),
@@ -358,6 +414,15 @@ pub enum Message {
     SaveAs,
     SaveAsPicked(Option<PathBuf>),
     Saved(Result<PathBuf, String>),
+    /// A preview of the document with its annotation changes is open in the engine
+    /// (document, generation, preview engine document or `None` for the original).
+    PreviewReady(DocId, u64, Result<Option<DocInfo>, String>),
+    /// A source's annotations were read (engine document, source index).
+    AnnotationsLoaded(
+        DocId,
+        ferrix_core::SourceId,
+        Result<crate::annotate::Loaded, String>,
+    ),
     CloseRequested,
     Confirmed(Choice),
     Escape,
@@ -425,6 +490,14 @@ impl App {
             scale_factor: 1.0,
             appearance: Appearance::System,
             system_dark: false,
+            menu_open: false,
+            markup: None,
+            note: None,
+            signed_prompt: false,
+            sidebar_tab: crate::annotate_ui::SidebarTab::Pages,
+            text_selection: None,
+            author: None,
+            author_input: String::new(),
             sidebar: true,
             zoom: Zoom::Auto,
             doc: None,
@@ -512,7 +585,10 @@ impl App {
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::OpenDialog => return self.guard(Proceed::OpenDialog),
+            Message::OpenDialog => {
+                self.menu_open = false;
+                return self.guard(Proceed::OpenDialog);
+            }
             Message::Open(path) => return self.guard(Proceed::Open(path)),
             Message::DialogClosed => {}
             Message::Opened(origin, Ok(info)) => return self.opened(origin, info),
@@ -561,6 +637,26 @@ impl App {
                     Appearance::Dark
                 };
             }
+            Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::Annot(msg) => return self.annot_update(msg),
+            Message::TextLoaded(doc_id, page, result) => {
+                return self.text_loaded(doc_id, page, result);
+            }
+            Message::CopyText => return self.copy_text(),
+            Message::SelectAllText => self.select_page_text(),
+            Message::MarkSelection(style, color) => {
+                if let Some((_, color)) = crate::markup::COLORS.get(color) {
+                    return self.mark_selection(style, *color);
+                }
+            }
+            Message::SidebarTab(tab) => {
+                self.sidebar_tab = tab;
+                self.sidebar = true;
+            }
+            Message::SetAppearance(appearance) => {
+                self.appearance = appearance;
+                self.menu_open = false;
+            }
             Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
             Message::Measured(doc_id, result) => {
                 let Some(doc) = self.doc.as_mut() else {
@@ -575,7 +671,7 @@ impl App {
                 }
                 return self.render();
             }
-            Message::Rendered(doc_id, key, rotation, scale_factor, result) => {
+            Message::Rendered(doc_id, key, rotation, source, scale_factor, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none();
                 };
@@ -586,6 +682,7 @@ impl App {
                             key,
                             Shown {
                                 rotation,
+                                source,
                                 zoom: r.zoom,
                                 scale_factor,
                                 image: r.into_image(),
@@ -593,15 +690,15 @@ impl App {
                         );
                     }
                     Err(e) => {
-                        let page = doc.pages.position(key).map_or(0, |i| i + 1);
+                        let page = doc.state.pages.position(key).map_or(0, |i| i + 1);
                         self.error = Some(format!("Couldn’t show page {page}: {e}"));
                         doc.render_failed.insert(key);
                     }
                 }
-                return self.render_pages();
+                return Task::batch([self.render_pages(), self.load_texts()]);
             }
             Message::PageScrolled(top) => return self.page_scrolled(top),
-            Message::Thumbnail(doc_id, key, rotation, result) => {
+            Message::Thumbnail(doc_id, key, rotation, source, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none(); // the document was closed meanwhile
                 };
@@ -611,6 +708,7 @@ impl App {
                         key,
                         Thumbnail {
                             rotation,
+                            source,
                             image: r.into_image(),
                         },
                     );
@@ -641,11 +739,32 @@ impl App {
                     return window::drag(id);
                 }
             }
+            // Read the system setting each time, off the UI thread, so a change in System
+            // Settings applies without restarting.
+            Message::TitleBarDoubleClick => {
+                return Task::perform(
+                    crate::worker::blocking(|| Ok(crate::titlebar::preference())),
+                    |action| Message::TitleBarAction(action.unwrap_or_default()),
+                );
+            }
+            Message::TitleBarAction(action) => {
+                use crate::titlebar::TitleBarAction;
+                if let Some(id) = self.window {
+                    return match action {
+                        TitleBarAction::Zoom => window::toggle_maximize(id),
+                        TitleBarAction::Minimize => window::minimize(id, true),
+                        TitleBarAction::Nothing => Task::none(),
+                    };
+                }
+            }
             Message::DismissStatus => {
                 self.error = None;
                 self.notice = None;
             }
-            Message::Print => return self.print(),
+            Message::Print => {
+                self.menu_open = false;
+                return self.print();
+            }
             Message::PrintReady(Ok(path)) => {
                 self.busy = None;
                 return self.print_file(path);
@@ -685,6 +804,10 @@ impl App {
                 let label = pages_label("Rotate", keys.len());
                 return self.apply(Edit::Rotate { keys, by }, label);
             }
+            // With an annotation selected in Markup mode, Delete removes it, never the page.
+            Message::Delete if self.markup.as_ref().is_some_and(|m| m.selected.is_some()) => {
+                return self.delete_selected();
+            }
             Message::Delete => {
                 let Some(doc) = self.editable() else {
                     return Task::none();
@@ -698,8 +821,10 @@ impl App {
                     return Task::none();
                 };
                 let keys = doc.targets();
-                let positions: Vec<usize> =
-                    keys.iter().filter_map(|k| doc.pages.position(*k)).collect();
+                let positions: Vec<usize> = keys
+                    .iter()
+                    .filter_map(|k| doc.state.pages.position(*k))
+                    .collect();
                 let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
                     return Task::none();
                 };
@@ -710,7 +835,7 @@ impl App {
                     (last + 1 < doc.len()).then(|| last + 2 - keys.len())
                 };
                 let Some(to) = to else { return Task::none() };
-                match doc.pages.move_edit(&keys, to) {
+                match doc.state.pages.move_edit(&keys, to) {
                     Ok(edit) => {
                         let label = pages_label("Move", keys.len());
                         return self.apply(edit, label);
@@ -844,6 +969,48 @@ impl App {
                 self.reopen_at = self.doc.as_ref().map(|d| d.current);
                 return self.load(Origin::File(path), Message::Opened);
             }
+            Message::AnnotationsLoaded(engine_doc, source, result) => {
+                let Some(doc) = self.doc.as_mut() else {
+                    return Task::none();
+                };
+                // The document may have been closed or replaced meanwhile.
+                if doc.sources.get(source.0 as usize).map(|s| s.doc) != Some(engine_doc) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(loaded) => {
+                        if doc.adopt_annotations(source, loaded) {
+                            return self.refresh_preview();
+                        }
+                    }
+                    // Viewing still works; editing annotations stays off for this document.
+                    Err(e) => tracing::warn!("couldn’t read annotations: {e}"),
+                }
+            }
+            Message::PreviewReady(doc_id, generation, result) => {
+                let engine = self.engine.clone().ok();
+                let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
+                    return close_engine_doc(engine, result);
+                };
+                if generation != doc.preview_gen {
+                    return close_engine_doc(engine, result); // a newer preview is on its way
+                }
+                match result {
+                    Ok(info) => {
+                        let shown = info.map_or(doc.info.id, |i| i.id);
+                        let Some(base) = doc.sources.first_mut() else {
+                            return Task::none();
+                        };
+                        let old = std::mem::replace(&mut base.doc, shown);
+                        // The original stays open (it is the document's identity); previews go.
+                        let close = (old != doc.info.id && old != shown).then_some(old);
+                        let task = self.render_pages();
+                        let thumbs = self.next_thumbnail();
+                        return Task::batch([task, thumbs, close_engine_id(engine, close)]);
+                    }
+                    Err(e) => self.error = Some(format!("Couldn’t show the annotations: {e}")),
+                }
+            }
             Message::Saved(Err(e)) => {
                 self.busy = None;
                 self.after_save = None;
@@ -863,9 +1030,35 @@ impl App {
                     Choice::Cancel => {}
                 }
             }
+            Message::Escape if self.menu_open => self.menu_open = false,
+            Message::Escape if self.signed_prompt => self.signed_prompt = false,
+            Message::Escape if self.note.is_some() => return self.close_note(),
+            Message::Escape if self.text_selection.is_some() => self.text_selection = None,
+            // In Markup mode, Esc cancels a drag, then returns to Select, then deselects.
+            Message::Escape
+                if self.markup.as_ref().is_some_and(|m| {
+                    m.gesture.is_some()
+                        || m.tool != crate::markup::Tool::Select
+                        || m.selected.is_some()
+                }) =>
+            {
+                if let Some(m) = self.markup.as_mut()
+                    && m.gesture.take().is_none()
+                {
+                    if m.tool == crate::markup::Tool::Select {
+                        m.selected = None;
+                    } else {
+                        m.tool = crate::markup::Tool::Select;
+                    }
+                }
+            }
             Message::Escape => {
                 if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
-                    self.find = None;
+                    if self.writer.is_none() {
+                        self.close_pdf_find();
+                    } else {
+                        self.find = None;
+                    }
                 }
                 self.confirm = None;
                 self.new_form = None;
@@ -890,7 +1083,10 @@ impl App {
                 self.busy = None;
                 self.error = Some(format!("Couldn’t convert “{}”: {e}", file_name(&source)));
             }
-            Message::NewDialog => return self.guard(Proceed::NewDialog),
+            Message::NewDialog => {
+                self.menu_open = false;
+                return self.guard(Proceed::NewDialog);
+            }
             Message::NewPaper(paper) => {
                 if let Some(form) = &mut self.new_form {
                     form.paper = paper;
@@ -1024,6 +1220,7 @@ impl App {
                 self.error = Some(format!("Couldn’t save: {e}"));
             }
             Message::PageSetupDialog => {
+                self.menu_open = false;
                 if let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) {
                     let doc = w.editor.document();
                     let page = doc.page;
@@ -1100,6 +1297,28 @@ impl App {
                     form.archival = on;
                 }
             }
+            Message::FindOpen if self.writer.is_none() => {
+                if self.doc.is_none() {
+                    return Task::none();
+                }
+                // Start from selected text, if it is a short single line.
+                let selected = self
+                    .text_selection
+                    .and_then(|s| Some(self.page_text(s.page)?.text(s.sel.range())))
+                    .unwrap_or_default();
+                let mut find = self.find.take().unwrap_or_default();
+                if !selected.trim().is_empty() && selected.len() <= 200 && !selected.contains('\n')
+                {
+                    find.query = selected;
+                }
+                find.focused = true;
+                self.find = Some(find);
+                return Task::batch([
+                    self.search_pdf(),
+                    operation::focus(find_input_id()),
+                    operation::select_all(find_input_id()),
+                ]);
+            }
             Message::FindOpen => {
                 let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) else {
                     return Task::none();
@@ -1122,6 +1341,9 @@ impl App {
                     find.query = query.chars().take(200).collect();
                     find.focused = true;
                 }
+                if self.writer.is_none() {
+                    return self.search_pdf();
+                }
             }
             Message::FindReplacement(text) => {
                 if let Some(find) = &mut self.find {
@@ -1133,6 +1355,15 @@ impl App {
                 if let Some(find) = &mut self.find {
                     find.match_case = on;
                 }
+                if self.writer.is_none() {
+                    return self.search_pdf();
+                }
+            }
+            Message::FindNext | Message::FindPrevious if self.writer.is_none() => {
+                if self.find.is_none() {
+                    return self.update(Message::FindOpen);
+                }
+                return self.step_match(matches!(message, Message::FindPrevious));
             }
             Message::FindNext
             | Message::FindPrevious
@@ -1166,6 +1397,7 @@ impl App {
                 }
                 return self.after_write(true);
             }
+            Message::FindClose if self.writer.is_none() => self.close_pdf_find(),
             Message::FindClose => self.find = None,
             Message::ApplyPageSetup => {
                 let (Some(form), Some(w)) = (self.page_setup.take(), self.writer.as_mut()) else {
@@ -1351,10 +1583,11 @@ impl App {
             self.notice = self.open_notice.take();
         }
         let measure = self.measure(doc.info.id, doc.info.page_count);
+        let annots = load_annotations(&doc.origin, doc.info.id, ferrix_core::SourceId::BASE);
         self.doc = Some(doc);
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([close, measure, self.next_thumbnail()])
+        Task::batch([close, measure, annots, self.next_thumbnail()])
     }
 
     /// Opens the documents behind the first recoverable session.
@@ -1451,6 +1684,7 @@ impl App {
             base_info,
             sources,
             found.pages.clone(),
+            found.annots.clone(),
         ));
         // The new session's journal now holds the work; the crashed one can go.
         self.sync_journal();
@@ -1494,6 +1728,10 @@ impl App {
         }
         self.page_setup = None;
         self.find = None;
+        self.markup = None;
+        self.note = None;
+        self.text_selection = None;
+        self.signed_prompt = false;
         if let Some(writer) = self.writer.take() {
             self.fonts = Some(writer.editor.into_fonts());
         }
@@ -1535,10 +1773,54 @@ impl App {
         }
     }
 
-    fn after_edit(&mut self) -> Task<Message> {
+    pub(crate) fn after_edit(&mut self) -> Task<Message> {
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([self.render(), self.next_thumbnail()])
+        Task::batch([self.render(), self.next_thumbnail(), self.refresh_preview()])
+    }
+
+    /// Rebuilds the on-screen revision when the annotations differ from what is shown.
+    fn refresh_preview(&mut self) -> Task<Message> {
+        let Ok(engine) = self.engine.clone() else {
+            return Task::none();
+        };
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let Some(bytes) = doc.base_bytes.clone() else {
+            return Task::none();
+        };
+        if doc.state.annots == doc.previewed {
+            return Task::none();
+        }
+        doc.previewed = doc.state.annots.clone();
+        doc.preview_gen += 1;
+        let (doc_id, generation) = (doc.info.id, doc.preview_gen);
+        let pages: Vec<_> = doc
+            .state
+            .pages
+            .entries()
+            .iter()
+            .filter(|e| e.source == ferrix_core::SourceId::BASE)
+            .copied()
+            .collect();
+        let annots = doc.state.annots.clone();
+        Task::perform(
+            async move {
+                let Some(bytes) = crate::annotate::build_preview(bytes, pages, annots).await?
+                else {
+                    return Ok(None);
+                };
+                let info = flatten(
+                    engine
+                        .call(move |e| e.open(DocSource::Bytes(bytes), None))
+                        .await,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Some(info))
+            },
+            move |result| Message::PreviewReady(doc_id, generation, result),
+        )
     }
 
     fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
@@ -1546,8 +1828,10 @@ impl App {
             return Task::none();
         };
         let source = ferrix_core::SourceId(doc.sources.len() as u32);
+        let annots = load_annotations(&origin, info.id, source);
         doc.sources.push(Source::new(origin, info.id));
         let entries = doc
+            .state
             .pages
             .new_entries(source, (0..info.page_count).map(ferrix_types::PageIndex));
         let at = doc.current + 1;
@@ -1560,7 +1844,7 @@ impl App {
         let measure = self.measure(info.id, info.page_count);
         let task = self.apply(Edit::Insert { pages }, pages_label("Insert", count));
         // Show the first inserted page.
-        Task::batch([measure, task, self.go_to(at)])
+        Task::batch([measure, annots, task, self.go_to(at)])
     }
 
     // ── Writing ───────────────────────────────────────────────────────────────
@@ -1854,6 +2138,7 @@ impl App {
             stamp: doc.stamp,
             imports: doc.imports(),
             layout: doc.layout(),
+            state: doc.state.clone(),
         })
     }
 
@@ -1969,11 +2254,20 @@ impl App {
     // ── Navigation and rendering ──────────────────────────────────────────────
 
     /// Logical size available to a page inside the canvas.
-    pub(crate) fn canvas_size(&self) -> iced::Size {
-        crate::view::canvas_size(self.window_size, self.sidebar && self.doc.is_some())
+    /// The window minus the Markup bar while it shows, for page-layout sums.
+    fn view_window(&self) -> iced::Size {
+        let mut size = self.window_size;
+        if self.markup.is_some() {
+            size.height -= crate::view::BAR_HEIGHT + 1.0;
+        }
+        size
     }
 
-    fn sync_page_input(&mut self) {
+    pub(crate) fn canvas_size(&self) -> iced::Size {
+        crate::view::canvas_size(self.view_window(), self.sidebar && self.doc.is_some())
+    }
+
+    pub(crate) fn sync_page_input(&mut self) {
         self.page_input = self
             .doc
             .as_ref()
@@ -2018,7 +2312,7 @@ impl App {
         self.set_zoom(Zoom::Fixed(next))
     }
 
-    fn rerender_if_fitting(&mut self) -> Task<Message> {
+    pub(crate) fn rerender_if_fitting(&mut self) -> Task<Message> {
         // A fixed zoom keeps the layout, but a different window shows different pages.
         match self.zoom {
             Zoom::Fixed(_) => self.render_pages(),
@@ -2027,8 +2321,8 @@ impl App {
     }
 
     /// Height of the scrolled page view, in logical pixels.
-    fn viewport_height(&self) -> f32 {
-        crate::view::page_view_height(self.window_size)
+    pub(crate) fn viewport_height(&self) -> f32 {
+        crate::view::page_view_height(self.view_window())
     }
 
     fn step_page(&mut self, delta: isize) -> Task<Message> {
@@ -2039,7 +2333,7 @@ impl App {
         self.go_to(target)
     }
 
-    fn go_to(&mut self, index: usize) -> Task<Message> {
+    pub(crate) fn go_to(&mut self, index: usize) -> Task<Message> {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
@@ -2068,7 +2362,7 @@ impl App {
         ])
     }
 
-    fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
+    pub(crate) fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
         if let Some(doc) = &mut self.doc {
             doc.scroll = top;
         }
@@ -2082,7 +2376,7 @@ impl App {
     }
 
     /// Keeps the current page's thumbnail in view.
-    fn follow_in_sidebar(&self) -> Task<Message> {
+    pub(crate) fn follow_in_sidebar(&self) -> Task<Message> {
         let Some(doc) = &self.doc else {
             return Task::none();
         };
@@ -2158,7 +2452,7 @@ impl App {
 
     /// Renders the next page in or next to the view that is missing or out of date; each
     /// result schedules the one after it. Pages further away are dropped.
-    fn render_pages(&mut self) -> Task<Message> {
+    pub(crate) fn render_pages(&mut self) -> Task<Message> {
         let (height, scale_factor) = (self.viewport_height(), self.scale_factor);
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
@@ -2181,18 +2475,19 @@ impl App {
             .chain(near.clone())
             .filter(|i| near.contains(i))
             .find_map(|i| {
-                let entry = doc.pages.get(i)?;
+                let entry = doc.state.pages.get(i)?;
                 if doc.render_failed.contains(&entry.key) {
                     return None;
                 }
+                let page = doc.page_ref(entry)?;
+                // Also stale once the source shows a newer annotation preview (ADR-0009 §7).
                 let fresh = doc.images.get(&entry.key).is_some_and(|s| {
-                    s.rotation == entry.rotation && s.zoom == zoom && s.scale_factor == scale_factor
+                    s.rotation == entry.rotation
+                        && s.source == page.doc
+                        && s.zoom == zoom
+                        && s.scale_factor == scale_factor
                 });
-                if fresh {
-                    None
-                } else {
-                    Some((entry.key, doc.page_ref(entry)?))
-                }
+                if fresh { None } else { Some((entry.key, page)) }
             });
         let Some((key, page)) = next else {
             return Task::none();
@@ -2208,7 +2503,9 @@ impl App {
                     .await;
                 flatten(result)
             },
-            move |result| Message::Rendered(doc_id, key, page.rotation, scale_factor, result),
+            move |result| {
+                Message::Rendered(doc_id, key, page.rotation, page.doc, scale_factor, result)
+            },
         )
     }
 
@@ -2253,7 +2550,7 @@ impl App {
                     .await;
                 flatten(result)
             },
-            move |result| Message::Thumbnail(doc_id, key, page.rotation, result),
+            move |result| Message::Thumbnail(doc_id, key, page.rotation, page.doc, result),
         )
     }
 }
@@ -2269,6 +2566,35 @@ fn render_thumbnail(
     render_page(engine, page, scale, scale_factor, 0.0)
 }
 
+/// Closes a preview that is no longer wanted.
+fn close_engine_doc(
+    engine: Option<Worker>,
+    result: Result<Option<DocInfo>, String>,
+) -> Task<Message> {
+    close_engine_id(engine, result.ok().flatten().map(|i| i.id))
+}
+
+fn close_engine_id(engine: Option<Worker>, id: Option<DocId>) -> Task<Message> {
+    match (engine, id) {
+        (Some(engine), Some(id)) => {
+            Task::future(async move { engine.call(move |e| e.close(id)).await }).discard()
+        }
+        _ => Task::none(),
+    }
+}
+
+/// Reads a source's annotations in the background.
+fn load_annotations(
+    origin: &Origin,
+    engine_doc: DocId,
+    source: ferrix_core::SourceId,
+) -> Task<Message> {
+    let origin = origin.clone();
+    Task::perform(crate::annotate::load(origin, source), move |result| {
+        Message::AnnotationsLoaded(engine_doc, source, result)
+    })
+}
+
 /// Everything needed to write the edited document, gathered on the UI thread.
 #[derive(Debug)]
 struct Export {
@@ -2277,6 +2603,8 @@ struct Export {
     stamp: Option<FileStamp>,
     imports: Vec<Origin>,
     layout: Vec<LayoutPage>,
+    /// Pages and annotations; annotations are written in the same revision (ADR-0009 §6).
+    state: ferrix_core::DocState,
 }
 
 impl Export {
@@ -2289,6 +2617,7 @@ impl Export {
             stamp,
             imports,
             layout,
+            state,
         } = self;
         let bytes = blocking(move || {
             if let Some(path) = base.path()
@@ -2307,8 +2636,19 @@ impl Export {
                 .collect::<Result<Vec<_>, _>>()?;
             let sources: Vec<PdfSource<'_>> =
                 import_bytes.iter().map(|b| PdfSource::new(b)).collect();
-            ferrix_pdf::write_page_layout(PdfSource::new(&base_bytes), &sources, &layout)
-                .map_err(|e| e.to_string())
+            let mut revision = ferrix_pdf::Revision::new(PdfSource::new(&base_bytes), &sources)
+                .map_err(|e| e.to_string())?;
+            // An unchanged page list keeps the original page tree; only touched pages change.
+            if !state.pages.is_unchanged() {
+                revision.set_layout(layout).map_err(|e| e.to_string())?;
+            }
+            let now = ferrix_annot::pdf_date(std::time::SystemTime::now());
+            ferrix_annot::write_annotations(&mut revision, &state.pages, &state.annots, &now)
+                .map_err(|e| e.to_string())?;
+            let out = revision.finish().map_err(|e| e.to_string())?;
+            ferrix_annot::verify(&out, None, &state.pages, &state.annots)
+                .map_err(|e| e.to_string())?;
+            Ok(out)
         })
         .await?;
 
@@ -2344,13 +2684,23 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         Key::Named(Named::End) => Some(Message::Last),
         Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         Key::Named(Named::Escape) => Some(Message::Escape),
+        // Tool letters; ignored unless Markup mode is on.
+        Key::Character(c) if !modifiers.command() && !modifiers.alt() && !modifiers.control() => {
+            crate::markup::Tool::from_key(&c.to_ascii_lowercase())
+                .map(|t| Message::Annot(crate::annotate_ui::AnnotMsg::Tool(t)))
+        }
         Key::Character(c) if modifiers.command() => {
             let shift = modifiers.shift();
             match c.to_ascii_lowercase().as_str() {
+                "a" if shift => Some(Message::Annot(crate::annotate_ui::AnnotMsg::Toggle)),
+                "a" => Some(Message::SelectAllText),
+                "c" => Some(Message::CopyText),
                 "o" => Some(Message::OpenDialog),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
                 "f" => Some(Message::FindOpen),
+                "g" if shift => Some(Message::FindPrevious),
+                "g" => Some(Message::FindNext),
                 "s" if shift => Some(Message::SaveAs),
                 "s" => Some(Message::Save),
                 "z" if shift => Some(Message::Redo),
@@ -2486,9 +2836,52 @@ mod tests {
                 stamp: doc.stamp,
                 imports: doc.imports(),
                 layout: doc.layout(),
+                state: doc.state.clone(),
             }
             .run(),
         )
+    }
+
+    #[test]
+    fn export_writes_annotations_with_page_edits_in_one_revision() {
+        let Some(worker) = worker() else { return };
+        let mut doc = open_fixture(&worker, "annotated.pdf", 3);
+        let keys: Vec<PageKey> = (0..3).filter_map(|i| doc.key_at(i)).collect();
+        let id = doc.state.annots.new_id();
+        let square = ferrix_core::Annotation::new(
+            ferrix_core::AnnotKind::Square,
+            ferrix_types::PdfBox::from_corners(
+                ferrix_types::PdfPoint::new(50.0, 50.0),
+                ferrix_types::PdfPoint::new(150.0, 120.0),
+            ),
+        );
+        doc.edit(
+            ferrix_core::AnnotEdit::Add {
+                page: keys[2],
+                index: 0,
+                id,
+                annot: Box::new(square),
+            },
+            "Add Rectangle".into(),
+        )
+        .expect("adds");
+        doc.edit(
+            Edit::Remove {
+                keys: vec![keys[0]],
+            },
+            "Delete".into(),
+        )
+        .expect("delete");
+
+        let bytes = export(&worker, &doc).expect("exports");
+        let written = ferrix_pdf::load(ferrix_pdf::Source::new(&bytes)).expect("parses");
+        let annots = ferrix_annot::read_annotations(&written, ferrix_core::SourceId::BASE);
+        let kinds: Vec<Vec<&str>> = annots
+            .iter()
+            .map(|page| page.iter().map(|a| a.kind.subtype()).collect())
+            .collect();
+        // Page 3 is now page 2, and carries the rectangle.
+        assert_eq!(kinds, vec![vec![], vec!["Square"]]);
     }
 
     #[test]
@@ -2503,7 +2896,7 @@ mod tests {
             "Delete".into(),
         )
         .expect("delete");
-        let to_front = doc.pages.move_edit(&[keys[3]], 0).expect("move");
+        let to_front = doc.state.pages.move_edit(&[keys[3]], 0).expect("move");
         doc.edit(to_front, "Move".into()).expect("move");
         doc.edit(
             Edit::Rotate {

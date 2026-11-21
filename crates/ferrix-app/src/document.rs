@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use ferrix_core::{Edit, EditError, History, PageEntry, PageKey, PageList};
+use ferrix_core::{AnnotSet, DocEdit, DocState, EditError, History, PageEntry, PageKey, PageList};
 use ferrix_engine::DocInfo;
 use ferrix_io::FileStamp;
 use ferrix_pdf::LayoutPage;
@@ -87,6 +87,8 @@ pub(crate) struct Source {
     pub(crate) doc: DocId,
     /// Size of each page in points, without extra rotation; empty until measured.
     pub(crate) sizes: Vec<Size>,
+    /// Each page's user space → page space mapping; empty until annotations are read.
+    pub(crate) transforms: Vec<ferrix_types::PageTransform>,
 }
 
 impl Source {
@@ -95,6 +97,7 @@ impl Source {
             origin,
             doc,
             sizes: Vec::new(),
+            transforms: Vec::new(),
         }
     }
 }
@@ -102,6 +105,8 @@ impl Source {
 #[derive(Debug)]
 pub(crate) struct Thumbnail {
     pub(crate) rotation: Rotation,
+    /// The engine document it was rendered from; a newer annotation preview makes it stale.
+    pub(crate) source: DocId,
     pub(crate) image: PageImage,
 }
 
@@ -110,6 +115,7 @@ pub(crate) struct Thumbnail {
 #[derive(Debug)]
 pub(crate) struct Shown {
     pub(crate) rotation: Rotation,
+    pub(crate) source: DocId,
     pub(crate) zoom: f32,
     pub(crate) scale_factor: f32,
     pub(crate) image: PageImage,
@@ -129,8 +135,9 @@ pub(crate) struct Document {
     pub(crate) stamp: Option<FileStamp>,
     pub(crate) info: DocInfo,
     pub(crate) sources: Vec<Source>,
-    pub(crate) pages: PageList,
-    pub(crate) history: History,
+    /// Pages and annotations (ADR-0009), edited together through one history.
+    pub(crate) state: DocState,
+    pub(crate) history: History<DocState>,
     /// Index of the page on screen: the one filling most of the view.
     pub(crate) current: usize,
     pub(crate) selection: BTreeSet<PageKey>,
@@ -150,17 +157,34 @@ pub(crate) struct Document {
     pub(crate) render_failed: BTreeSet<PageKey>,
     pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
     pub(crate) thumbnail_busy: bool,
+    /// What the document allows for annotations; `None` until read (ADR-0009).
+    pub(crate) annot_policy: Option<crate::annotate::Policy>,
+    /// The document's own bytes, once read for annotations; previews are built from them.
+    pub(crate) base_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// The annotations the screen shows (the file's, or the last preview's).
+    pub(crate) previewed: AnnotSet,
+    /// Increments per preview request; older results are discarded.
+    pub(crate) preview_gen: u64,
+    /// The user agreed to annotate this signed document (asked once per document).
+    pub(crate) annotate_confirmed: bool,
+    /// The tagged-PDF notice was shown.
+    pub(crate) tagged_noted: bool,
+    /// Each page's text, loaded as pages come into view (`ferrix-text`).
+    pub(crate) texts: HashMap<PageKey, std::sync::Arc<ferrix_text::PageText>>,
+    pub(crate) text_busy: bool,
+    /// The search of the find bar, while it is open.
+    pub(crate) search: Option<crate::pdf_find::Search>,
 }
 
 impl Document {
     pub(crate) fn new(origin: Origin, info: DocInfo) -> Self {
         let pages = PageList::identity(info.page_count);
         let mut doc = Self {
+            state: DocState::new(pages, AnnotSet::new()),
             stamp: origin.path().and_then(|p| FileStamp::of(p).ok()),
             sources: vec![Source::new(origin.clone(), info.id)],
             origin,
             info,
-            pages,
             history: History::new(),
             current: 0,
             selection: BTreeSet::new(),
@@ -173,6 +197,15 @@ impl Document {
             render_failed: BTreeSet::new(),
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
+            annot_policy: None,
+            base_bytes: None,
+            previewed: AnnotSet::new(),
+            preview_gen: 0,
+            annotate_confirmed: false,
+            tagged_noted: false,
+            texts: HashMap::new(),
+            text_busy: false,
+            search: None,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -187,10 +220,14 @@ impl Document {
         info: DocInfo,
         sources: Vec<Source>,
         pages: PageList,
+        annots: Option<AnnotSet>,
     ) -> Self {
         let mut doc = Self::new(origin, info);
         doc.sources.extend(sources);
-        doc.pages = pages;
+        doc.state.pages = pages;
+        if let Some(annots) = annots {
+            doc.state.annots = annots;
+        }
         doc.history = History::unsaved();
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);
@@ -207,7 +244,7 @@ impl Document {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pages.len()
+        self.state.pages.len()
     }
 
     /// Unsaved edits, or a document that was never saved at all.
@@ -220,7 +257,7 @@ impl Document {
     }
 
     pub(crate) fn key_at(&self, index: usize) -> Option<PageKey> {
-        self.pages.get(index).map(|e| e.key)
+        self.state.pages.get(index).map(|e| e.key)
     }
 
     pub(crate) fn page_ref(&self, entry: &PageEntry) -> Option<PageRef> {
@@ -253,7 +290,8 @@ impl Document {
     }
 
     pub(crate) fn page_sizes(&self) -> Vec<Size> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .map(|e| self.page_size(e))
@@ -262,12 +300,16 @@ impl Document {
 
     /// Size of the current page in points, as displayed.
     pub(crate) fn current_size(&self) -> Option<Size> {
-        self.pages.get(self.current).map(|e| self.page_size(e))
+        self.state
+            .pages
+            .get(self.current)
+            .map(|e| self.page_size(e))
     }
 
     /// The pages an action applies to: the selection in document order, or the current page.
     pub(crate) fn targets(&self) -> Vec<PageKey> {
         let selected: Vec<PageKey> = self
+            .state
             .pages
             .entries()
             .iter()
@@ -299,38 +341,42 @@ impl Document {
             Click::Extend => {
                 let anchor = self
                     .anchor
-                    .and_then(|a| self.pages.position(a))
+                    .and_then(|a| self.state.pages.position(a))
                     .unwrap_or(self.current);
-                let Some(end) = self.pages.position(key) else {
+                let Some(end) = self.state.pages.position(key) else {
                     return;
                 };
                 let (from, to) = (anchor.min(end), anchor.max(end));
                 self.selection = (from..=to).filter_map(|i| self.key_at(i)).collect();
             }
         }
-        if let Some(index) = self.pages.position(key) {
+        if let Some(index) = self.state.pages.position(key) {
             self.current = index;
         }
     }
 
     /// Applies an edit through the undo history, keeping the current page in view.
-    pub(crate) fn edit(&mut self, edit: Edit, label: String) -> Result<(), EditError> {
+    pub(crate) fn edit(
+        &mut self,
+        edit: impl Into<DocEdit>,
+        label: String,
+    ) -> Result<(), EditError> {
         let keep = self.key_at(self.current);
-        self.history.perform(&mut self.pages, edit, label)?;
+        self.history.perform(&mut self.state, edit.into(), label)?;
         self.after_change(keep);
         Ok(())
     }
 
     pub(crate) fn undo(&mut self) -> Option<String> {
         let keep = self.key_at(self.current);
-        let label = self.history.undo(&mut self.pages)?;
+        let label = self.history.undo(&mut self.state)?;
         self.after_change(keep);
         Some(label)
     }
 
     pub(crate) fn redo(&mut self) -> Option<String> {
         let keep = self.key_at(self.current);
-        let label = self.history.redo(&mut self.pages)?;
+        let label = self.history.redo(&mut self.state)?;
         self.after_change(keep);
         Some(label)
     }
@@ -338,9 +384,9 @@ impl Document {
     fn after_change(&mut self, keep: Option<PageKey>) {
         let last = self.len().saturating_sub(1);
         self.current = keep
-            .and_then(|k| self.pages.position(k))
+            .and_then(|k| self.state.pages.position(k))
             .unwrap_or(self.current.min(last));
-        let present: BTreeSet<PageKey> = self.pages.entries().iter().map(|e| e.key).collect();
+        let present: BTreeSet<PageKey> = self.state.pages.entries().iter().map(|e| e.key).collect();
         self.selection.retain(|k| present.contains(k));
         self.thumbnails.retain(|k, _| present.contains(k));
         self.images.retain(|k, _| present.contains(k));
@@ -354,21 +400,24 @@ impl Document {
 
     /// The next page whose thumbnail is missing or shows an outdated rotation.
     pub(crate) fn next_thumbnail(&self) -> Option<(PageKey, PageRef)> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .take(MAX_THUMBNAILS)
             .find(|e| {
+                let source = self.sources.get(e.source.0 as usize).map(|s| s.doc);
                 self.thumbnails
                     .get(&e.key)
-                    .is_none_or(|t| t.rotation != e.rotation)
+                    .is_none_or(|t| t.rotation != e.rotation || Some(t.source) != source)
             })
             .and_then(|e| Some((e.key, self.page_ref(e)?)))
     }
 
     /// The page list as written on save: source 0 is the document, `n` is `sources[n]`.
     pub(crate) fn layout(&self) -> Vec<LayoutPage> {
-        self.pages
+        self.state
+            .pages
             .entries()
             .iter()
             .map(|e| LayoutPage {
@@ -388,8 +437,62 @@ impl Document {
             .collect()
     }
 
+    /// Takes in a source's annotations as read from its file. Pages that already hold
+    /// annotations (recovered after a crash) keep them. Returns whether the screen, which shows
+    /// the file, may now differ from the model and needs a preview (ADR-0009 §7).
+    pub(crate) fn adopt_annotations(
+        &mut self,
+        source: ferrix_core::SourceId,
+        loaded: crate::annotate::Loaded,
+    ) -> bool {
+        let entries: Vec<PageEntry> = self
+            .state
+            .pages
+            .entries()
+            .iter()
+            .filter(|e| e.source == source)
+            .copied()
+            .collect();
+        let mut recovered = false;
+        for entry in entries {
+            if self.state.annots.is_loaded(entry.key) {
+                recovered = true;
+            } else {
+                let list = loaded
+                    .pages
+                    .get(entry.page.0 as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                self.state.annots.insert_loaded(entry.key, list);
+            }
+        }
+        if let Some(s) = self.sources.get_mut(source.0 as usize) {
+            s.transforms = loaded.transforms;
+        }
+        if source == ferrix_core::SourceId::BASE {
+            self.annot_policy = Some(loaded.policy);
+            self.base_bytes = Some(loaded.bytes);
+        }
+        if recovered {
+            // The screen shows the file, not the recovered edits. An empty `previewed` never
+            // equals them, so a preview is built; it comes out empty if nothing differs.
+            self.previewed = AnnotSet::new();
+            true
+        } else {
+            // Nothing edited yet: the screen (the file) matches the model.
+            self.previewed = self.state.annots.clone();
+            false
+        }
+    }
+
+    /// Every engine document this document holds open: its sources, the original as well as an
+    /// annotation preview standing in for it.
     pub(crate) fn engine_docs(&self) -> Vec<DocId> {
-        self.sources.iter().map(|s| s.doc).collect()
+        let mut ids: Vec<DocId> = self.sources.iter().map(|s| s.doc).collect();
+        if !ids.contains(&self.info.id) {
+            ids.push(self.info.id);
+        }
+        ids
     }
 }
 
@@ -435,6 +538,56 @@ mod tests {
                 metadata: DocMetadata::default(),
             },
         )
+    }
+
+    fn loaded(pages: usize) -> crate::annotate::Loaded {
+        crate::annotate::Loaded {
+            pages: vec![
+                vec![ferrix_core::Annotation::new(
+                    ferrix_core::AnnotKind::Square,
+                    ferrix_types::PdfBox::default(),
+                )];
+                pages
+            ],
+            policy: crate::annotate::Policy {
+                permission: ferrix_annot::Permission::Allowed,
+                untaggable: false,
+            },
+            transforms: Vec::new(),
+            bytes: std::sync::Arc::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_freshly_opened_document_shows_its_annotations_without_a_preview() {
+        let mut doc = document(2);
+        assert!(!doc.adopt_annotations(ferrix_core::SourceId::BASE, loaded(2)));
+        assert_eq!(doc.state.annots.len(), 2);
+        assert_eq!(doc.previewed, doc.state.annots);
+    }
+
+    /// Regression: recovered annotation edits weren't shown until the next edit, because the
+    /// screen (the file) was taken to match the recovered model.
+    #[test]
+    fn recovered_annotations_need_a_preview_once_the_file_is_read() {
+        let fresh = document(2);
+        let mut annots = AnnotSet::new();
+        let first = fresh.key_at(0).expect("page");
+        annots.insert_loaded(first, []); // everything on page 1 was deleted before the crash
+        let mut doc = Document::recovered(
+            fresh.origin.clone(),
+            fresh.info.clone(),
+            Vec::new(),
+            fresh.state.pages.clone(),
+            Some(annots),
+        );
+        assert!(doc.adopt_annotations(ferrix_core::SourceId::BASE, loaded(2)));
+        assert_eq!(
+            doc.state.annots.page(first).len(),
+            0,
+            "the recovered page keeps its (deleted) state"
+        );
+        assert_ne!(doc.previewed, doc.state.annots, "a preview is due");
     }
 
     #[test]

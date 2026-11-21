@@ -18,7 +18,9 @@ mod raster;
 
 pub use edit::{Applied, Edit, EditError, Fragment, Settings};
 pub use editor::{CaretFormat, Clicks, Editor, Motion, Rect, TableOp, Toggle};
-pub use export::{ExportError, ExportJob, Opened, SOURCE_NAME, export_pdf, open_pdf};
+pub use export::{
+    ExportError, ExportJob, Opened, SOURCE_NAME, export_pdf, export_plain_page, open_pdf,
+};
 pub use fonts::{EmbedFonts, Fonts};
 pub use html::{fragment_from_html, fragment_to_html};
 pub use layout::{Decoration, Layout, LayoutCache, Line, PageLayout, PlacedGlyph, PlacedImage};
