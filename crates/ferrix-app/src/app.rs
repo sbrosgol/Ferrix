@@ -296,6 +296,10 @@ pub struct App {
     /// Asking whether to annotate a signed document.
     pub(crate) signed_prompt: bool,
     pub(crate) sidebar_tab: crate::annotate_ui::SidebarTab,
+    /// The author name for new annotations and replies, asked for once per session (the
+    /// settings store of ADR-0005 doesn't exist yet), and the field asking for it.
+    pub(crate) author: Option<String>,
+    pub(crate) author_input: String,
     /// Text selected on a page.
     pub(crate) text_selection: Option<crate::text_select::TextSelection>,
     pub(crate) sidebar: bool,
@@ -492,6 +496,8 @@ impl App {
             signed_prompt: false,
             sidebar_tab: crate::annotate_ui::SidebarTab::Pages,
             text_selection: None,
+            author: None,
+            author_input: String::new(),
             sidebar: true,
             zoom: Zoom::Auto,
             doc: None,

@@ -36,6 +36,21 @@ pub enum AnnotMsg {
     NoteDelete,
     /// The answer to "This document is signed": add annotations anyway?
     ConfirmSigned(bool),
+    /// Open the comment popover of an annotation (its text and replies).
+    OpenComment(PageKey, AnnotId),
+    ReplyEdit(text_editor::Action),
+    ReplySend,
+    /// Delete a reply (and replies to it).
+    ReplyDelete(AnnotId),
+    /// The "Your name" field shown before the first reply.
+    AuthorInput(String),
+    AuthorSave,
+    /// Choose a standard stamp for the Stamp tool, by name.
+    StampPick(String),
+    /// Choose a picture for the Stamp tool.
+    StampImage,
+    /// The chosen picture, or `None` if the dialog was cancelled.
+    StampImageLoaded(Option<Result<ferrix_core::StampImage, String>>),
 }
 
 /// The note being edited and its text.
@@ -44,6 +59,11 @@ pub(crate) struct NoteEditor {
     pub(crate) page: PageKey,
     pub(crate) id: AnnotId,
     pub(crate) content: text_editor::Content,
+    /// The comment popover with its thread (notes, and any annotation's comment), rather than
+    /// a text box's editor on the page.
+    pub(crate) popover: bool,
+    /// The reply being written.
+    pub(crate) reply: text_editor::Content,
 }
 
 /// Which list the sidebar shows.
@@ -143,6 +163,59 @@ impl App {
                 }
                 return self.delete_selected();
             }
+            AnnotMsg::OpenComment(page, id) => {
+                let close = self.close_note();
+                self.open_editor(page, id, true);
+                return close;
+            }
+            AnnotMsg::ReplyEdit(action) => {
+                if let Some(note) = self.note.as_mut() {
+                    note.reply.perform(action);
+                }
+            }
+            AnnotMsg::ReplySend => return self.send_reply(),
+            AnnotMsg::ReplyDelete(id) => return self.delete_thread(id, "Delete Reply"),
+            AnnotMsg::StampPick(name) => {
+                if let Some(m) = self.markup.as_mut() {
+                    m.stamp = ferrix_core::StampContent::Standard(name);
+                    m.tool = Tool::Stamp;
+                    m.selected = None;
+                }
+            }
+            AnnotMsg::StampImage => {
+                let dialog = rfd::AsyncFileDialog::new()
+                    .set_title("Choose a Picture")
+                    .add_filter("Pictures", &["png", "jpg", "jpeg"]);
+                return Task::perform(
+                    async move {
+                        let file = dialog.pick_file().await?;
+                        let bytes = file.read().await;
+                        Some(
+                            ferrix_annot::stamp::image_from_bytes(bytes).map_err(|e| e.to_string()),
+                        )
+                    },
+                    |result| Message::Annot(AnnotMsg::StampImageLoaded(result)),
+                );
+            }
+            AnnotMsg::StampImageLoaded(None) => {}
+            AnnotMsg::StampImageLoaded(Some(result)) => match result {
+                Ok(image) => {
+                    if let Some(m) = self.markup.as_mut() {
+                        m.stamp = ferrix_core::StampContent::Image(image);
+                        m.tool = Tool::Stamp;
+                        m.selected = None;
+                    }
+                    self.notice = Some("Click the page to place the picture.".into());
+                }
+                Err(e) => self.error = Some(format!("Couldn’t use that picture: {e}")),
+            },
+            AnnotMsg::AuthorInput(name) => self.author_input = name,
+            AnnotMsg::AuthorSave => {
+                let name = self.author_input.trim().to_owned();
+                if !name.is_empty() {
+                    self.author = Some(name);
+                }
+            }
             AnnotMsg::ConfirmSigned(ok) => {
                 self.signed_prompt = false;
                 if let Some(doc) = self.doc.as_mut() {
@@ -239,6 +312,9 @@ impl App {
                 if matches!(tool, Tool::Note | Tool::TextBox) {
                     return Task::batch([close, self.place_note(page, at, tool)]);
                 }
+                if tool == Tool::Stamp {
+                    return Task::batch([close, self.place_stamp(page, at)]);
+                }
                 if let Some(m) = self.markup.as_mut() {
                     m.selected = None;
                     m.gesture = Some((
@@ -330,18 +406,30 @@ impl App {
         selected.is_some()
     }
 
-    /// Opens the editor of note `id`; other annotation types have none.
+    /// Opens what selecting `id` opens: a note's comment popover, or a text box's editor.
+    /// Other annotations open their popover from the Comment button.
     fn open_note(&mut self, page: PageKey, id: AnnotId) {
+        let kind = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.state.annots.get(id))
+            .map(|(_, a)| a.kind.clone());
+        match kind {
+            Some(AnnotKind::Note { .. }) => self.open_editor(page, id, true),
+            Some(AnnotKind::FreeText { .. }) => self.open_editor(page, id, false),
+            _ => {}
+        }
+    }
+
+    fn open_editor(&mut self, page: PageKey, id: AnnotId, popover: bool) {
         let Some((_, annot)) = self.doc.as_ref().and_then(|d| d.state.annots.get(id)) else {
             return;
         };
-        if !matches!(
-            annot.kind,
-            AnnotKind::Note { .. } | AnnotKind::FreeText { .. }
-        ) {
-            return;
-        }
-        if self.note.as_ref().is_some_and(|n| n.id == id) {
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|n| n.id == id && n.popover == popover)
+        {
             return;
         }
         let text = annot.props.contents.clone().unwrap_or_default();
@@ -349,7 +437,119 @@ impl App {
             page,
             id,
             content: text_editor::Content::with_text(&text),
+            popover,
+            reply: text_editor::Content::new(),
         });
+    }
+
+    /// The session's author name on a new annotation (none until the user gives one).
+    pub(crate) fn with_author(
+        &self,
+        mut annot: ferrix_core::Annotation,
+    ) -> ferrix_core::Annotation {
+        if annot.props.author.is_none() {
+            annot.props.author = self.author.clone();
+        }
+        annot
+    }
+
+    /// Adds the reply being written to the popover's annotation.
+    fn send_reply(&mut self) -> Task<Message> {
+        let Some(note) = self.note.as_mut() else {
+            return Task::none();
+        };
+        let text = note.reply.text().trim().to_owned();
+        if text.is_empty() {
+            return Task::none();
+        }
+        note.reply = text_editor::Content::new();
+        let (page, parent_id) = (note.page, note.id);
+        if !self.may_annotate(page) {
+            return Task::none();
+        }
+        let Some(parent) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.state.annots.get(parent_id))
+            .map(|(_, a)| a.clone())
+        else {
+            return Task::none();
+        };
+        let to = match parent.origin {
+            AnnotOrigin::Existing { object, .. } => ferrix_core::ReplyTo::File(object),
+            AnnotOrigin::New => ferrix_core::ReplyTo::New(parent_id),
+        };
+        let mut reply =
+            ferrix_core::Annotation::new(AnnotKind::Reply { state: None }, parent.props.rect);
+        reply.reply_to = Some(to);
+        reply.props.contents = Some(text);
+        reply.props.name = Some(ferrix_annot::unique_name());
+        // Dated now, so the thread shows "Just now" before the file is saved.
+        reply.props.modified = Some(ferrix_annot::pdf_date(std::time::SystemTime::now()));
+        // Readers draw replies nowhere (their appearance is empty); keep them out of the way.
+        reply.props.flags = ferrix_core::AnnotFlags(
+            ferrix_core::AnnotFlags::PRINT
+                | ferrix_core::AnnotFlags::NO_ZOOM
+                | ferrix_core::AnnotFlags::NO_ROTATE,
+        );
+        let reply = self.with_author(reply);
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let id = doc.state.annots.new_id();
+        let index = doc.state.annots.page(page).len();
+        self.apply_annot(
+            AnnotEdit::Add {
+                page,
+                index,
+                id,
+                annot: Box::new(reply),
+            },
+            "Reply",
+        )
+    }
+
+    /// Places the Stamp tool's stamp centred at `at`, selects it, and returns to Select.
+    fn place_stamp(&mut self, page: PageKey, at: ferrix_types::PdfPoint) -> Task<Message> {
+        let Some(content) = self.markup.as_ref().map(|m| m.stamp.clone()) else {
+            return Task::none();
+        };
+        let annot = self.with_author(markup::stamp(&content, at));
+        let Some(doc) = self.doc.as_mut() else {
+            return Task::none();
+        };
+        let id = doc.state.annots.new_id();
+        let index = doc.state.annots.page(page).len();
+        let task = self.apply_annot(
+            AnnotEdit::Add {
+                page,
+                index,
+                id,
+                annot: Box::new(annot),
+            },
+            "Add Stamp",
+        );
+        if let Some(m) = self.markup.as_mut() {
+            m.selected = Some(id);
+            m.tool = Tool::Select;
+        }
+        task
+    }
+
+    /// Removes `id` and its replies in one step, replies first so undo restores parents first.
+    fn delete_thread(&mut self, id: AnnotId, label: &str) -> Task<Message> {
+        let Some(doc) = self.doc.as_ref() else {
+            return Task::none();
+        };
+        let edits: Vec<DocEdit> = doc
+            .state
+            .annots
+            .thread(id)
+            .into_iter()
+            .rev()
+            .map(|id| DocEdit::Annot(AnnotEdit::Remove { id }))
+            .collect();
+        self.apply_annot(DocEdit::Batch(edits), label)
     }
 
     /// Places a note or a text box at `at` and opens its editor.
@@ -376,6 +576,7 @@ impl App {
         ) else {
             return Task::none();
         };
+        let annot = self.with_author(annot);
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
@@ -388,7 +589,11 @@ impl App {
                 id,
                 annot: Box::new(annot),
             },
-            "Add Note",
+            if tool == Tool::TextBox {
+                "Add Text Box"
+            } else {
+                "Add Note"
+            },
         );
         if let Some(m) = self.markup.as_mut() {
             m.selected = Some(id);
@@ -398,6 +603,8 @@ impl App {
             page,
             id,
             content: text_editor::Content::new(),
+            popover: tool == Tool::Note,
+            reply: text_editor::Content::new(),
         });
         task
     }
@@ -446,6 +653,7 @@ impl App {
                     });
                     return Task::none();
                 };
+                let annot = self.with_author(annot);
                 if tool == Tool::Pen
                     && let Some(task) = self.join_stroke(page, &annot)
                 {
@@ -606,14 +814,7 @@ impl App {
             matches!(a.origin, AnnotOrigin::Existing { .. })
                 && a.props.contents.as_deref().is_some_and(|c| !c.is_empty())
         });
-        let edits: Vec<DocEdit> = doc
-            .state
-            .annots
-            .thread(id)
-            .into_iter()
-            .map(|id| DocEdit::Annot(AnnotEdit::Remove { id }))
-            .collect();
-        let task = self.apply_annot(DocEdit::Batch(edits), "Delete Annotation");
+        let task = self.delete_thread(id, "Delete Annotation");
         if had_text && self.error.is_none() {
             self.notice = Some(
                 "Annotation deleted. Its text remains in earlier versions of the file until it is \
@@ -666,11 +867,13 @@ impl App {
         match doc.edit(edit, label.to_owned()) {
             Ok(()) => {
                 self.notice = None;
-                let tagged = doc.annot_policy.as_ref().is_some_and(|p| p.tagged);
-                if tagged && !doc.tagged_noted {
+                let untaggable = doc.annot_policy.as_ref().is_some_and(|p| p.untaggable);
+                if untaggable && !doc.tagged_noted {
                     doc.tagged_noted = true;
                     self.notice = Some(
-                        "Screen readers won’t announce annotations in this document yet.".into(),
+                        "This document’s accessibility tags can’t be updated, so screen readers \
+                         won’t announce new annotations."
+                            .into(),
                     );
                 }
                 self.after_edit()

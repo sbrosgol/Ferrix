@@ -1378,6 +1378,7 @@ dependencies = [
  "ferrix-engine-pdfium",
  "ferrix-pdf",
  "ferrix-types",
+ "krilla",
  "lopdf",
  "thiserror 2.0.21",
 ]

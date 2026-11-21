@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ferrix_annot::{Permission, annotation_permission, read_annotations};
 use ferrix_core::{AnnotSet, Annotation, PageEntry, SourceId};
 use ferrix_types::PageTransform;
-use lopdf::{Document as Pdf, Object};
+use lopdf::Document as Pdf;
 
 use crate::{document::Origin, worker::blocking};
 
@@ -14,8 +14,8 @@ use crate::{document::Origin, worker::blocking};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     pub(crate) permission: Permission,
-    /// Tagged for accessibility: new annotations aren't added to its structure yet (phase 4).
-    pub(crate) tagged: bool,
+    /// Tagged, but with a structure tree new annotations can't be added to.
+    pub(crate) untaggable: bool,
 }
 
 /// One source's annotations, per page, and (for the document itself) its policy.
@@ -45,18 +45,9 @@ pub(crate) async fn load(origin: Origin, source: SourceId) -> Result<Loaded, Str
 }
 
 fn policy(doc: &Pdf) -> Policy {
-    let tagged = doc.catalog().is_ok_and(|catalog| {
-        catalog.has(b"StructTreeRoot")
-            || catalog
-                .get_deref(b"MarkInfo", doc)
-                .and_then(Object::as_dict)
-                .and_then(|m| m.get(b"Marked"))
-                .and_then(Object::as_bool)
-                .unwrap_or(false)
-    });
     Policy {
         permission: annotation_permission(doc),
-        tagged,
+        untaggable: ferrix_annot::structure_tree_blocked(doc),
     }
 }
 

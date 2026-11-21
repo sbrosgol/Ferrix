@@ -58,7 +58,8 @@ pub struct Revision {
     imports: Vec<Imported>,
     root_id: ObjectId,
     layout: Option<Vec<LayoutPage>>,
-    page_annots: HashMap<(usize, u32), Vec<Object>>,
+    /// Entries to set on pages (`/Annots`, `/Tabs`…), by source page.
+    page_entries: HashMap<(usize, u32), Vec<(&'static str, Object)>>,
     /// Replacements for existing objects, applied after imported pages are copied.
     replaced: BTreeMap<ObjectId, Object>,
     /// The base document's password, to read the output back for verification.
@@ -71,7 +72,7 @@ impl std::fmt::Debug for Revision {
             .field("base_pages", &self.base_pages.len())
             .field("imports", &self.imports.len())
             .field("layout", &self.layout.as_ref().map(Vec::len))
-            .field("pages_with_new_annots", &self.page_annots.len())
+            .field("pages_changed", &self.page_entries.len())
             .field("replaced", &self.replaced.len())
             .finish_non_exhaustive()
     }
@@ -118,7 +119,7 @@ impl Revision {
             imports: imported,
             root_id,
             layout: None,
-            page_annots: HashMap::new(),
+            page_entries: HashMap::new(),
             replaced: BTreeMap::new(),
             password: base.password.map(str::to_owned),
         })
@@ -224,9 +225,28 @@ impl Revision {
         page: u32,
         annots: Vec<Object>,
     ) -> Result<(), PdfError> {
+        self.set_page_entry(source, page, "Annots", Object::Array(annots))
+    }
+
+    /// Sets one entry of a page's dictionary in this revision (e.g. `/Tabs`).
+    pub fn set_page_entry(
+        &mut self,
+        source: usize,
+        page: u32,
+        key: &'static str,
+        value: Object,
+    ) -> Result<(), PdfError> {
         self.page_id(source, page)?;
-        self.page_annots.insert((source, page), annots);
+        let entries = self.page_entries.entry((source, page)).or_default();
+        entries.retain(|(k, _)| *k != key);
+        entries.push((key, value));
         Ok(())
+    }
+
+    /// Reserves an id for an object written later with [`Self::replace_object`], so objects
+    /// can refer to each other before both exist (a reply's `/IRT` to a new parent).
+    pub fn reserve_id(&mut self) -> ObjectId {
+        self.inc.new_document.new_object_id()
     }
 
     /// Replaces the page list. Without a layout, the base document keeps its pages.
@@ -259,20 +279,22 @@ impl Revision {
                 layout.len()
             }
             None => {
-                if let Some((source, _)) = self.page_annots.keys().find(|(s, _)| *s != 0) {
+                if let Some((source, _)) = self.page_entries.keys().find(|(s, _)| *s != 0) {
                     return Err(PdfError::InvalidLayout(format!(
                         "pages of source {source} are not in the document"
                     )));
                 }
-                let changed: Vec<(u32, Vec<Object>)> = self
-                    .page_annots
+                let changed: Vec<(u32, Vec<(&'static str, Object)>)> = self
+                    .page_entries
                     .drain()
-                    .map(|((_, page), annots)| (page, annots))
+                    .map(|((_, page), entries)| (page, entries))
                     .collect();
-                for (page, annots) in changed {
+                for (page, entries) in changed {
                     let id = self.page_id(0, page)?;
                     let mut dict = self.inc.get_prev_documents().get_dictionary(id)?.clone();
-                    dict.set("Annots", Object::Array(annots));
+                    for (key, value) in entries {
+                        dict.set(key, value);
+                    }
                     self.inc
                         .new_document
                         .set_object(id, Object::Dictionary(dict));
@@ -328,8 +350,18 @@ impl Revision {
                     Object::Integer(i64::from(rotate + entry.rotate_by.degrees()) % 360),
                 );
                 page.set("Parent", Object::Reference(root_id));
-                if let Some(annots) = self.page_annots.get(&(entry.source, entry.page)) {
-                    page.set("Annots", Object::Array(annots.clone()));
+                if entry.source != 0 {
+                    // `/StructParents` indexes the import's structure tree, which isn't copied;
+                    // left in place it would point into the base file's tree instead.
+                    page.remove(b"StructParents");
+                }
+                for (key, value) in self
+                    .page_entries
+                    .get(&(entry.source, entry.page))
+                    .into_iter()
+                    .flatten()
+                {
+                    page.set(*key, value.clone());
                 }
 
                 // Imported pages bring along everything they draw with (fonts, images, annotations…).
@@ -344,9 +376,21 @@ impl Revision {
                 }
                 (page, dependencies)
             };
-            for (id, object) in dependencies {
+            for (id, mut object) in dependencies {
                 // Objects added to this revision (new annotations) are already in place.
                 if !self.inc.new_document.objects.contains_key(&id) {
+                    // Same reason as `/StructParents` above, for annotations and forms.
+                    match &mut object {
+                        Object::Dictionary(d) => {
+                            d.remove(b"StructParent");
+                            d.remove(b"StructParents");
+                        }
+                        Object::Stream(st) => {
+                            st.dict.remove(b"StructParent");
+                            st.dict.remove(b"StructParents");
+                        }
+                        _ => {}
+                    }
                     self.inc.new_document.set_object(id, object);
                 }
             }

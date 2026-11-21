@@ -260,6 +260,11 @@ pub enum AnnotKind {
         style: MarkupStyle,
         quads: Vec<[PdfPoint; 4]>,
     },
+    /// A stamp: a standard label ("Approved"…) or a picture, scaled to fill `rect`.
+    Stamp { content: StampContent },
+    /// A reply in a comment thread (`Text` with `/IRT`); its text is in `contents`. Drawn by
+    /// nothing on the page: readers show it in the thread.
+    Reply { state: Option<ReviewState> },
     /// Any other subtype (free text, stamps, attachments…). Shown, listed and deletable, never
     /// rewritten.
     Other { subtype: String },
@@ -296,6 +301,37 @@ impl MarkupStyle {
     }
 }
 
+/// What a stamp shows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StampContent {
+    /// One of the standard stamps, by its name in ISO 32000-2 Table 181 (e.g. `Approved`).
+    Standard(String),
+    Image(StampImage),
+    /// A stamp from the file whose appearance is kept as it is: other apps' stamps, and
+    /// Ferrix's image stamps once saved. Moving or resizing changes only `/Rect`; readers fit
+    /// the appearance into it (ISO 32000-2 §12.5.5), so the artwork is never redrawn.
+    Kept,
+}
+
+/// A picture for an image stamp, kept as the file's own bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StampImage {
+    pub data: std::sync::Arc<[u8]>,
+    pub format: ImageFormat,
+    /// Size in pixels.
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+}
+
+/// Largest picture accepted for an image stamp, in bytes.
+pub const MAX_STAMP_IMAGE_BYTES: usize = 20 << 20;
+
 /// Most quadrilaterals in one text-markup annotation.
 pub const MAX_QUADS: usize = 10_000;
 
@@ -310,6 +346,8 @@ impl AnnotKind {
             Self::Line { .. } => "Line",
             Self::Markup { style, .. } => style.subtype(),
             Self::FreeText { .. } => "FreeText",
+            Self::Stamp { .. } => "Stamp",
+            Self::Reply { .. } => "Text",
             Self::Other { subtype } => subtype,
         }
     }
@@ -321,10 +359,26 @@ pub struct Annotation {
     pub origin: AnnotOrigin,
     pub props: AnnotProps,
     pub kind: AnnotKind,
-    /// `/IRT`: the annotation (in the same source) this one replies to. Replies must stay on
-    /// their parent's page, so deleting a parent deletes its [`AnnotSet::thread`].
+    /// `/IRT`: the annotation this one replies to, on the same page. Deleting a parent deletes
+    /// its [`AnnotSet::thread`].
     #[serde(default)]
-    pub reply_to: Option<ObjectRef>,
+    pub reply_to: Option<ReplyTo>,
+}
+
+/// The parent of a reply: an annotation in the file, or one added in this session (whose
+/// object number is only known when saving).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReplyTo {
+    File(ObjectRef),
+    New(AnnotId),
+}
+
+/// A review status set on an annotation by a reply (`/State`, `/StateModel`, ISO 32000-2
+/// §12.5.6.3), e.g. `Review` / `Accepted`. Ferrix shows these but doesn't set them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewState {
+    pub model: String,
+    pub state: String,
 }
 
 impl Annotation {
@@ -461,6 +515,20 @@ impl Annotation {
                 icon: NoteIcon::Other(name),
                 ..
             } if !name_ok(name) => return invalid("note icon"),
+            AnnotKind::Stamp { content } => match content {
+                StampContent::Standard(name) if !name_ok(name) || name.len() > 64 => {
+                    return invalid("stamp name");
+                }
+                StampContent::Image(image)
+                    if image.data.is_empty()
+                        || image.data.len() > MAX_STAMP_IMAGE_BYTES
+                        || image.width == 0
+                        || image.height == 0 =>
+                {
+                    return invalid("stamp image");
+                }
+                _ => {}
+            },
             AnnotKind::FreeText { size, color } => {
                 if !(4.0..=144.0).contains(size) || !color.is_valid() {
                     return invalid("text box");
@@ -633,11 +701,16 @@ impl AnnotSet {
         let list = self.page(page);
         let mut i = 0;
         while i < thread.len() {
-            if let Some((_, a)) = list.iter().find(|(x, _)| *x == thread[i])
-                && let AnnotOrigin::Existing { object, .. } = a.origin
-            {
+            if let Some((parent_id, parent)) = list.iter().find(|(x, _)| *x == thread[i]) {
+                let file = match parent.origin {
+                    AnnotOrigin::Existing { object, .. } => Some(ReplyTo::File(object)),
+                    AnnotOrigin::New => None,
+                };
                 for (reply, r) in list {
-                    if r.reply_to == Some(object) && !thread.contains(reply) {
+                    let replies = r
+                        .reply_to
+                        .is_some_and(|to| to == ReplyTo::New(*parent_id) || Some(to) == file);
+                    if replies && !thread.contains(reply) {
                         thread.push(*reply);
                     }
                 }
@@ -645,6 +718,19 @@ impl AnnotSet {
             i += 1;
         }
         thread
+    }
+
+    /// The replies to `id` and to its replies, in page order (the thread without `id`).
+    pub fn replies(&self, id: AnnotId) -> Vec<(AnnotId, &Annotation)> {
+        let thread = self.thread(id);
+        let Some((page, _)) = self.get(id) else {
+            return Vec::new();
+        };
+        self.page(page)
+            .iter()
+            .filter(|(x, _)| *x != id && thread.contains(x))
+            .map(|(x, a)| (*x, a))
+            .collect()
     }
 
     /// Reserves a fresh id for an annotation about to be added.

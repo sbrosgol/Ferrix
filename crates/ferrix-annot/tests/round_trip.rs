@@ -665,7 +665,8 @@ fn page_layout_and_annotations_land_in_one_revision_including_imports() {
         ferrix_annot::WriteReport {
             added: 1,
             changed: 1,
-            removed: 0
+            removed: 0,
+            untagged: 0,
         }
     );
     let out = revision.finish().unwrap();
@@ -1142,4 +1143,496 @@ fn text_boxes_round_trip_with_an_embedded_font_and_render() {
         .filter(|p| p[0] < 120 && p[2] > 60)
         .count();
     assert!(dark > 20, "text drawn: {dark} dark pixels");
+}
+
+/// Text boxes in PDF/A files are set in ICC-based colour, valid under any output intent.
+#[test]
+fn text_boxes_in_cmyk_pdfa_files_use_icc_colour() {
+    let base = pdfa_fixture(2, true);
+    let mut state = open_state(&base, None);
+    let (w, h) = ferrix_annot::free_text::measure("Archived", 12.0, None);
+    let mut b = Annotation::new(
+        AnnotKind::FreeText {
+            size: 12.0,
+            color: Rgb::BLACK,
+        },
+        PdfBox::from_corners(pt(50.0, 700.0 - h), pt(50.0 + w, 700.0)),
+    );
+    b.props.color = None;
+    b.props.border_width = 0.0;
+    b.props.contents = Some("Archived".into());
+    add(&mut state, 0, b);
+    let out = save_state(&base, None, &state);
+    let doc = Document::load_mem(&out).unwrap();
+    let icc = doc.objects.values().any(|o| match o {
+        Object::Array(a) => a
+            .first()
+            .and_then(|n| n.as_name().ok())
+            .is_some_and(|n| n == b"ICCBased"),
+        _ => false,
+    }) || String::from_utf8_lossy(&out).contains("/ICCBased");
+    assert!(icc, "the text box uses an ICC-based colour space");
+}
+
+/// A reply can name a parent added in the same save: ids are reserved before dictionaries are
+/// built, so /IRT points at the new note's object.
+#[test]
+fn replies_link_to_new_and_existing_parents() {
+    use ferrix_core::{ReplyTo, ReviewState};
+    let base = fixture_with(|doc, page| {
+        let note = note_object(doc, page);
+        let state = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Text", "P" => page, "IRT" => note,
+            "Rect" => vec![500.into(), 700.into(), 520.into(), 720.into()],
+            "State" => Object::string_literal("Accepted"), "StateModel" => "Review",
+            "T" => Object::string_literal("Ben"),
+        });
+        vec![state.into()]
+    });
+    let mut state = open_state(&base, None);
+    let page = state.pages.entries()[0].key;
+
+    // The review state reads as a read-only reply of the existing note.
+    let list = state.annots.page(page).to_vec();
+    let (note_id, note) = list
+        .iter()
+        .find(|(_, a)| matches!(a.kind, AnnotKind::Note { .. }))
+        .cloned()
+        .unwrap();
+    let review = list
+        .iter()
+        .find_map(|(_, a)| match &a.kind {
+            AnnotKind::Reply { state: Some(s) } => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        review,
+        ReviewState {
+            model: "Review".into(),
+            state: "Accepted".into()
+        }
+    );
+    assert_eq!(state.annots.replies(note_id).len(), 1);
+
+    // A new note, a reply to it, and a reply to the existing note, in one save.
+    let new_note = state.annots.new_id();
+    let mut n = Annotation::new(
+        AnnotKind::Note {
+            icon: NoteIcon::Comment,
+            open: false,
+        },
+        ferrix_annot::note_rect(pt(100.0, 700.0)),
+    );
+    n.props.contents = Some("Parent".into());
+    state
+        .apply(&DocEdit::Annot(AnnotEdit::Add {
+            page,
+            index: state.annots.page(page).len(),
+            id: new_note,
+            annot: Box::new(n.clone()),
+        }))
+        .unwrap();
+    let reply = |to: ReplyTo, text: &str, rect: PdfBox| {
+        let mut r = Annotation::new(AnnotKind::Reply { state: None }, rect);
+        r.reply_to = Some(to);
+        r.props.contents = Some(text.into());
+        r.props.author = Some("Ana".into());
+        r
+    };
+    add(
+        &mut state,
+        0,
+        reply(ReplyTo::New(new_note), "Child of new", n.props.rect),
+    );
+    let ferrix_core::AnnotOrigin::Existing { object, .. } = note.origin else {
+        panic!("fixture note is in the file")
+    };
+    add(
+        &mut state,
+        0,
+        reply(ReplyTo::File(object), "Child of existing", note.props.rect),
+    );
+    let out = save_state(&base, None, &state);
+
+    let doc = Document::load_mem(&out).unwrap();
+    let page_id = *doc.get_pages().get(&1).unwrap();
+    let annots: Vec<lopdf::ObjectId> = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Annots")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_reference().unwrap())
+        .collect();
+    let by_contents = |text: &str| {
+        annots
+            .iter()
+            .copied()
+            .find(|id| {
+                doc.get_dictionary(*id)
+                    .unwrap()
+                    .get(b"Contents")
+                    .ok()
+                    .and_then(|c| lopdf::decode_text_string(c).ok())
+                    .as_deref()
+                    == Some(text)
+            })
+            .unwrap()
+    };
+    let parent = by_contents("Parent");
+    let child = doc.get_dictionary(by_contents("Child of new")).unwrap();
+    assert_eq!(child.get(b"IRT").unwrap().as_reference().unwrap(), parent);
+    assert!(child.get(b"BS").is_err(), "replies have no border style");
+    let other = doc
+        .get_dictionary(by_contents("Child of existing"))
+        .unwrap();
+    assert_eq!(
+        other.get(b"IRT").unwrap().as_reference().unwrap(),
+        (object.number, object.generation)
+    );
+
+    let reread = open_state(&out, None);
+    let page = reread.pages.entries()[0].key;
+    let replies = reread
+        .annots
+        .page(page)
+        .iter()
+        .filter(|(_, a)| matches!(a.kind, AnnotKind::Reply { state: None }))
+        .count();
+    assert_eq!(replies, 2);
+}
+
+fn stamps_of(state: &DocState) -> Vec<(ferrix_core::AnnotId, Annotation)> {
+    let page = state.pages.entries()[0].key;
+    state
+        .annots
+        .page(page)
+        .iter()
+        .filter(|(_, a)| a.kind.subtype() == "Stamp")
+        .cloned()
+        .collect()
+}
+
+/// Standard stamps come back as themselves; picture stamps and other apps' stamps keep their
+/// appearance and move by /Rect alone; stamps with appearance states stay display-only.
+#[test]
+fn stamps_round_trip_and_kept_appearances_move_by_rect() {
+    use ferrix_core::StampContent;
+    let base = fixture_with(|doc, page| {
+        let form = |doc: &mut Document| {
+            doc.add_object(lopdf::Stream::new(
+                dictionary! {
+                    "Type" => "XObject", "Subtype" => "Form",
+                    "BBox" => vec![0.into(), 0.into(), 50.into(), 20.into()],
+                },
+                b"0 0 1 rg 0 0 50 20 re f".to_vec(),
+            ))
+        };
+        let plain = form(doc);
+        let on = form(doc);
+        let foreign = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "P" => page, "Name" => "Approved",
+            "Rect" => vec![300.into(), 300.into(), 350.into(), 320.into()],
+            "AP" => dictionary! { "N" => plain },
+        });
+        let stateful = doc.add_object(dictionary! {
+            "Type" => "Annot", "Subtype" => "Stamp", "P" => page, "AS" => "On",
+            "Rect" => vec![300.into(), 400.into(), 350.into(), 420.into()],
+            "AP" => dictionary! { "N" => dictionary! { "On" => on } },
+        });
+        vec![foreign.into(), stateful.into()]
+    });
+    let mut state = open_state(&base, None);
+    let kinds: Vec<_> = stamps_of(&state).into_iter().map(|(_, a)| a.kind).collect();
+    assert!(kinds.contains(&AnnotKind::Stamp {
+        content: StampContent::Kept
+    }));
+    assert!(kinds.contains(&AnnotKind::Other {
+        subtype: "Stamp".into()
+    }));
+
+    let (w, h) = ferrix_annot::stamp::standard_size("Approved");
+    let approved = Annotation::new(
+        AnnotKind::Stamp {
+            content: StampContent::Standard("Approved".into()),
+        },
+        PdfBox::from_corners(pt(100.0, 600.0), pt(100.0 + w, 600.0 + h)),
+    );
+    add(&mut state, 0, approved);
+    let png = include_bytes!("fixtures/red.png").to_vec();
+    let image = ferrix_annot::stamp::image_from_bytes(png).unwrap();
+    assert_eq!((image.width, image.height), (4, 3));
+    add(
+        &mut state,
+        0,
+        Annotation::new(
+            AnnotKind::Stamp {
+                content: StampContent::Image(image),
+            },
+            PdfBox::from_corners(pt(100.0, 500.0), pt(140.0, 530.0)),
+        ),
+    );
+    let saved = save_state(&base, None, &state);
+
+    // Ours: the standard stamp is ours again; the picture is kept as written.
+    let doc = Document::load_mem(&saved).unwrap();
+    let mut reread = open_state(&saved, None);
+    let stamps = stamps_of(&reread);
+    assert!(stamps.iter().any(|(_, a)| a.kind
+        == AnnotKind::Stamp {
+            content: StampContent::Standard("Approved".into())
+        }));
+    let kept: Vec<_> = stamps
+        .iter()
+        .filter(|(_, a)| {
+            a.kind
+                == AnnotKind::Stamp {
+                    content: StampContent::Kept,
+                }
+        })
+        .cloned()
+        .collect();
+    assert_eq!(kept.len(), 2, "the foreign stamp and the picture");
+    let has_key = |key: &[u8], value: &[u8]| {
+        doc.objects.values().any(|o| {
+            o.as_dict().is_ok_and(|d| {
+                d.get(key)
+                    .and_then(Object::as_name)
+                    .is_ok_and(|n| n == value)
+            })
+        })
+    };
+    assert!(has_key(b"IT", b"StampImage"));
+    assert!(has_key(b"Name", b"#Approved"));
+
+    // Moving and resizing a kept stamp rewrites /Rect and nothing else of its look.
+    let ap_of = |doc: &Document, origin: &ferrix_core::AnnotOrigin| {
+        let ferrix_core::AnnotOrigin::Existing { object, .. } = origin else {
+            panic!("from the file")
+        };
+        let d = doc
+            .get_dictionary((object.number, object.generation))
+            .unwrap();
+        (
+            d.get(b"AP").unwrap().clone(),
+            d.get(b"Rect").unwrap().clone(),
+        )
+    };
+    for (id, annot) in &kept {
+        let mut moved = annot.clone();
+        let r = annot.props.rect;
+        moved.props.rect = PdfBox::from_corners(
+            pt(r.left + 10.0, r.bottom + 10.0),
+            pt(r.right + 30.0, r.top + 30.0),
+        );
+        reread
+            .apply(&DocEdit::Annot(AnnotEdit::Set {
+                id: *id,
+                annot: Box::new(moved),
+            }))
+            .unwrap();
+    }
+    let edited = save_state(&saved, None, &reread);
+    let after = Document::load_mem(&edited).unwrap();
+    for (_, annot) in &kept {
+        let (ap0, rect0) = ap_of(&doc, &annot.origin);
+        let (ap1, rect1) = ap_of(&after, &annot.origin);
+        assert_eq!(ap0, ap1, "appearance kept");
+        assert_ne!(rect0, rect1, "moved");
+    }
+}
+
+/// A tagged copy of the fixture: Document > P (page content MCID 0), parent tree key 0.
+fn tagged_fixture(parent_tree: impl FnOnce(&mut Document, lopdf::ObjectId) -> Object) -> Vec<u8> {
+    let mut doc = Document::load_mem(&fixture()).unwrap();
+    let page = *doc.get_pages().get(&1).unwrap();
+    let root = doc.new_object_id();
+    let document = doc.new_object_id();
+    let para = doc.add_object(dictionary! {
+        "Type" => "StructElem", "S" => "P", "P" => document, "Pg" => page, "K" => 0,
+    });
+    doc.objects.insert(
+        document,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructElem", "S" => "Document", "P" => root, "K" => vec![para.into()],
+        }),
+    );
+    let tree = parent_tree(&mut doc, para);
+    doc.objects.insert(
+        root,
+        Object::Dictionary(dictionary! {
+            "Type" => "StructTreeRoot", "K" => document, "ParentTree" => tree,
+            "ParentTreeNextKey" => 1,
+        }),
+    );
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("StructParents", Object::Integer(0));
+    let catalog = doc.catalog_mut().unwrap();
+    catalog.set("StructTreeRoot", Object::Reference(root));
+    catalog.set("MarkInfo", dictionary! { "Marked" => true });
+    save(&mut doc)
+}
+
+/// In tagged files, new annotations join the structure tree (element, /StructParent, parent
+/// tree, /Tabs) and deleting them takes them out again.
+#[test]
+fn annotations_in_tagged_files_are_tagged_and_untagged() {
+    let base = tagged_fixture(|doc, para| {
+        let entry = doc.add_object(Object::Array(vec![para.into()]));
+        let leaf = doc.add_object(dictionary! {
+            "Limits" => vec![0.into(), 0.into()],
+            "Nums" => vec![0.into(), entry.into()],
+        });
+        Object::Reference(doc.add_object(dictionary! { "Kids" => vec![leaf.into()] }))
+    });
+    let mut state = open_state(&base, None);
+    add(
+        &mut state,
+        0,
+        red_square(PdfBox::from_corners(pt(100.0, 100.0), pt(200.0, 150.0))),
+    );
+    let out = save_state(&base, None, &state);
+
+    let doc = Document::load_mem(&out).unwrap();
+    let page = *doc.get_pages().get(&1).unwrap();
+    assert_eq!(
+        doc.get_dictionary(page)
+            .unwrap()
+            .get(b"Tabs")
+            .unwrap()
+            .as_name()
+            .unwrap(),
+        b"S"
+    );
+    let annot_id = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Annots")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o.as_reference().unwrap())
+        .rfind(|id| {
+            doc.get_dictionary(*id)
+                .unwrap()
+                .get(b"Subtype")
+                .unwrap()
+                .as_name()
+                .unwrap()
+                == b"Square"
+        })
+        .unwrap();
+    let key = doc
+        .get_dictionary(annot_id)
+        .unwrap()
+        .get(b"StructParent")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert_eq!(key, 1);
+    let root = doc
+        .catalog()
+        .unwrap()
+        .get(b"StructTreeRoot")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let root = doc.get_dictionary(root).unwrap();
+    assert_eq!(root.get(b"ParentTreeNextKey").unwrap().as_i64().unwrap(), 2);
+    // The leaf gained the key, and its limits cover it.
+    let tree = doc
+        .get_dictionary(root.get(b"ParentTree").unwrap().as_reference().unwrap())
+        .unwrap();
+    let leaf = doc
+        .get_dictionary(
+            tree.get(b"Kids").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap();
+    let nums = leaf.get(b"Nums").unwrap().as_array().unwrap();
+    assert_eq!(nums.len(), 4);
+    assert_eq!(nums[2].as_i64().unwrap(), 1);
+    assert_eq!(
+        leaf.get(b"Limits").unwrap().as_array().unwrap()[1]
+            .as_i64()
+            .unwrap(),
+        1
+    );
+    let element = doc.get_dictionary(nums[3].as_reference().unwrap()).unwrap();
+    assert_eq!(element.get(b"S").unwrap().as_name().unwrap(), b"Annot");
+    let objr = element.get(b"K").unwrap().as_dict().unwrap();
+    assert_eq!(objr.get(b"Obj").unwrap().as_reference().unwrap(), annot_id);
+    // Under the paragraph that owns the page's content.
+    let para = doc
+        .get_dictionary(element.get(b"P").unwrap().as_reference().unwrap())
+        .unwrap();
+    assert_eq!(para.get(b"S").unwrap().as_name().unwrap(), b"P");
+    assert_eq!(para.get(b"K").unwrap().as_array().unwrap().len(), 2);
+
+    // Deleting it removes the element and the key.
+    let mut reread = open_state(&out, None);
+    let page_key = reread.pages.entries()[0].key;
+    let square = reread
+        .annots
+        .page(page_key)
+        .iter()
+        .rfind(|(_, a)| a.kind == AnnotKind::Square)
+        .map(|(id, _)| *id)
+        .unwrap();
+    reread
+        .apply(&DocEdit::Annot(AnnotEdit::Remove { id: square }))
+        .unwrap();
+    let removed = save_state(&out, None, &reread);
+    let doc = Document::load_mem(&removed).unwrap();
+    let root = doc
+        .catalog()
+        .unwrap()
+        .get(b"StructTreeRoot")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let root = doc.get_dictionary(root).unwrap();
+    let tree = doc
+        .get_dictionary(root.get(b"ParentTree").unwrap().as_reference().unwrap())
+        .unwrap();
+    let leaf = doc
+        .get_dictionary(
+            tree.get(b"Kids").unwrap().as_array().unwrap()[0]
+                .as_reference()
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(leaf.get(b"Nums").unwrap().as_array().unwrap().len(), 2);
+    let para = doc
+        .objects
+        .values()
+        .filter_map(|o| o.as_dict().ok())
+        .find(|d| {
+            d.get(b"S")
+                .and_then(Object::as_name)
+                .is_ok_and(|s| s == b"P")
+        })
+        .unwrap();
+    assert_eq!(para.get(b"K").unwrap().as_array().unwrap().len(), 1);
+}
+
+/// A parent tree Ferrix can't follow is left alone; the annotation is written untagged.
+#[test]
+fn malformed_structure_trees_are_left_alone() {
+    let base = tagged_fixture(|_, _| dictionary! { "Kids" => vec![Object::Integer(3)] }.into());
+    let mut state = open_state(&base, None);
+    add(
+        &mut state,
+        0,
+        red_square(PdfBox::from_corners(pt(100.0, 100.0), pt(200.0, 150.0))),
+    );
+    let mut revision = Revision::new(Source::new(&base), &[]).unwrap();
+    let report = write_annotations(&mut revision, &state.pages, &state.annots, NOW).unwrap();
+    assert_eq!((report.added, report.untagged), (1, 1));
 }

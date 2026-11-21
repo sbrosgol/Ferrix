@@ -233,6 +233,7 @@ impl App {
         // Multiply keeps the text under a highlight dark at full opacity, as in Acrobat.
         annot.props.opacity = 1.0;
         annot.props.name = Some(ferrix_annot::unique_name());
+        let annot = self.with_author(annot);
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };

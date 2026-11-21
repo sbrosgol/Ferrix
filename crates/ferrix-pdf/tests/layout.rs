@@ -303,3 +303,36 @@ fn page_of(source: usize, page: u32) -> LayoutPage {
         rotate_by: Rotation::R0,
     }
 }
+
+/// Pages imported from a tagged file must not keep structure keys: they index the import's
+/// structure tree, which isn't copied, and would point into the base file's tree instead.
+#[test]
+fn imported_pages_drop_structure_keys() {
+    let base = fixture("Base", 1, 0);
+    let mut other = Document::load_mem(&fixture("Other", 1, 0)).unwrap();
+    let page = *other.get_pages().get(&1).unwrap();
+    let annot = other.add_object(dictionary! {
+        "Type" => "Annot", "Subtype" => "Square", "StructParent" => 7,
+        "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+    });
+    let dict = other.get_dictionary_mut(page).unwrap();
+    dict.set("StructParents", 3);
+    dict.set("Annots", vec![Object::Reference(annot)]);
+    let mut bytes = Vec::new();
+    other.save_to(&mut bytes).unwrap();
+
+    let out = write_page_layout(
+        Source::new(&base),
+        &[Source::new(&bytes)],
+        &[page_of(0, 0), page_of(1, 0)],
+    )
+    .unwrap();
+    let doc = Document::load_mem(&out).unwrap();
+    let imported = *doc.get_pages().get(&2).unwrap();
+    let page = doc.get_dictionary(imported).unwrap();
+    assert!(!page.has(b"StructParents"));
+    let annot = page.get(b"Annots").unwrap().as_array().unwrap()[0]
+        .as_reference()
+        .unwrap();
+    assert!(!doc.get_dictionary(annot).unwrap().has(b"StructParent"));
+}

@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ferrix_core::{AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageEntry, PageList};
+use ferrix_core::{
+    AnnotId, AnnotKind, AnnotOrigin, AnnotSet, Annotation, PageEntry, PageList, ReplyTo,
+    StampContent,
+};
 use ferrix_pdf::Revision;
 use ferrix_types::PdfBox;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -15,6 +18,9 @@ pub struct WriteReport {
     pub added: usize,
     pub changed: usize,
     pub removed: usize,
+    /// New annotations left out of a tagged file's structure tree, because the tree isn't
+    /// one Ferrix can safely extend.
+    pub untagged: usize,
 }
 
 impl WriteReport {
@@ -166,6 +172,11 @@ pub fn write_page_annotations(
 ) -> Result<WriteReport, AnnotError> {
     let mut report = WriteReport::default();
     let pdfa = pdfa_rules(revision.source(0)?);
+    let (mut tagger, untaggable) = match crate::tag::Tagger::load(revision.source(0)?) {
+        None => (None, false),
+        Some(Ok(tagger)) => (Some(tagger), false),
+        Some(Err(())) => (None, true),
+    };
     for entry in pages {
         let source = entry.source.0 as usize;
         let page_id = revision.page_id(source, entry.page.0)?;
@@ -174,9 +185,9 @@ pub fn write_page_annotations(
 
         let mut kept: HashMap<ObjectId, &Annotation> = HashMap::new();
         let mut added = Vec::new();
-        for (_, annot) in annots.page(entry.key) {
+        for (annot_id, annot) in annots.page(entry.key) {
             match annot.origin {
-                AnnotOrigin::New => added.push(annot),
+                AnnotOrigin::New => added.push((*annot_id, annot)),
                 AnnotOrigin::Existing { source: s, object } => {
                     let id = (s == entry.source)
                         .then(|| revision.object_id(source, (object.number, object.generation)))
@@ -206,7 +217,9 @@ pub fn write_page_annotations(
         };
         // Replies must stay on their parent's page (ISO 32000-2 §12.5.6.2): delete threads whole.
         if let Some(orphan) = kept.values().find_map(|a| {
-            let parent = a.reply_to?;
+            let ReplyTo::File(parent) = a.reply_to? else {
+                return None;
+            };
             let parent = revision.object_id(source, (parent.number, parent.generation))?;
             removed.contains(&parent).then_some(parent)
         }) {
@@ -235,7 +248,8 @@ pub fn write_page_annotations(
         if pdfa.part == Some(1)
             && added
                 .iter()
-                .chain(changed.iter().map(|(_, a, _)| a))
+                .map(|(_, a)| *a)
+                .chain(changed.iter().map(|(_, a, _)| *a))
                 .any(|a| {
                     // Highlights blend with Multiply, which PDF/A-1 forbids (ISO 19005-1 §6.4).
                     a.props.opacity < 1.0
@@ -262,6 +276,19 @@ pub fn write_page_annotations(
             .cloned()
             .unwrap_or_default();
         let popups = popups_of(doc, &items, &removed);
+        if source == 0
+            && let Some(tagger) = tagger.as_mut()
+        {
+            for id in &removed {
+                if let Some(key) = doc
+                    .get_dictionary(*id)
+                    .ok()
+                    .and_then(|d| d.get(b"StructParent").ok()?.as_i64().ok())
+                {
+                    tagger.untag(doc, key);
+                }
+            }
+        }
         let originals: Vec<(ObjectId, Dictionary, &Annotation, bool)> = changed
             .iter()
             .map(|(id, current, original)| {
@@ -282,7 +309,11 @@ pub fn write_page_annotations(
                     annot.kind.subtype()
                 ))
             })?;
-            let ap_id = annotation_stream(revision, annot, &ap, pdfa)?;
+            let ap_id = if kept_appearance(annot) {
+                None
+            } else {
+                Some(annotation_stream(revision, annot, &ap, pdfa)?)
+            };
             apply_model(&mut dict, annot, &ap, ap_id, now, contents_changed);
             revision.replace_object(id, Object::Dictionary(dict));
             report.changed += 1;
@@ -295,7 +326,17 @@ pub fn write_page_annotations(
                     .map_or(true, |id| !removed.contains(&id) && !popups.contains(&id))
             })
             .collect();
-        for annot in added {
+        // Ids first, so a reply's /IRT can name a parent added in this same save.
+        let reserved: HashMap<AnnotId, ObjectId> = added
+            .iter()
+            .map(|(annot_id, _)| (*annot_id, revision.reserve_id()))
+            .collect();
+        for (annot_id, annot) in added {
+            if kept_appearance(annot) {
+                return Err(AnnotError::NotAllowed(
+                    "a stamp copied from a file can't be added as new".into(),
+                ));
+            }
             let ap = appearance(annot).ok_or_else(|| {
                 AnnotError::NotAllowed(format!(
                     "{} annotations can't be created",
@@ -309,14 +350,51 @@ pub fn write_page_annotations(
             if annot.props.name.is_none() {
                 dict.set("NM", text(&unique_name()));
             }
-            apply_model(&mut dict, annot, &ap, ap_id, now, true);
-            out.push(Object::Reference(
-                revision.add_object(Object::Dictionary(dict)),
-            ));
+            apply_model(&mut dict, annot, &ap, Some(ap_id), now, true);
+            if let Some(parent) = annot.reply_to {
+                let parent = match parent {
+                    ReplyTo::New(id) => reserved.get(&id).copied(),
+                    ReplyTo::File(object) => {
+                        revision.object_id(source, (object.number, object.generation))
+                    }
+                }
+                .ok_or_else(|| {
+                    AnnotError::NotAllowed("a reply's annotation is no longer on its page".into())
+                })?;
+                dict.set("IRT", Object::Reference(parent));
+            }
+            let object_id = reserved[&annot_id];
+            if source == 0
+                && let Some(tagger) = tagger.as_mut()
+            {
+                let element = revision.reserve_id();
+                let alt = crate::tag::alt_text(annot);
+                tagger.tag(
+                    revision.source(0)?,
+                    (page_id, entry.page.0),
+                    object_id,
+                    element,
+                    &mut dict,
+                    &alt,
+                );
+            } else if source == 0 && untaggable {
+                report.untagged += 1;
+            }
+            revision.replace_object(object_id, Object::Dictionary(dict));
+            out.push(Object::Reference(object_id));
             report.added += 1;
         }
         report.removed += removed.len();
         revision.set_page_annots(source, entry.page.0, out)?;
+    }
+    if let Some(tagger) = tagger {
+        let (objects, pages) = tagger.finish(revision.source(0)?);
+        for (id, dict) in objects {
+            revision.replace_object(id, Object::Dictionary(dict));
+        }
+        for page in pages {
+            revision.set_page_entry(0, page, "Tabs", Object::Name(b"S".to_vec()))?;
+        }
     }
     Ok(report)
 }
@@ -355,21 +433,36 @@ fn annotation_stream(
     ap: &Appearance,
     pdfa: PdfaRules,
 ) -> Result<ObjectId, AnnotError> {
-    let AnnotKind::FreeText { size, color } = annot.kind else {
-        return Ok(appearance_stream(revision, ap, pdfa.cmyk));
-    };
-    if pdfa.cmyk {
-        // krilla writes RGB text; DeviceRGB isn't allowed under a CMYK output intent.
-        return Err(AnnotError::NotAllowed(
-            "text boxes can't be added to PDF/A files prepared for CMYK printing yet".into(),
-        ));
-    }
     let r = ap.bbox;
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
-    let text = annot.props.contents.as_deref().unwrap_or("");
-    let page = crate::free_text::render(text, size, color, w, h)?;
-    // krilla draws in its own [0 0 w h] page; the outer form places it at the box.
-    let inner = revision.import_page_as_form(&page, 0, [0.0, 0.0, w, h])?;
+    // In PDF/A files, ICC-based colour is valid whatever the output intent.
+    let icc = pdfa.part.is_some();
+    // krilla draws in its own [0 0 pw ph] page; the outer form places it (`cm`) in the box.
+    let (page, pw, ph, cm) = match &annot.kind {
+        AnnotKind::FreeText { size, color } => {
+            let text = annot.props.contents.as_deref().unwrap_or("");
+            let page = crate::free_text::render(text, *size, *color, w, h, icc)?;
+            (page, w, h, [1.0, 1.0, r.left, r.bottom])
+        }
+        AnnotKind::Stamp {
+            content: StampContent::Standard(name),
+        } => {
+            let (page, lw, lh) = crate::stamp::render_label(name, icc)?;
+            let (nw, nh) = crate::stamp::standard_size(name);
+            let (sx, sy) = (w / nw, h / nh);
+            let (px, py) = crate::stamp::inset();
+            (page, lw, lh, [sx, sy, r.left + px * sx, r.bottom + py * sy])
+        }
+        AnnotKind::Stamp {
+            content: StampContent::Image(image),
+        } => {
+            let page = crate::stamp::render_image(image, icc)?;
+            let (pw, ph) = (image.width as f32, image.height as f32);
+            (page, pw, ph, [w / pw, h / ph, r.left, r.bottom])
+        }
+        _ => return Ok(appearance_stream(revision, ap, pdfa.cmyk)),
+    };
+    let inner = revision.import_page_as_form(&page, 0, [0.0, 0.0, pw, ph])?;
     let mut xobjects = Dictionary::new();
     xobjects.set("Tx", Object::Reference(inner));
     let mut resources = Dictionary::new();
@@ -385,7 +478,12 @@ fn annotation_stream(
         resources.set("ExtGState", Object::Dictionary(states));
         content.push_str("/GS0 gs ");
     }
-    content.push_str(&format!("1 0 0 1 {} {} cm /Tx Do Q\n", r.left, r.bottom));
+    // A stamp's border is drawn under its label.
+    content.push_str(&String::from_utf8_lossy(&ap.content(pdfa.cmyk)));
+    content.push_str(&format!(
+        " q {} 0 0 {} {} {} cm /Tx Do Q Q\n",
+        cm[0], cm[1], cm[2], cm[3]
+    ));
     let mut dict = Dictionary::new();
     dict.set("Type", Object::Name(b"XObject".to_vec()));
     dict.set("Subtype", Object::Name(b"Form".to_vec()));
@@ -459,7 +557,7 @@ fn apply_model(
     dict: &mut Dictionary,
     annot: &Annotation,
     ap: &Appearance,
-    ap_id: ObjectId,
+    ap_id: Option<ObjectId>,
     now: &str,
     contents_changed: bool,
 ) {
@@ -490,10 +588,13 @@ fn apply_model(
             Object::Array(p.dash.iter().map(|d| Object::Real(*d)).collect()),
         );
     }
-    // Notes and text markup have no border style (Tables 175 and 182 define none).
+    // Notes, replies and text markup have no border style (Tables 175 and 182 define none).
     if !matches!(
         annot.kind,
-        AnnotKind::Note { .. } | AnnotKind::Markup { .. }
+        AnnotKind::Note { .. }
+            | AnnotKind::Reply { .. }
+            | AnnotKind::Stamp { .. }
+            | AnnotKind::Markup { .. }
     ) {
         dict.set("BS", Object::Dictionary(bs));
         // `/BS` takes precedence, but a stale `/Border` would mislead readers that only know it.
@@ -517,6 +618,24 @@ fn apply_model(
             dict.set("Name", Object::Name(icon.name().as_bytes().to_vec()));
             dict.set("Open", Object::Boolean(*open));
         }
+        AnnotKind::Stamp { content } => match content {
+            // `#` marks our own look so Acrobat keeps our appearance rather than its own
+            // artwork; /Subj is what its comment list shows.
+            StampContent::Standard(name) => {
+                dict.set("Name", Object::Name(format!("#{name}").into_bytes()));
+                if let Some((label, _)) = crate::stamp::standard(name) {
+                    dict.set("Subj", Object::string_literal(title_case(label)));
+                }
+                dict.remove(b"IT");
+            }
+            // Name, /IT and /Subj stay as the file has them.
+            StampContent::Kept => {}
+            StampContent::Image(_) => {
+                dict.remove(b"Name");
+                dict.set("IT", Object::Name(b"StampImage".to_vec()));
+                dict.set("Subj", Object::string_literal("Image"));
+            }
+        },
         AnnotKind::Ink { strokes } => {
             let list = strokes
                 .iter()
@@ -587,15 +706,32 @@ fn apply_model(
                 ),
             );
         }
-        AnnotKind::Square | AnnotKind::Circle | AnnotKind::Other { .. } => {}
+        AnnotKind::Square
+        | AnnotKind::Circle
+        | AnnotKind::Reply { .. }
+        | AnnotKind::Other { .. } => {}
     }
-    // Our appearance replaces any earlier one; these keys describe the old geometry or states.
+    // A kept appearance stays, with the file's /AP; ours replaces any earlier one, and these
+    // keys describe the old geometry or states.
+    let Some(ap_id) = ap_id else {
+        return;
+    };
     for key in [b"RD".as_slice(), b"AS"] {
         dict.remove(key);
     }
     let mut ap_dict = Dictionary::new();
     ap_dict.set("N", Object::Reference(ap_id));
     dict.set("AP", Object::Dictionary(ap_dict));
+}
+
+/// Annotations whose appearance comes from the file unchanged.
+fn kept_appearance(annot: &Annotation) -> bool {
+    matches!(
+        annot.kind,
+        AnnotKind::Stamp {
+            content: StampContent::Kept
+        }
+    )
 }
 
 fn set_or_remove(dict: &mut Dictionary, key: &str, value: Option<Object>) {
@@ -672,4 +808,20 @@ pub fn verify(
         }
     }
     Ok(())
+}
+
+/// "NOT APPROVED" → "Not Approved".
+fn title_case(label: &str) -> String {
+    label
+        .split(' ')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map_or(String::new(), |f| {
+                f.to_uppercase()
+                    .chain(c.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

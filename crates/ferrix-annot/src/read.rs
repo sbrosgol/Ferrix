@@ -5,7 +5,7 @@
 
 use ferrix_core::{
     AnnotFlags, AnnotKind, AnnotOrigin, AnnotProps, Annotation, LineEnd, MAX_STROKE_POINTS,
-    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, Rgb, SourceId,
+    MAX_STROKES, MAX_TEXT_BYTES, MarkupStyle, NoteIcon, ObjectRef, ReplyTo, Rgb, SourceId,
 };
 use ferrix_types::{PdfBox, PdfPoint};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -85,11 +85,24 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
         .get(b"IRT")
         .and_then(Object::as_reference)
         .ok()
-        .map(|(number, generation)| ObjectRef { number, generation });
-    // Replies are part of a thread, which Ferrix doesn't edit yet. Shapes drawn with features
-    // our appearance can't reproduce stay display-only, so editing never silently drops them.
-    let kind = if dict.has(b"IRT") {
-        other()
+        .map(|(number, generation)| ReplyTo::File(ObjectRef { number, generation }));
+    // Replies are notes with /IRT; group members (/RT /Group) stay display-only, deleted with
+    // their primary. Shapes drawn with features our appearance can't reproduce stay
+    // display-only too, so editing never silently drops them.
+    let grouped = name(doc, dict, b"RT").is_some_and(|rt| rt == "Group");
+    let kind = if reply_to.is_some() {
+        if subtype == "Text" && !grouped {
+            let state = match (name(doc, dict, b"StateModel"), text(doc, dict, b"State")) {
+                (model, Some(state)) => Some(ferrix_core::ReviewState {
+                    model: model.unwrap_or_else(|| "Marked".into()),
+                    state,
+                }),
+                _ => None,
+            };
+            AnnotKind::Reply { state }
+        } else {
+            other()
+        }
     } else {
         match subtype.as_str() {
             "Text" => AnnotKind::Note {
@@ -131,6 +144,23 @@ pub(crate) fn read_dict(doc: &Document, dict: &Dictionary, origin: AnnotOrigin) 
                 match (MarkupStyle::from_subtype(name), quad_points(doc, dict)) {
                     (Some(style), Some(quads)) => AnnotKind::Markup { style, quads },
                     _ => other(),
+                }
+            }
+            // Ferrix's own standard stamps (`/Name /#Approved`) are redrawn when edited. Any
+            // other stamp with one plain appearance keeps it and can be moved and resized;
+            // stamps with appearance states stay display-only.
+            "Stamp" => {
+                let ours = name(doc, dict, b"Name")
+                    .and_then(|n| n.strip_prefix('#').map(str::to_owned))
+                    .filter(|n| crate::stamp::standard(n).is_some());
+                match ours {
+                    Some(n) => AnnotKind::Stamp {
+                        content: ferrix_core::StampContent::Standard(n),
+                    },
+                    None if single_appearance(doc, dict) => AnnotKind::Stamp {
+                        content: ferrix_core::StampContent::Kept,
+                    },
+                    None => other(),
                 }
             }
             "Line" if has_line_extras(doc, dict) => other(),
@@ -426,4 +456,25 @@ fn line(doc: &Document, dict: &Dictionary) -> Option<AnnotKind> {
         to: PdfPoint::new(l[2], l[3]),
         ends,
     })
+}
+
+/// Whether `/AP /N` is one form XObject (not a dictionary of states) and `/AS` is absent: the
+/// appearance can then be kept as it is while `/Rect` changes.
+fn single_appearance(doc: &Document, dict: &Dictionary) -> bool {
+    if dict.has(b"AS") {
+        return false;
+    }
+    let Some(ap) = deref(doc, dict, b"AP").and_then(|o| o.as_dict().ok()) else {
+        return false;
+    };
+    let Ok(normal) = ap.get(b"N") else {
+        return false;
+    };
+    let normal = match normal {
+        Object::Reference(id) => doc.get_object(*id).ok(),
+        other => Some(other),
+    };
+    normal
+        .and_then(|o| o.as_stream().ok())
+        .is_some_and(|s| s.dict.get(b"BBox").is_ok())
 }

@@ -370,3 +370,70 @@ The constraints:
     colours).
   - Comments rows quoting the marked text.
   - Folding the longer tools bar in narrow windows.
+
+## Implementation notes (phase 4, stamps, replies and tagging, 2026-11-21)
+
+- **Replies** (`AnnotKind::Reply { state }`, `reply_to: Option<ReplyTo>`):
+  - `ReplyTo::File(ObjectRef)` names a parent in the file; `ReplyTo::New(AnnotId)` names one
+    added in the same session. The writer reserves object ids for a page's new annotations
+    before building them (`Revision::reserve_id`), so `/IRT` can point at a parent written in
+    the same save.
+  - Written as `/Subtype /Text` with `/IRT`, no `/RT` (`/R` is the default), the parent's
+    `/Rect`, an empty `/AP /N` form (otherwise PDFium and Poppler draw each reply as another
+    icon), flags Print, NoZoom and NoRotate, no `/BS`, and no popup.
+  - Review states (`/State`, `/StateModel`) are read and shown ("Ana set the status to
+    Accepted") but can't be set or changed. Group members (`/RT /Group`) stay `Other`.
+  - Deleting an annotation deletes its thread in one step, replies first, so undo restores
+    parents first.
+  - In the app, the note editor became a comment popover for any annotation (notes open it on
+    click; other annotations through the Comment button). It shows the thread with author and
+    relative date, and has a reply field. The author name is asked once per session, because
+    the settings store of ADR-0005 doesn't exist yet. New annotations carry it as `/T`. The
+    Comments list shows threads and reply counts, not replies as rows.
+- **Stamps** (`AnnotKind::Stamp { content }`, `ferrix-annot/src/stamp.rs`):
+  - **Standard stamps:** seven standard stamps (Approved, Not Approved, Draft, Final, For
+    Comment, Confidential, For Public Release) in Ferrix's own look. They have a rounded border
+    in the outer form and a bold label set by `ferrix-compose`, imported as an inner form, as
+    text boxes are.
+    - Written as `/Name /#Approved` (the `#` tells Acrobat to keep our appearance) and `/Subj`.
+    - Read back as `Standard` only when the name is one of ours.
+  - **Image stamps:**
+    - Pictures are PNG or JPEG. Their headers are checked without decoding: under 20 MB, at
+      most 8192 px a side and 40 MP.
+    - CMYK JPEGs are refused because krilla would invert them without Adobe's marker.
+    - krilla draws the picture on a page of its pixel size, which becomes the inner form.
+    - Written with `/IT /StampImage` and no `/Name`.
+  - **Kept stamps** (`StampContent::Kept`):
+    - Any stamp whose `/AP /N` is one form and has no `/AS`. This covers other apps' stamps
+      and our image stamps after reopening.
+    - Moving or resizing rewrites `/Rect` only. Readers fit the untouched appearance into it
+      (§12.5.5), so the artwork is never redrawn.
+    - Stamps with appearance states stay `Other`.
+  - In the app:
+    - The Stamp tool (M) has a picker of the standard stamps and "Choose Picture…".
+    - A click places the stamp centred, at natural size (pictures at 72 dpi, at most
+      200 pt), and returns to Select.
+    - Stamps resize with fixed proportions and have no colour or width controls.
+- **Tagging** (`ferrix-annot/src/tag.rs`):
+  - Applies to files with `/MarkInfo /Marked true` and a `/StructTreeRoot`. New annotations on
+    the file's own pages each get:
+    - an `/Annot` element (OBJR to the annotation; `/Alt` from its text, or what it is);
+    - a parent: the element that owns the page's last marked content, else the document's
+      first element, else the root;
+    - a `/StructParent` key appended to the parent tree's rightmost leaf, with limits widened;
+    - `/Tabs /S` on the page.
+  - The next key is the larger of `/ParentTreeNextKey` and one past every key in use.
+  - Deleting an annotation removes its element from its parent and its key from the tree.
+  - Trees are read with depth (32) and node (10,000) bounds. A tree Ferrix can't follow is
+    left alone: annotations are saved untagged, `WriteReport::untagged` counts them, and the app
+    says so once.
+- **Not done:**
+  - Pen pressure: iced 0.14 has no pressure input.
+  - Setting review states.
+  - A remembered author name (waits for settings).
+  - Editing image stamps' pictures after reopening (they become Kept).
+  - CMYK JPEG stamps.
+  - Tagging annotations on pages imported from other files (their structure isn't carried
+    over).
+  - Re-parenting when the page's content has no structure.
+  - Relative dates are in UTC.

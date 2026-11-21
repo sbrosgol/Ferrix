@@ -10,6 +10,8 @@
 mod appearance;
 pub mod free_text;
 mod read;
+pub mod stamp;
+mod tag;
 mod write;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +77,12 @@ pub fn unique_name() -> String {
         .map_or(0, |d| d.as_nanos());
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("ferrix-{nanos:x}-{:x}-{count:x}", std::process::id())
+}
+
+/// Whether `doc` is a tagged PDF whose structure tree new annotations can't be added to (it
+/// doesn't look as ISO 32000-2 describes); they are then saved untagged.
+pub fn structure_tree_blocked(doc: &lopdf::Document) -> bool {
+    matches!(tag::Tagger::load(doc), Some(Err(())))
 }
 
 #[cfg(test)]

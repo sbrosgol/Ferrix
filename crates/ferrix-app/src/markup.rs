@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use ferrix_core::{AnnotFlags, AnnotId, AnnotKind, Annotation, LineEnd, NoteIcon, Rgb};
+use ferrix_core::{
+    AnnotFlags, AnnotId, AnnotKind, Annotation, LineEnd, NoteIcon, Rgb, StampContent,
+};
 use ferrix_types::{PdfBox, PdfPoint};
 
 /// The paper palette (design system › Annotations): names and colours.
@@ -41,6 +43,7 @@ pub enum Tool {
     Squiggly,
     TextBox,
     Note,
+    Stamp,
     Pen,
     Rectangle,
     Ellipse,
@@ -58,9 +61,10 @@ impl Tool {
         Self::Squiggly,
     ];
     /// Tools that add things.
-    pub(crate) const ADD: [Self; 7] = [
+    pub(crate) const ADD: [Self; 8] = [
         Self::TextBox,
         Self::Note,
+        Self::Stamp,
         Self::Pen,
         Self::Rectangle,
         Self::Ellipse,
@@ -77,6 +81,7 @@ impl Tool {
             Self::Squiggly => "Squiggly underline (W)",
             Self::TextBox => "Text box (T)",
             Self::Note => "Note (N)",
+            Self::Stamp => "Stamp (M)",
             Self::Pen => "Pen (P)",
             Self::Rectangle => "Rectangle (R)",
             Self::Ellipse => "Ellipse (O)",
@@ -94,6 +99,7 @@ impl Tool {
             "w" => Self::Squiggly,
             "t" => Self::TextBox,
             "n" => Self::Note,
+            "m" => Self::Stamp,
             "p" => Self::Pen,
             "r" => Self::Rectangle,
             "o" => Self::Ellipse,
@@ -162,6 +168,8 @@ pub(crate) struct Markup {
     pub(crate) gesture: Option<(ferrix_core::PageKey, Gesture)>,
     /// The ink annotation the next pen stroke may join, and when it was drawn.
     pub(crate) last_ink: Option<(AnnotId, std::time::Instant)>,
+    /// What the Stamp tool places.
+    pub(crate) stamp: StampContent,
 }
 
 impl Default for Markup {
@@ -172,6 +180,7 @@ impl Default for Markup {
             selected: None,
             gesture: None,
             last_ink: None,
+            stamp: StampContent::Standard("Approved".into()),
         }
     }
 }
@@ -237,6 +246,7 @@ pub(crate) fn create(tool: Tool, style: Style, drag: &Drag<'_>) -> Option<Annota
                 PdfBox::from_corners(start, PdfPoint::new(start.x + w, start.y - h)),
             )
         }
+        Tool::Stamp => return None,
         Tool::Note => (
             AnnotKind::Note {
                 icon: NoteIcon::Comment,
@@ -354,6 +364,10 @@ pub(crate) fn hit(
     tolerance: f32,
 ) -> Option<AnnotId> {
     annots.iter().rev().find_map(|(id, a)| {
+        // Replies share their parent's /Rect but aren't drawn; the parent is what's clicked.
+        if matches!(a.kind, AnnotKind::Reply { .. }) {
+            return None;
+        }
         let near = tolerance + a.props.border_width / 2.0;
         let inside = match &a.kind {
             AnnotKind::Ink { strokes } => strokes.iter().any(|s| polyline_distance(s, p) <= near),
@@ -396,6 +410,7 @@ pub(crate) fn handles(annot: &Annotation) -> Vec<(Handle, PdfPoint)> {
     match &annot.kind {
         // Notes keep their size, text boxes fit their text, text markup follows its text.
         AnnotKind::Note { .. }
+        | AnnotKind::Reply { .. }
         | AnnotKind::FreeText { .. }
         | AnnotKind::Markup { .. }
         | AnnotKind::Other { .. } => Vec::new(),
@@ -427,7 +442,9 @@ pub(crate) fn resized(
     match (handle, &mut out.kind) {
         (Handle::LineFrom, AnnotKind::Line { from, .. }) => *from = to,
         (Handle::LineTo, AnnotKind::Line { to: end, .. }) => *end = to,
-        (Handle::Box(sx, sy), _) => {
+        (Handle::Box(sx, sy), kind) => {
+            // Stamps keep their proportions: labels and pictures would distort.
+            let keep_ratio = keep_ratio || matches!(kind, AnnotKind::Stamp { .. });
             let old = shape_box(annot);
             let mut r = old;
             if sx < 0 {
@@ -538,7 +555,9 @@ fn map_points(annot: &Annotation, f: impl Fn(PdfPoint) -> PdfPoint) -> Annotatio
 
 /// Whether Ferrix may change `annot` at all (as opposed to only deleting it).
 pub(crate) fn editable(annot: &Annotation) -> bool {
-    annot.is_editable() && !annot.props.flags.has(AnnotFlags::READ_ONLY)
+    // Review states are other people's decisions: shown, never changed.
+    let review_state = matches!(annot.kind, AnnotKind::Reply { state: Some(_) });
+    annot.is_editable() && !annot.props.flags.has(AnnotFlags::READ_ONLY) && !review_state
 }
 
 #[cfg(test)]
@@ -742,4 +761,134 @@ mod tests {
         assert_eq!(strokes[0], vec![pt(0.0, 0.0), pt(20.0, 20.0)]);
         assert!(handles(&square).len() == 8 && handles(&m).len() == 8);
     }
+}
+
+/// Seconds since the Unix epoch for a PDF date (`D:YYYYMMDDHHmmSS` with an optional
+/// `Z`/`+HH'mm'` offset, ISO 32000-2 §7.9.4); `None` if it isn't one.
+pub(crate) fn pdf_date_seconds(date: &str) -> Option<i64> {
+    let s = date.trim().strip_prefix("D:").unwrap_or(date.trim());
+    let digits = |from: usize, len: usize| -> Option<i64> {
+        s.get(from..from + len)
+            .filter(|d| d.bytes().all(|b| b.is_ascii_digit()))?
+            .parse()
+            .ok()
+    };
+    let year = digits(0, 4)?;
+    let month = digits(4, 2).unwrap_or(1).clamp(1, 12);
+    let day = digits(6, 2).unwrap_or(1).clamp(1, 31);
+    let hour = digits(8, 2).unwrap_or(0).min(23);
+    let minute = digits(10, 2).unwrap_or(0).min(59);
+    let second = digits(12, 2).unwrap_or(0).min(59);
+    let offset = match s.get(14..15) {
+        Some(sign @ ("+" | "-")) => {
+            let h = digits(15, 2).unwrap_or(0);
+            let m = s
+                .get(18..20)
+                .and_then(|m| m.parse::<i64>().ok())
+                .unwrap_or(0);
+            let total = (h * 60 + m) * 60;
+            if sign == "+" { total } else { -total }
+        }
+        _ => 0,
+    };
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let (y, m) = if month <= 2 {
+        (year - 1, month + 9)
+    } else {
+        (year, month - 3)
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// "Just now", "5 min ago", "3 hours ago", "Yesterday", "4 days ago", or the date
+/// ("21 Nov 2026"), relative to `now` (seconds since the epoch). Dates are in UTC: Ferrix
+/// has no time-zone database yet.
+pub(crate) fn relative_date(date: &str, now: i64) -> String {
+    let Some(then) = pdf_date_seconds(date) else {
+        return String::new();
+    };
+    let ago = now - then;
+    match ago {
+        i64::MIN..=59 => "Just now".into(),
+        60..=3_599 => format!("{} min ago", ago / 60),
+        3_600..=86_399 => {
+            let h = ago / 3600;
+            if h == 1 {
+                "1 hour ago".into()
+            } else {
+                format!("{h} hours ago")
+            }
+        }
+        86_400..=172_799 => "Yesterday".into(),
+        172_800..=604_799 => format!("{} days ago", ago / 86_400),
+        _ => {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let s = date.trim().strip_prefix("D:").unwrap_or(date.trim());
+            let month: usize = s.get(4..6).and_then(|m| m.parse().ok()).unwrap_or(1);
+            let day: u32 = s.get(6..8).and_then(|d| d.parse().ok()).unwrap_or(1);
+            let year = s.get(0..4).unwrap_or("");
+            format!("{day} {} {year}", MONTHS[month.clamp(1, 12) - 1])
+        }
+    }
+}
+
+#[cfg(test)]
+mod date_tests {
+    use super::*;
+
+    #[test]
+    fn parses_pdf_dates_with_offsets() {
+        assert_eq!(pdf_date_seconds("D:19700101000000Z"), Some(0));
+        assert_eq!(pdf_date_seconds("D:19700101010000+01'00'"), Some(0));
+        assert_eq!(
+            pdf_date_seconds("D:2026"),
+            pdf_date_seconds("D:20260101000000")
+        );
+        assert_eq!(pdf_date_seconds("yesterday"), None);
+    }
+
+    #[test]
+    fn describes_dates_relative_to_now() {
+        let now = pdf_date_seconds("D:20261121120000Z").expect("date");
+        assert_eq!(relative_date("D:20261121115930Z", now), "Just now");
+        assert_eq!(relative_date("D:20261121114000Z", now), "20 min ago");
+        assert_eq!(relative_date("D:20261121090000Z", now), "3 hours ago");
+        assert_eq!(relative_date("D:20261120100000Z", now), "Yesterday");
+        assert_eq!(relative_date("D:20261001000000Z", now), "1 Oct 2026");
+    }
+}
+
+/// A stamp of `content` centred at `at`: standard stamps at their natural size, pictures at
+/// 72 dpi but no more than 200 pt on a side.
+pub(crate) fn stamp(content: &StampContent, at: PdfPoint) -> Annotation {
+    let (w, h) = match content {
+        StampContent::Standard(name) => ferrix_annot::stamp::standard_size(name),
+        // The tool never holds a kept stamp; a plain square if it ever did.
+        StampContent::Kept => (60.0, 60.0),
+        StampContent::Image(image) => {
+            let (w, h) = (image.width as f32, image.height as f32);
+            let scale = (200.0 / w.max(h)).min(1.0);
+            ((w * scale).max(8.0), (h * scale).max(8.0))
+        }
+    };
+    let rect = PdfBox::from_corners(
+        PdfPoint::new(at.x - w / 2.0, at.y - h / 2.0),
+        PdfPoint::new(at.x + w / 2.0, at.y + h / 2.0),
+    );
+    let mut annot = Annotation::new(
+        AnnotKind::Stamp {
+            content: content.clone(),
+        },
+        rect,
+    );
+    annot.props.name = Some(ferrix_annot::unique_name());
+    annot.props.flags = AnnotFlags(AnnotFlags::PRINT);
+    annot
 }
