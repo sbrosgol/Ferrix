@@ -38,6 +38,9 @@ pub struct Tokens {
     pub page_shadow: Color,
     /// Selected text on a page; the same in both themes because the paper is white.
     pub page_selection: Color,
+    /// Find matches on a page, and the current one (paper-relative, so the same in both).
+    pub page_find: Color,
+    pub page_find_current: Color,
 }
 
 pub const LIGHT: Tokens = Tokens {
@@ -61,6 +64,8 @@ pub const LIGHT: Tokens = Tokens {
     danger: rgb(0xD23B3B),
     page_shadow: rgba(0x0B1424, 0.20),
     page_selection: rgba(0x3563E9, 0.28),
+    page_find: rgba(0xF2C200, 0.40),
+    page_find_current: rgba(0xE8590C, 0.45),
 };
 
 pub const DARK: Tokens = Tokens {
@@ -84,6 +89,8 @@ pub const DARK: Tokens = Tokens {
     danger: rgb(0xF06A6A),
     page_shadow: rgba(0x000000, 0.55),
     page_selection: rgba(0x3563E9, 0.28),
+    page_find: rgba(0xF2C200, 0.40),
+    page_find_current: rgba(0xE8590C, 0.45),
 };
 
 /// The UI typeface, bundled with the app (Regular and SemiBold).

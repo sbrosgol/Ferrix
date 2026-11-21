@@ -397,6 +397,21 @@ impl App {
             Some((page, quads)) if page == entry.key => quads,
             _ => Vec::new(),
         };
+        let (mut find_quads, mut find_current) = (Vec::new(), Vec::new());
+        if let Some(search) = doc.search.as_ref()
+            && let Some(hits) = search.hits.get(&entry.key)
+        {
+            for (i, range) in hits.iter().enumerate() {
+                let quads = self
+                    .range_quads(entry.key, range.clone())
+                    .unwrap_or_default();
+                if search.current == Some((entry.key, i)) {
+                    find_current.extend(quads);
+                } else {
+                    find_quads.extend(quads);
+                }
+            }
+        }
         let overlay = Overlay {
             page: entry.key,
             transform,
@@ -417,6 +432,8 @@ impl App {
             alt: self.modifiers.alt(),
             text: doc.texts.get(&entry.key).map(|t| t.as_ref()).zip(intrinsic),
             selection_quads: selection_quads.clone(),
+            find_quads,
+            find_current,
         };
         let mut layers = stack![page, canvas(overlay).width(size.width).height(size.height)];
         // The selection bar, just above the selection once the pointer is up.

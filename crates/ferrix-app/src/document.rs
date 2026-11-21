@@ -172,6 +172,8 @@ pub(crate) struct Document {
     /// Each page's text, loaded as pages come into view (`ferrix-text`).
     pub(crate) texts: HashMap<PageKey, std::sync::Arc<ferrix_text::PageText>>,
     pub(crate) text_busy: bool,
+    /// The search of the find bar, while it is open.
+    pub(crate) search: Option<crate::pdf_find::Search>,
 }
 
 impl Document {
@@ -203,6 +205,7 @@ impl Document {
             tagged_noted: false,
             texts: HashMap::new(),
             text_busy: false,
+            search: None,
         };
         if let Some(key) = doc.key_at(0) {
             doc.select_only(key);

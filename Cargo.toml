@@ -23,6 +23,7 @@ ferrix-io = { path = "crates/ferrix-io" }
 ferrix-pdf = { path = "crates/ferrix-pdf" }
 ferrix-print = { path = "crates/ferrix-print" }
 ferrix-text = { path = "crates/ferrix-text" }
+unicode-normalization = "0.1.26"
 
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 anyhow = "1.0.104"

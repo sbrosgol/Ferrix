@@ -1054,7 +1054,11 @@ impl App {
             }
             Message::Escape => {
                 if self.confirm.is_none() && self.new_form.is_none() && self.page_setup.is_none() {
-                    self.find = None;
+                    if self.writer.is_none() {
+                        self.close_pdf_find();
+                    } else {
+                        self.find = None;
+                    }
                 }
                 self.confirm = None;
                 self.new_form = None;
@@ -1293,6 +1297,28 @@ impl App {
                     form.archival = on;
                 }
             }
+            Message::FindOpen if self.writer.is_none() => {
+                if self.doc.is_none() {
+                    return Task::none();
+                }
+                // Start from selected text, if it is a short single line.
+                let selected = self
+                    .text_selection
+                    .and_then(|s| Some(self.page_text(s.page)?.text(s.sel.range())))
+                    .unwrap_or_default();
+                let mut find = self.find.take().unwrap_or_default();
+                if !selected.trim().is_empty() && selected.len() <= 200 && !selected.contains('\n')
+                {
+                    find.query = selected;
+                }
+                find.focused = true;
+                self.find = Some(find);
+                return Task::batch([
+                    self.search_pdf(),
+                    operation::focus(find_input_id()),
+                    operation::select_all(find_input_id()),
+                ]);
+            }
             Message::FindOpen => {
                 let Some(w) = self.writer.as_ref().filter(|_| self.can_edit()) else {
                     return Task::none();
@@ -1315,6 +1341,9 @@ impl App {
                     find.query = query.chars().take(200).collect();
                     find.focused = true;
                 }
+                if self.writer.is_none() {
+                    return self.search_pdf();
+                }
             }
             Message::FindReplacement(text) => {
                 if let Some(find) = &mut self.find {
@@ -1326,6 +1355,15 @@ impl App {
                 if let Some(find) = &mut self.find {
                     find.match_case = on;
                 }
+                if self.writer.is_none() {
+                    return self.search_pdf();
+                }
+            }
+            Message::FindNext | Message::FindPrevious if self.writer.is_none() => {
+                if self.find.is_none() {
+                    return self.update(Message::FindOpen);
+                }
+                return self.step_match(matches!(message, Message::FindPrevious));
             }
             Message::FindNext
             | Message::FindPrevious
@@ -1359,6 +1397,7 @@ impl App {
                 }
                 return self.after_write(true);
             }
+            Message::FindClose if self.writer.is_none() => self.close_pdf_find(),
             Message::FindClose => self.find = None,
             Message::ApplyPageSetup => {
                 let (Some(form), Some(w)) = (self.page_setup.take(), self.writer.as_mut()) else {
@@ -2228,7 +2267,7 @@ impl App {
         crate::view::canvas_size(self.view_window(), self.sidebar && self.doc.is_some())
     }
 
-    fn sync_page_input(&mut self) {
+    pub(crate) fn sync_page_input(&mut self) {
         self.page_input = self
             .doc
             .as_ref()
@@ -2323,7 +2362,7 @@ impl App {
         ])
     }
 
-    fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
+    pub(crate) fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
         if let Some(doc) = &mut self.doc {
             doc.scroll = top;
         }
@@ -2337,7 +2376,7 @@ impl App {
     }
 
     /// Keeps the current page's thumbnail in view.
-    fn follow_in_sidebar(&self) -> Task<Message> {
+    pub(crate) fn follow_in_sidebar(&self) -> Task<Message> {
         let Some(doc) = &self.doc else {
             return Task::none();
         };
@@ -2413,7 +2452,7 @@ impl App {
 
     /// Renders the next page in or next to the view that is missing or out of date; each
     /// result schedules the one after it. Pages further away are dropped.
-    fn render_pages(&mut self) -> Task<Message> {
+    pub(crate) fn render_pages(&mut self) -> Task<Message> {
         let (height, scale_factor) = (self.viewport_height(), self.scale_factor);
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
@@ -2660,6 +2699,8 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
                 "f" => Some(Message::FindOpen),
+                "g" if shift => Some(Message::FindPrevious),
+                "g" => Some(Message::FindNext),
                 "s" if shift => Some(Message::SaveAs),
                 "s" => Some(Message::Save),
                 "z" if shift => Some(Message::Redo),
