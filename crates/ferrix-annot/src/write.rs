@@ -358,16 +358,11 @@ fn annotation_stream(
     let AnnotKind::FreeText { size, color } = annot.kind else {
         return Ok(appearance_stream(revision, ap, pdfa.cmyk));
     };
-    if pdfa.cmyk {
-        // krilla writes RGB text; DeviceRGB isn't allowed under a CMYK output intent.
-        return Err(AnnotError::NotAllowed(
-            "text boxes can't be added to PDF/A files prepared for CMYK printing yet".into(),
-        ));
-    }
     let r = ap.bbox;
     let (w, h) = (r.width().max(1.0), r.height().max(1.0));
     let text = annot.props.contents.as_deref().unwrap_or("");
-    let page = crate::free_text::render(text, size, color, w, h)?;
+    // In PDF/A files, ICC-based colour is valid whatever the output intent.
+    let page = crate::free_text::render(text, size, color, w, h, pdfa.part.is_some())?;
     // krilla draws in its own [0 0 w h] page; the outer form places it at the box.
     let inner = revision.import_page_as_form(&page, 0, [0.0, 0.0, w, h])?;
     let mut xobjects = Dictionary::new();

@@ -75,19 +75,22 @@ pub fn measure(text: &str, size: f32, width: Option<f32>) -> (f32, f32) {
 
 /// The text set in a `width` × `height` page, as a one-page PDF (untagged, nothing embedded but
 /// the font subset), for [`ferrix_pdf::Revision::import_page_as_form`].
+/// With `icc`, colours are ICC-based sRGB, for PDF/A files (see
+/// [`ferrix_compose::export_plain_page`]).
 pub fn render(
     text: &str,
     size: f32,
     color: Rgb,
     width: f32,
     height: f32,
+    icc: bool,
 ) -> Result<Vec<u8>, AnnotError> {
     let mut fonts = FONTS
         .lock()
         .map_err(|_| AnnotError::NotAllowed("the text layout failed earlier".into()))?;
     let doc = document(text, size, color, width, height);
     let layout = Layout::new(&doc, &mut fonts);
-    ferrix_compose::export_plain_page(&doc, &layout, &fonts)
+    ferrix_compose::export_plain_page(&doc, &layout, &fonts, icc)
         .map_err(|e| AnnotError::NotAllowed(format!("couldn’t set the text: {e}")))
 }
 
@@ -113,7 +116,7 @@ mod tests {
     #[test]
     fn renders_a_pdf_page() {
         let (w, h) = measure("Hello", 14.0, None);
-        let pdf = render("Hello", 14.0, Rgb::new(0.1, 0.2, 0.8), w, h).expect("renders");
+        let pdf = render("Hello", 14.0, Rgb::new(0.1, 0.2, 0.8), w, h, false).expect("renders");
         assert!(pdf.starts_with(b"%PDF"));
     }
 }

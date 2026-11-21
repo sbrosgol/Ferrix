@@ -56,14 +56,19 @@ pub fn export_pdf(doc: &Document, layout: &Layout, fonts: &Fonts) -> Result<Vec<
 /// The first page of `layout` as a bare PDF: no tags, metadata, embedded source or second pass.
 /// For annotation appearances (ADR-0009 phase 3), whose page is copied into another file as a
 /// form XObject; marked-content ids would clash with the host page's structure there.
+///
+/// With `icc`, colours are written as ICC-based sRGB instead of device colour spaces, which
+/// PDF/A allows whatever the file's output intent (ISO 19005-2 §6.2.4.3).
 pub fn export_plain_page(
     doc: &Document,
     layout: &Layout,
     fonts: &Fonts,
+    icc: bool,
 ) -> Result<Vec<u8>, ExportError> {
     let fonts = fonts.for_embedding(layout);
     let mut pdf = krilla::Document::new_with(SerializeSettings {
         enable_tagging: false,
+        no_device_cs: icc,
         ..SerializeSettings::default()
     });
     let texts: Vec<String> = doc

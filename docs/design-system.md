@@ -132,13 +132,14 @@ tools appear only when asked for.
 - **Annotation bar:** 42 high under the toolbar (same height, `chrome` fill and bottom hairline as
   the writer format bar), pills 12 apart, padding [0, 10]:
   1. two tool pills (icon buttons 30, 2 apart). Text: Select (V) · Highlight (H) · Underline (U)
-     · Strikethrough (S) · Squiggly underline (W). Add: Text box (T) · Note (N) · Pen (P) ·
-     Rectangle (R) · Ellipse (O) · Line (L) · Arrow (A)
+     · Strikethrough (S) · Squiggly underline (W). Add: Text box (T) · Note (N) · Stamp (M)
+     · Pen (P) · Rectangle (R) · Ellipse (O) · Line (L) · Arrow (A)
   2. colour pill: seven 20 px swatches in 28 px targets
   3. width pill: 1, 2, 4, 8 pt as icon buttons showing a line of that weight (lines, shapes, ink)
   4. font size select (text boxes, `select_flat`, 72 wide): 8, 10, 12, 14, 18, 24, 36 pt
   5. opacity select (`select_flat`, 72 wide): 100 %, 75 %, 50 %, 25 %
-  6. right-aligned: Delete (`trash-2`), only with a selection
+  6. right-aligned: Comment (`message-square-text`) and Delete (`trash-2`), only with a
+     selection
 
   Properties (2–5) edit the selection, else the active tool's defaults (remembered per tool for
   the session). Controls that don't apply are hidden. Narrow windows fold controls, never shrink
@@ -146,8 +147,9 @@ tools appear only when asked for.
   used, with a chevron opening a popover of all four); below 820 px (`is_narrow`) the four shapes
   fold the same way and the colour pill becomes one swatch with a chevron. Tool keys work in
   Markup when no text has focus, folded or not. Highlight, the underlines and Pen stay active.
-- **Icons** (Lucide, 16): `type`, `highlighter`, `underline`, `strikethrough`, `copy`, and our own
-  `underline-wavy` (Lucide `underline` with a wavy rule, same grid and stroke).
+- **Icons** (Lucide, 16): `type`, `highlighter`, `underline`, `strikethrough`, `copy`,
+  `stamp`, `image`, `message-square-text`, and our own `underline-wavy` (Lucide `underline`
+  with a wavy rule, same grid and stroke).
 - **Annotation palette** (`theme::ANNOT_COLORS`, paper colours, the same in both themes):
   Red `#E03131`, Orange `#E8590C`, Yellow `#F2C200`, Green `#2F9E44`, Blue `#1C7ED6`,
   Purple `#7048E8`, Black `#1B1D21`. All but yellow reach 3:1 on white; yellow is for notes,
@@ -206,9 +208,86 @@ tools appear only when asked for.
 - **Selected:** drag the body to move; two side handles change the width (an auto-width box
   becomes fixed). Bar: colour and font size.
 
+### Stamps (phase 4)
+
+- **Tool:** one fold button (42 wide: icon `stamp` + chevron, the same component as the folded
+  text tools) in the Add pill after Note: Text box · Note · Stamp · Pen · shapes. Tooltip
+  "Stamp (M)". The icon arms the last stamp used (Approved at first); the chevron or M while it's
+  armed opens the picker. The bar grows by 42 only; existing fold widths still fit at 980 and 820.
+- **Picker:** `theme::popover` under the button, 232 wide, padding 8, clamped to the window. Seven
+  rows, 36 high, each a preview chip as placed (paper white, so it reads the same in dark mode).
+  Then 8 of space, a "Recent images" overline and up to four 48 × 48 thumbnails (this session
+  only), then "Image…" (`image` icon). ↑ ↓ move, Return picks, Esc closes.
+- **Standard set** (`markup::STAMPS`; `/Name` from ISO 32000 Table 181, so other apps recognise
+  them): Approved, Final, For Public Release in green `#2B7A3B`; Not Approved, Confidential in
+  red `#C92A2A`; Draft, For Comment in blue `#1864AB`.
+- **Look:** upper-case Liberation Sans Bold, 18 pt; a 2 pt rounded border (radius 4 pt) in the
+  ink, 6 × 10 pt padding, no fill. Stamp inks are darker than the palette, so the label reaches
+  4.5:1 on paper. They are part of the meaning, so the colour pill is hidden for stamps.
+- **Placing:** a click places the default size (text at 18 pt), centred on the pointer; a drag
+  sets the width (at least 36 pt), with height following the aspect. Return places it at the
+  centre of the visible part of the page. Clamped inside the page. It then returns to Select.
+- **Resizing:** four corner handles, always proportional; no side handles. **No rotation:** a
+  stamp is upright as the page is shown when it's placed. Rotated stamps from other apps stay
+  `Other`.
+- **Image stamps:** "Image…" opens "Choose an Image" (PNG, JPEG). Placed at its size at 96 dpi,
+  capped at 200 pt wide; transparency is kept. Errors: "Couldn’t open “{name}”. Choose a PNG or
+  JPEG image." In PDF/A-1 files, images with transparency are refused: "This document is
+  PDF/A-1, which doesn’t allow transparent images."
+- **Selected:** bar shows opacity, Comment and Delete. **Comments row:** `stamp` icon in the ink;
+  title "Stamp · {author}"; line two the label ("Approved") or "Image", 13 `text_muted`.
+
+### Comments and replies (phase 4)
+
+- **One popover for every annotation:** the note editor becomes the comment popover, 320 wide,
+  at most 60 % of the window high (the thread scrolls). It opens on a note's click, on Comment
+  (`message-square-text`, in the bar beside Delete, "Comment and replies") or double-click for
+  other annotations (text boxes: Comment only), and on Return or double-click in the Comments list.
+
+  ```
+  ┌───────────────────────────────────────┐
+  │ Ana Ruiz · 2 hours ago                │  13 semibold · 12 text_muted
+  │ “energy-efficient products”           │  markup only: quote, 12 muted
+  │ [ Check these figures              ]  │  text editor, 13
+  │                                       │  12
+  │   Ben Ode · Yesterday at 14:05 [✎][×] │  replies indented 12; edit/delete
+  │   I checked them, they’re fine.       │  on hover or focus
+  │   Ben Ode set the status to Accepted  │  12 muted, read-only
+  │                                       │
+  │ [ Reply                            ]  │  grows to 4 lines
+  │                              [Reply]  │  secondary, disabled when empty
+  │ [Delete]                      [Done]  │  primary
+  └───────────────────────────────────────┘
+  ```
+- **Dates:** "Just now", "{n} min ago", "Today at 14:05", "Yesterday at 14:05", "21 Nov",
+  "21 Nov 2025" (system time format); the full date in a tooltip; nothing without `/M`.
+- **Own replies** (author is your Author name) can be edited in place (Cancel · Save) and
+  deleted; others' only deleted. Each send, edit or delete is one undo step. Deleting a parent
+  with replies says so: tooltip "Delete note and 2 replies".
+- **Author name:** a reply needs one. With none set, the first reply shows "Add your name so
+  others know who replied." with a "Your name" field and Save (stored as the ADR-0005 preference).
+- **Review status:** shown, never set. Status replies from other apps appear as one muted line;
+  the latest also shows in the Comments row.
+- **Comments row:** replies are not rows of their own. A third line in 12 `text_muted`: "2
+  replies · Ben Ode, yesterday" (and " · Accepted"). The date sits right of the title.
+- **Keys:** ⌘Return (Ctrl+Enter) sends; Return is a new line; Esc cancels an edit, then closes.
+  On open, focus goes to the text when it's empty, else to the reply field. Tab: text, replies'
+  buttons, reply field, Reply, Delete, Done.
+- **Popups:** Ferrix shows its popover instead of `/Popup` annotations and writes none.
+
+### Phase 4, no UI
+
+- **Tagged PDFs:** annotations join the structure tree silently. The notice "Screen readers won’t
+  announce annotations in this document yet." goes away. If a file's structure tree can't take
+  them, the save succeeds and the status bar says "Screen readers may not announce some
+  annotations in this document."
+- **Pen pressure:** out of scope. iced 0.14 reports no pressure or tilt, so ink keeps one width.
+
 Why: a mode keeps reading uncluttered, and reusing the format bar's rules adds no chrome tokens,
 only the paper palette, `page_selection` and handle sizes. Selection lives outside Markup
-because copying is reading.
+because copying is reading. Stamps add three inks as data (`markup::STAMPS`), not tokens: the
+palette's green and blue fall below 4.5:1 for a label on paper. Threads reuse the one popover so
+there is one place to read and write comments, whether or not the sidebar is open.
 
 ## Writing rules
 

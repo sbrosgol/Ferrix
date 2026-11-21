@@ -1143,3 +1143,32 @@ fn text_boxes_round_trip_with_an_embedded_font_and_render() {
         .count();
     assert!(dark > 20, "text drawn: {dark} dark pixels");
 }
+
+/// Text boxes in PDF/A files are set in ICC-based colour, valid under any output intent.
+#[test]
+fn text_boxes_in_cmyk_pdfa_files_use_icc_colour() {
+    let base = pdfa_fixture(2, true);
+    let mut state = open_state(&base, None);
+    let (w, h) = ferrix_annot::free_text::measure("Archived", 12.0, None);
+    let mut b = Annotation::new(
+        AnnotKind::FreeText {
+            size: 12.0,
+            color: Rgb::BLACK,
+        },
+        PdfBox::from_corners(pt(50.0, 700.0 - h), pt(50.0 + w, 700.0)),
+    );
+    b.props.color = None;
+    b.props.border_width = 0.0;
+    b.props.contents = Some("Archived".into());
+    add(&mut state, 0, b);
+    let out = save_state(&base, None, &state);
+    let doc = Document::load_mem(&out).unwrap();
+    let icc = doc.objects.values().any(|o| match o {
+        Object::Array(a) => a
+            .first()
+            .and_then(|n| n.as_name().ok())
+            .is_some_and(|n| n == b"ICCBased"),
+        _ => false,
+    }) || String::from_utf8_lossy(&out).contains("/ICCBased");
+    assert!(icc, "the text box uses an ICC-based colour space");
+}
