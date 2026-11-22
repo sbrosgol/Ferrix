@@ -82,8 +82,8 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - right: the zoom pill `− 125 % ▾ +` with fit-width and fit-page inside it; file (New,
     Open, Save); then the overflow menu `⋯`
 
-  The overflow menu holds Print…, Appearance (Match System / Light / Dark) and, for written
-  documents, Page Setup…. With no document open, only the title, New, Open and `⋯` show.
+  The overflow menu holds Open Recent, Print…, View (PDFs), Appearance (Match System / Light /
+  Dark) and, for written documents, Page Setup… (order in "Viewer (M1)"). With no document open, only the title, New, Open and `⋯` show.
   Below 980 px New and Open move into `⋯` (`view::is_compact`); below 820 px the fit toggles
   do too (`view::is_narrow`), so toolbar icons never shrink.
 - **Writer format bar:** one pill per cluster, 12 apart, no rules: Style · Font · Size |
@@ -107,7 +107,7 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - footer buttons right-aligned, primary last
   - width 480 for confirmations, 560 for forms
 - **Sidebar:**
-  - header with a segmented switch (Pages | Outline)
+  - header with a segmented switch (Pages | Outline | Comments, icons; see "Viewer (M1)")
   - thumbnails with a 1 px `border`, current page with a 2 px `accent` ring and the page number in
     an accent pill
   - organizer bar at the bottom under a hairline: "Page 3 selected" / "4 pages selected" in 12
@@ -119,6 +119,7 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - centred icon tile, heading and one sentence
   - primary Open… and secondary New Document…
   - keyboard hints beside the buttons they belong to
+  - then, when there is history, the Recent list (see "Viewer (M1)")
 - **Dropdowns (pick lists):** surface, `border` outline, thin chevron, menu with `accent_soft`
   selection (not a solid accent block).
 
@@ -301,6 +302,231 @@ only the paper palette, `page_selection` and handle sizes. Selection lives outsi
 because copying is reading. Stamps add three inks as data (`markup::STAMPS`), not tokens: the
 palette's green and blue fall below 4.5:1 for a label on paper. Threads reuse the one popover so
 there is one place to read and write comments, whether or not the sidebar is open.
+
+## Viewer (M1)
+
+Opening, finding your place and reading. Everything reuses the menu, dialog, sidebar and status
+bar components above; the only new assets are Lucide icons.
+
+- **New icons** (Lucide, 16): `gallery-vertical-end` (Pages), `list-tree` (Outline),
+  `chevron-down` (tree), `arrow-left` (Back), `eye` / `eye-off` (password). Existing: `x`,
+  `file-text`, `chevron-right`, `message-square-text`.
+
+### Overflow menu
+
+Order, top to bottom (sections under the existing overline style, hairline dividers between):
+
+1. New Document…, Open… (below 980 only, as now)
+2. Open Recent `›` (always; disabled in `text_faint` when the list is empty)
+3. Print… · Fit Width · Fit Page (as now)
+4. **View** (PDFs only): Continuous · Two Pages · Two Pages with Cover (one checked), then
+   Dark Pages (checked when on)
+5. **Appearance**: Match System · Light · Dark
+6. Page Setup… (written documents)
+
+### Open Recent
+
+- **History:** files opened from disk, newest first; reopening moves a file to the top. The store
+  keeps 20. A Word file or image records its original path (opening it converts again); a new,
+  never-saved document records nothing; Save As records the new path. Passwords are never stored.
+- **Flyout from `⋯`:** "Open Recent" (the check slot empty like other items, a 12
+  `chevron-right` at the right edge) opens a 300-wide `theme::popover` (padding 6, menu elevation)
+  4 to the left of the menu, top aligned with the item and clamped to the window. It opens on
+  hover, click, → or Return; ← or Esc closes it, Esc again closes the menu. Up to 10 rows, then a
+  divider and "Clear Recent". iced has no submenu: this is a second panel in the menu's `stack`,
+  no custom widget.
+- **Row** (`theme::menu_item(false)`, padding [6, 8], about 40 high): name in 13 `text`, folder
+  in 12 `text_muted` under it, both one line. The folder is the parent path, home shown as `~` on
+  macOS and Linux, shortened in the middle with “…” to fit (`~/Documents/…/Reports`); the full
+  path is the row's tooltip. Return or click opens the file.
+- **Empty state:** under the keyboard hints, 24 of space, then a 400-wide column (narrower
+  windows: window width − 48), left-aligned inside the centred block:
+
+  ```
+                     [ icon tile ]
+                  No document open
+         Open a PDF, Word document or image, …
+            [ Open… ]  [ New Document… ]
+              ⌘ O Open      ⌘ N New
+                                                     24
+  RECENT                                             11 semibold overline, padding [0, 8]
+  ┌──────────────────────────────────────────────┐
+  │ [▤] Annual report 2026.pdf         Yesterday │   44 high, padding [6, 8], radius 6
+  │     ~/Documents/Reports                      │   13 text / 12 text_muted
+  │ [▤] Lease agreement.pdf               21 Nov │   date 12 text_muted, right
+  └──────────────────────────────────────────────┘
+  ```
+  Up to 6 rows; icon `file-text` 16 in `text_muted`, 12 gap. Hover: `hover` overlay; the date is
+  replaced by a 28 × 28 ghost `x` button, tooltip "Remove from Recent" (also on keyboard focus;
+  Delete removes the focused row). Dates use the Comments formats ("Just now" … "21 Nov 2025").
+  The section is absent when there is no history or the engine failed. When the window is too
+  short, the whole empty state scrolls (`thin_scrollbar`); it never squeezes rows.
+- **Missing file:** existence is checked on open, not when listing (network drives can stall).
+  If it's gone, the entry is forgotten and the status bar shows the dismissible error:
+  "“{name}” couldn’t be found. It may have been moved or deleted, so it’s been removed from
+  Recent." Other failures (permissions, damaged file) keep the entry and use the existing
+  "Couldn’t open “{name}”: …".
+- **Clear Recent:** no confirmation (cheap to rebuild, and the menu label says exactly what
+  happens). Clears the list and every remembered position. Status bar: "Recent documents
+  cleared."
+
+### Remembered state (no UI)
+
+- **Per document** (ADR-0005, keyed by content fingerprint, so a renamed file still matches):
+  page and offset within it, zoom (Fit Width, Fit Page or a percentage) and page layout. Restored
+  before the first paint, so the document never visibly jumps from page 1. A page past the end is
+  clamped; a changed file (new fingerprint) opens at the top. Markup mode and the find bar are
+  not remembered.
+- **Preferences:** Appearance, Dark Pages, sidebar shown and its tab, Author name. Applied at
+  launch with no notice.
+- No setting to turn remembering off in M1; Clear Recent is the privacy control.
+
+### Sidebar tabs and Outline
+
+- **Switch:** three equal icon segments in the existing pill (`segment_active` / ghost), icon 16,
+  segment height 28: `gallery-vertical-end` Pages, `list-tree` Outline, `message-square-text`
+  Comments. Counts are dropped (the navigator already shows "/ 12"). Active icon `text`, others
+  `text_muted`. Tooltips "Pages (⌥⌘2)", "Outline (⌥⌘3)", "Comments (⌥⌘4)" (Preview's keys;
+  Ctrl+Shift+2/3/4 on Windows and Linux, avoiding AltGr). A shortcut shows the sidebar if hidden.
+  The organizer bar shows only under Pages.
+- **Tree row:** min 28 high, padding [6, 8], radius 6, list padding [4, 8], no gaps.
+  Left to right: indent 12 per level (capped at 6 levels, 72), a 16 chevron slot (`chevron-right`
+  collapsed, `chevron-down` expanded, `text_muted`; empty for leaves), 4, the title in 13 `text`,
+  wrapping with its lines aligned to the title's start, 8, the page number in 12 `text_muted`,
+  right-aligned (the position in the current page list, what the navigator shows).
+- **States:** hover `hover`. Current section: `accent_soft` fill and semibold title (weight, so not
+  colour alone). It is the last entry in document order whose page is at or before the current
+  page; if it's inside a collapsed parent, the visible ancestor is marked. Keyboard focus: 2 px
+  `focus` ring, radius 6, only when moving by keyboard. An entry with no destination, or whose
+  page was deleted, has its title in `text_muted`, no page number, and doesn't jump.
+- **Click:** the row jumps (its target at the top of the view, zoom unchanged; an `/XYZ` top is
+  honoured). The chevron only expands or collapses; ⌥-click (Alt-click) does all descendants.
+  An outline entry that is a URL follows the link rules below.
+- **Initial expansion:** as the file says (`/Count` sign); if it says nothing and there is one
+  top-level entry, that one is open. Kept for the session only. Opening the tab scrolls the
+  current section into view; later it scrolls only when the current section leaves the view.
+- **Keys** (sidebar focused): ↑ ↓ move and jump (selection follows focus, as in Preview and
+  Acrobat; a run of moves is one Back step); → expands, or moves to the first child; ← collapses,
+  or moves to the parent; Return or Space jumps again; Home / End go to the first / last visible
+  row.
+- **Huge outlines:** rows are the flattened visible tree, virtualized like thumbnails; read in the
+  background, rows appear when ready, no spinner.
+- **Empty:** centred in the list area, 24 from the top: "No outline" in 13 `text`, then "This PDF
+  doesn’t list its chapters or sections." in 12 `text_muted`, max width 180. The tab stays
+  enabled.
+
+### Links
+
+- **Pointer:** a hand over any link area, winning over the I-beam. Nothing is drawn on the page.
+  A press and release within 4 px follows the link; a drag that starts on one selects text. In
+  Markup, links don't follow with an armed tool; with Select, ⌘-click (Ctrl-click) follows.
+- **Hover hint:** the status bar's left side shows the target while the pointer is on a link,
+  then returns to the document facts: "Go to page 12" or the URL (shortened in the middle with
+  “…”). An error message keeps priority. No tooltip: it would cover the text being read.
+- **Internal links** jump at once, like the outline.
+- **External links:** `http`, `https` and `mailto` ask first. Every other scheme (`file:`,
+  `javascript:`, launch actions) is refused in the status bar: "Ferrix doesn’t open “file:”
+  links from documents." Links to other PDF files: "This link points to another file, which
+  Ferrix can’t follow yet."
+- **Confirmation** (480 wide, the save-changes dialog's frame):
+
+  ```
+  ┌────────────────────────────────────────────────┐
+  │ Open this link?                             ×  │  17 semibold
+  │                                                │  8
+  │ It opens in your browser.                      │  13 text_muted
+  │ ┌────────────────────────────────────────────┐ │
+  │ │ https://pricing.example.com/q3?ref=pdf     │ │  13 text, host semibold
+  │ └────────────────────────────────────────────┘ │  surface_sunken, radius 6, padding [8, 12]
+  │                                                │  16
+  │ [Copy Link]               [Cancel] [Open Link] │  32 high
+  └────────────────────────────────────────────────┘
+  ```
+  The host is semibold so lookalike domains stand out; a non-ASCII host is shown as Punycode
+  (`xn--…`). The URL wraps to at most 4 lines, then is cut in the middle with “…” (Copy Link
+  copies it whole). `mailto`: title "Write an email?", line "It opens in your email app.", the
+  address in the box, buttons Copy Address · Cancel · Write Email. Return opens, Esc cancels.
+  No "don't ask again": a per-document exemption is a phishing foothold for the price of one
+  click saved.
+- **Back:** each jump (link, outline, typed page number) pushes the view (page, offset, zoom) on
+  a stack of 50, cleared on close. Back is ⌘[ on macOS, Alt+← elsewhere, and the mouse's back
+  button; Forward is ⌘] / Alt+→ / forward button. While the stack isn't empty, the status bar's
+  right side shows a ghost button 28 high, padding [0, 8]: `arrow-left` 14, 4, "Back to page 3"
+  in 12, tooltip "Back (⌘[)". Forward has no button.
+
+### Password-protected PDFs
+
+- **Dialog** (480 wide, same frame), shown for any open (dialog, drop, Recent, command line):
+
+  ```
+  ┌────────────────────────────────────────────────┐
+  │ Password required                           ×  │  17 semibold
+  │ Enter the password for “Q3 report.pdf”.        │  13 text_muted, name clipped
+  │ ┌──────────────────────────────────────── [◉] ┐│  field 32 high, secure, 28 eye button
+  │ └─────────────────────────────────────────────┘│
+  │ (!) Wrong password. Try again.                 │  12 danger, `circle-alert` 14; else no row
+  │                                                │  16
+  │                              [Cancel]  [Open]  │
+  └────────────────────────────────────────────────┘
+  ```
+- **Field:** placeholder "Password", focused on open. The eye is a 28 ghost `icon_button`
+  stacked inside the field's right edge (`eye` / `eye-off`, tooltips "Show password" / "Hide
+  password"; toggles `secure`). Open is primary, disabled while the field is empty; Return
+  submits, Esc cancels.
+- **Checking:** both buttons and the field disabled, Open reads "Opening…". Wrong password: the
+  field's border becomes 1 px `danger`, the error line appears, the text is selected so typing
+  replaces it, focus stays. No attempt limit. Editing the field clears the error.
+- **Cancel** returns to what was showing (the empty state, or the document already open).
+- **Owner-password only** (restrictions, no open password): opens with no dialog; restrictions
+  apply as now (Copy disabled). **Certificate encryption:** no dialog; status bar "“{name}” is
+  encrypted with a certificate, which Ferrix can’t open yet."
+
+### View options
+
+- **Page layout** (⋯ › View, per document, default Continuous; no shortcuts, as none is shared
+  across apps):
+  - Continuous: as now
+  - Two Pages: spreads 1–2, 3–4 …
+  - Two Pages with Cover: 1 alone on the right, then 2–3, 4–5 …, like a printed book
+  - Facing pages are 8 apart, spreads `PAGE_GAP` (16) apart, pages of a spread centred
+    vertically; a last odd page sits on the left. Fit Width and Fit Page fit the widest spread.
+    The navigator shows the spread's first page; ← → move a spread. Thumbnails stay one column.
+    Narrow windows keep the chosen layout.
+- **Dark Pages** (⋯ › View, a global preference, off by default, independent of Appearance):
+  pages and thumbnails are drawn inverted with hue kept, so white paper becomes `#1E1F22`, black
+  text `#E6E6E6`, and a red highlight stays red. Annotations invert with the page; chrome drawn
+  over it (selection, find matches, handles) doesn't. Pages get a 1 px `border` edge, since the
+  shadow vanishes on the dark canvas. The two colours are render constants, not tokens. Printing,
+  saving and copying are unaffected. Hidden for written documents.
+- **⌘ + scroll** (Ctrl + scroll on Windows and Linux; macOS keeps Ctrl + scroll for system
+  zoom): zooms about the pointer, ×1.1 per wheel notch, trackpad deltas proportionally, within
+  the zoom pill's range. The pill updates live; pages scale until the new rendering arrives (as
+  now), re-rendering after 150 ms without input.
+- **Keys** (when no text field has focus):
+
+  | Key | Does |
+  |---|---|
+  | Space / ⇧Space | down / up one screen, keeping 48 of overlap |
+  | Page Down / Page Up | the same (was: next / previous page) |
+  | ↓ / ↑ | scroll 48 |
+  | → / ← | next / previous page (spread), as now |
+  | Home / End, also ⌘↑ / ⌘↓ on macOS | first / last page |
+  | ⌘[ / ⌘] (Alt+← / Alt+→) | Back / Forward |
+  | ⌥⌘2 / 3 / 4 (Ctrl+Shift+2 / 3 / 4) | Pages / Outline / Comments |
+
+### Thumbnails
+
+- Virtualized, no visual change. A thumbnail not yet rendered is its `thumbnail_paper` frame at
+  the page's real aspect (size and rotation from the page list, never a fixed 1.3), with its
+  number badge and ring as usual, and clickable. No spinner or shimmer. With Dark Pages on, the
+  blank frame uses the dark paper colour.
+
+Why: Open Recent sits where people already look for it (the menu with Open… and the screen with
+Open…), and a flyout in the menu's own stack avoids a custom widget. Link confirmation shows the
+host prominently because the URL, not the button, is the decision. Back appears only once there
+is somewhere to go back to. View options live in `⋯` because they are set once per document and
+then remembered; the toolbar stays for things used every minute. Dark Pages adds two render
+constants rather than tokens because paper colour is content, not chrome.
 
 ## Writing rules
 

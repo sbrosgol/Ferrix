@@ -6,8 +6,12 @@ A fast, safe, open-source PDF reader and editor for macOS, Windows and Linux, wr
 > see the [roadmap](docs/roadmap.md).
 
 What works today:
-- **Desktop app** (`ferrix-app`): open, view and navigate PDFs with zoom, fit width/page,
-  thumbnails and light/dark themes
+- **Desktop app** (`ferrix-app`): open, view and navigate PDFs with zoom (also ⌘/Ctrl + wheel),
+  fit width/page, continuous, single-page and two-page layouts, thumbnails, the outline, links
+  with Back/Forward, password-protected files, light/dark themes and Dark Pages for reading at
+  night
+- **Remembers your place** ([ADR-0005](docs/adr/0005-settings-and-state-storage.md)): Open
+  Recent, each document's last page, zoom and layout, and your preferences
 - **Page organization**: reorder, rotate, delete and insert pages from other files, with
   undo/redo and safe incremental save / Save As
 - **Text selection**: select text on PDF pages (drag, double-click a word, triple-click a

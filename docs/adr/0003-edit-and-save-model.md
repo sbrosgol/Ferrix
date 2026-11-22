@@ -61,3 +61,10 @@ existing digital signatures or corrupt files. Engines are slow to re-render afte
 - Clean close, save, discard and quit delete the journal and its blobs.
 - Privacy: the journal holds file paths and, for unsaved new/converted documents, their
   content, in the user's own app-data directory only.
+
+## Encrypted documents (2026-11-22)
+PDFs that need a password to open are view-only: Ferrix asks for the password (ADR-0005's
+history never stores it) and shows the file, but page and annotation edits are off, so there is
+nothing to save. Writing an incremental update into an encrypted file would mean encrypting the
+new objects with the file's keys, and a mistake there would leave content readable without the
+password. Revisit when saving can keep the encryption and is tested against Acrobat and qpdf.

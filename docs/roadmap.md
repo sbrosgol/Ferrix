@@ -16,16 +16,20 @@ demo. Exit criteria are the definition of done, not the feature list.
 **Exit:** CI green on 3 OSes; CLI renders 95% of corpus without error; app skeleton runs on all 3 OSes.
 
 ## M1 — Viewer MVP (weeks 5–12) → `0.1`
-- App shell: open (dialog, drag & drop, file association, recent files), tabs.
-- `ferrix-render`: continuous/single/two-page layouts, tiled progressive rendering, zoom
-  (fit width/page, pinch, ctrl+wheel), rotation, HiDPI, memory budget.
-- Thumbnails sidebar, outline/bookmarks, internal & external links (with confirmation).
+- App shell: open (dialog, drag & drop, ~~recent files~~, file association), tabs. Open Recent is
+  done (`ferrix-store`, the `⋯` menu and the empty state); file association and tabs remain.
+- `ferrix-render`: ~~continuous/single/two-page layouts~~ (done: Continuous, Single Page, Two
+  Pages, Two Pages with Cover), tiled progressive rendering, zoom (fit width/page, ~~⌘/Ctrl +
+  wheel~~; pinch needs iced support), rotation, HiDPI, memory budget.
+- ~~Thumbnails sidebar~~ (virtualized, no page cap), ~~outline/bookmarks~~ (Outline tab),
+  ~~internal & external links (with confirmation)~~, plus Back/Forward.
 - ~~Text selection + copy~~ (done with ADR-0009 phase 3: `ferrix-text`, single page; drag,
   double/triple click, ⌘A/⌘C); ~~find-in-document with streaming results~~ (done:
   `ferrix_text::Query` and `PageText::find`, the app's PDF find bar; see architecture §5.5).
-- Password-protected PDFs, light/dark/system theme, page-inversion reading mode.
+- ~~Password-protected PDFs~~ (opened read-only until saving can keep their encryption),
+  light/dark/system theme, ~~page-inversion reading mode~~ (Dark Pages).
 - Keyboard navigation and basic a11y for chrome.
-- `ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom.
+- ~~`ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom~~.
 
 **Exit:** first paint < 300 ms on 1,000-page doc; 60+ fps scroll; zero crashes on corpus in a
 1-hour soak; screen reader can operate all chrome.

@@ -31,6 +31,7 @@ ferrix-pdf.workspace = true
 ferrix-text.workspace = true
 lopdf.workspace = true
 ferrix-print.workspace = true
+ferrix-store.workspace = true
 ferrix-types.workspace = true
 iced.workspace = true
 resvg.workspace = true

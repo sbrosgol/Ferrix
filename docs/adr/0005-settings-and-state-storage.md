@@ -1,6 +1,6 @@
 # ADR-0005: Storage for preferences and per-document state
 
-- Status: **Proposed**
+- Status: **Accepted** (implemented 2026-11-22)
 - Date: 2026-11-15
 
 ## Context
@@ -45,3 +45,27 @@ Use the right tool for each:
 - − `rusqlite` with `bundled` adds a C compile step (cc) and ~1 MB to the binary.
 - Privacy: `state.db` contains file paths and search terms; it gets a "Clear history" action
   and is never included in exported diagnostics.
+
+## Implementation notes (2026-11-22)
+- `crates/ferrix-store`: `Settings` (JSON) and `Store` (SQLite via `rusqlite` 0.43, `bundled`;
+  new dependencies are MIT/Apache, SQLite itself public domain). The app's side is
+  `ferrix-app/src/prefs.rs`: settings are read at startup and saved in the background whenever an
+  update changes one (`App::save_settings` compares after every message); history writes run on a
+  background thread, and the one read needed before the first paint (`Store::view`) is a single
+  indexed row on the UI thread.
+- **Locations:** `settings.json` in `ferrix_io::app_config_dir()` (macOS Application Support,
+  Windows `%APPDATA%`, XDG config on Linux) and `state.db` in `app_data_dir()`. The `directories`
+  crate was not needed. `FERRIX_DATA_DIR` overrides both, so tests and screenshots never touch
+  the user's files.
+- **Settings:** appearance, author name, sidebar shown, Dark Pages, last layout and zoom, and
+  `restore_position`. Each field parses on its own, so one bad value costs only that field; keys
+  from a newer version are kept on save and the version never goes down. Reloading on external
+  change is not done yet.
+- **History:** one `documents` table keyed by path (not content fingerprint yet: hashing large
+  files on every open costs more than it saves; a renamed file starts fresh). It stores the last
+  open time, page, offset within it, zoom and layout. It keeps 1000 rows, and Open Recent shows
+  the 10 newest that still exist. A file that isn't a database is moved to `state.db.broken` and
+  replaced. Clear Recent deletes every row. Schema migrations are numbered by `PRAGMA user_version`.
+- **When positions are saved:** when a document closes (opening another, or recovery) and,
+  synchronously, on quit. A crash loses the position, which is acceptable.
+

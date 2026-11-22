@@ -28,6 +28,7 @@ The only expected warning is the `block v0.1.6` future-incompatibility note from
 | `ferrix-core` | PDF edit model: pages (`PageList`, `Edit`), annotations (`AnnotSet`, `AnnotEdit`), both in `DocState`/`DocEdit`; generic `History` |
 | `ferrix-annot` | annotations (ADR-0009): read into the model, appearance display list, text boxes via `ferrix-compose`/krilla, write into a `Revision` |
 | `ferrix-text` | page text from PDFium: caret hit-testing, words, lines, selection, copied text, highlight quads |
+| `ferrix-store` | preferences (`settings.json`) and history (`state.db`: recent files, positions), ADR-0005 |
 | `ferrix-io` | atomic writes, `FileStamp`, crash-recovery journal frames, `app_data_dir` (`FERRIX_DATA_DIR` overrides) |
 | `ferrix-print` | native print dialogs; the only crate with `unsafe` (confined platform modules) |
 | `ferrix-convert` | images and Office files → PDF via Word/LibreOffice |

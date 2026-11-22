@@ -461,6 +461,15 @@ pub fn icon_colored(color: fn(&Tokens) -> Color) -> impl Fn(&Theme, svg::Status)
 
 // ── Inputs ────────────────────────────────────────────────────────────────────
 
+/// An input whose value was refused (a wrong password): a `danger` outline.
+pub fn input_error(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let t = tokens(theme);
+    text_input::Style {
+        border: border(t.danger, 1.0, RADIUS),
+        ..input(theme, status)
+    }
+}
+
 pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let t = tokens(theme);
     let border_color = match status {
