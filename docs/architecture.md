@@ -212,6 +212,25 @@ Canvas draws, per page:  [best available cached tile, scaled] → [exact tile wh
 - Color management: render in sRGB v1; ICC/output-intent aware later.
 - High-DPI: tiles keyed by device-pixel scale; per-monitor DPI changes invalidate by key.
 
+**As built (2026-11-22):** `crates/ferrix-render` holds the UI-free parts (tile grid, banded
+batches, splitting, a byte-bounded LRU `TileCache`); `ferrix-app/src/tiling.rs` schedules and
+`page_paper.rs` draws.
+- A page whose longest on-screen edge is at most 3072 device px renders whole in one engine call,
+  as before. Larger pages get a whole-page base (longest edge 1536 px, or any earlier rendering)
+  and sharp tiles of the part in view plus half a tile around it.
+- Tiles are 512 px, not 256: each is under iced's synchronous upload limit, and PDFium
+  interprets the whole page on every call, so fewer, larger requests win. Missing tiles are
+  rendered in bands of up to 6 × 2 per call and cut into tiles on the engine thread.
+- One request is in flight. Priority: whole images of visible pages (so nothing is blank), then
+  their tiles, then whole images of the neighbours. A result for a stale view still lands in the
+  cache; the next request is computed from the view as it is then.
+- Tiles are keyed by page, level (source document, rotation, device scale, Dark Pages) and cell,
+  so zoom, scale-factor, preview and rotation changes never mix tiles. The cache keeps 192 MB,
+  evicting the least recently drawn first and never a tile on screen.
+- Zooming keeps the previous rendering stretched until sharp tiles arrive; maximum zoom is now
+  800 %. Not yet: drawing old-level tiles while new ones render, a GPU-texture budget, and
+  cancelling in-flight requests.
+
 ### 5.4 Document session & command model (`ferrix-core`)
 
 ```rust

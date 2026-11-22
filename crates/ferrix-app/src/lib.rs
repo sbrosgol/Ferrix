@@ -9,6 +9,7 @@ mod icon;
 pub mod markup;
 pub mod markup_canvas;
 mod navigate;
+mod page_paper;
 mod pdf_find;
 mod prefs;
 #[cfg(windows)]
@@ -19,6 +20,7 @@ mod strip;
 mod text_select;
 pub mod theme;
 mod thumbs;
+mod tiling;
 mod titlebar;
 mod view;
 mod view_markup;
@@ -29,7 +31,7 @@ mod writer_canvas;
 
 use std::path::PathBuf;
 
-pub use app::{App, Appearance, Layout, Message, Recovery};
+pub use app::{App, Appearance, Layout, Message, Recovery, ZoomChoice};
 pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};

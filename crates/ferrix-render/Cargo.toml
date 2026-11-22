@@ -1,0 +1,15 @@
+[package]
+name = "ferrix-render"
+description = "Tile grid, render batching and a byte-bounded tile cache for Ferrix's page view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ferrix-types.workspace = true
+
+[lints]
+workspace = true

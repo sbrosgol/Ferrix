@@ -117,6 +117,8 @@ pub(crate) struct Shown {
     pub(crate) zoom: f32,
     pub(crate) scale_factor: f32,
     pub(crate) image: PageImage,
+    /// A low-resolution base under tiles, rather than the exact page.
+    pub(crate) base: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +152,10 @@ pub(crate) struct Document {
     /// Rendered pages near the view.
     pub(crate) images: HashMap<PageKey, Shown>,
     pub(crate) render_busy: bool,
+    /// Sharp tiles of pages too large to render whole.
+    pub(crate) tiles: ferrix_render::TileCache<crate::render::TileKey, crate::render::Tile>,
+    /// Horizontal scroll position of the page view, in logical pixels.
+    pub(crate) scroll_x: f32,
     /// Pages the engine couldn't render; shown blank and not tried again, so the error
     /// appears once rather than every time the page scrolls into view.
     pub(crate) render_failed: BTreeSet<PageKey>,
@@ -204,6 +210,8 @@ impl Document {
             scroll_within: 0.0,
             images: HashMap::new(),
             render_busy: false,
+            tiles: ferrix_render::TileCache::default(),
+            scroll_x: 0.0,
             render_failed: BTreeSet::new(),
             thumbnails: HashMap::new(),
             thumbnail_busy: false,

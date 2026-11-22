@@ -22,6 +22,7 @@ ferrix-engine-pdfium = { path = "crates/ferrix-engine-pdfium" }
 ferrix-io = { path = "crates/ferrix-io" }
 ferrix-pdf = { path = "crates/ferrix-pdf" }
 ferrix-print = { path = "crates/ferrix-print" }
+ferrix-render = { path = "crates/ferrix-render" }
 ferrix-store = { path = "crates/ferrix-store" }
 ferrix-text = { path = "crates/ferrix-text" }
 unicode-normalization = "0.1.26"

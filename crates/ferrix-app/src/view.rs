@@ -670,9 +670,41 @@ impl App {
         let entries = doc.state.pages.entries();
         let page = |i: usize| -> Element<'a, Message> {
             let (entry, size) = (&entries[i], strip.sizes[i]);
-            let paper: Element<'a, Message> = match doc.images.get(&entry.key) {
-                Some(shown) if shown.rotation == entry.rotation => tiles_at(&shown.image, size),
-                _ => Space::new().width(size.width).height(size.height).into(),
+            let whole = doc
+                .images
+                .get(&entry.key)
+                .filter(|shown| shown.rotation == entry.rotation)
+                .map(|shown| &shown.image);
+            // Sharp tiles of a large page, placed in page logical pixels.
+            let tiles: Vec<(iced::Rectangle, iced::widget::image::Handle)> = self
+                .tile_plan(doc, i)
+                .map(|plan| {
+                    let (sx, sy) = (
+                        size.width / plan.grid.width as f32,
+                        size.height / plan.grid.height as f32,
+                    );
+                    plan.keys(entry.key)
+                        .filter_map(|k| doc.tiles.peek(&k))
+                        .map(|t| {
+                            let r = t.rect;
+                            (
+                                iced::Rectangle::new(
+                                    iced::Point::new(r.x as f32 * sx, r.y as f32 * sy),
+                                    iced::Size::new(r.width as f32 * sx, r.height as f32 * sy),
+                                ),
+                                t.handle.clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let paper: Element<'a, Message> = if whole.is_none() && tiles.is_empty() {
+                Space::new().width(size.width).height(size.height).into()
+            } else {
+                iced::widget::canvas(crate::page_paper::PagePaper { whole, tiles })
+                    .width(size.width)
+                    .height(size.height)
+                    .into()
             };
             self.page_layers(doc, entry, size, container(paper).style(theme::page).into())
         };
@@ -707,7 +739,10 @@ impl App {
         };
         let scroll = scroll
             .id(page_scroll_id())
-            .on_scroll(|viewport| Message::PageScrolled(viewport.absolute_offset().y))
+            .on_scroll(|viewport| {
+                let offset = viewport.absolute_offset();
+                Message::PageScrolled(offset.y, offset.x)
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::scrollbar);
