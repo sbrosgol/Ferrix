@@ -9,12 +9,14 @@
 mod create;
 mod inspect;
 mod layout;
+mod rights;
 
 pub use create::{ImageData, ImagePage, PaperSize, blank_document, image_document};
 pub use inspect::{ContentDigest, content_digest, embedded_file, page_transforms};
 pub use layout::{LayoutPage, Revision, load, write_page_layout};
 /// The lopdf version this crate's API exposes, for crates that build objects for a [`Revision`].
 pub use lopdf;
+pub use rights::{EditRights, edit_rights};
 
 /// No single stream may inflate beyond this while parsing (defends against decompression bombs).
 const MAX_STREAM_BYTES: usize = 256 * 1024 * 1024;

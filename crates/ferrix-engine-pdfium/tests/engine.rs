@@ -7,7 +7,9 @@
 
 mod fixtures;
 
-use ferrix_engine::{DocSource, EngineError, PdfEngine, RenderFlags, TileRequest};
+use ferrix_engine::{
+    Destination, DocSource, EngineError, LinkTarget, PdfEngine, RenderFlags, TileRequest,
+};
 use ferrix_engine_pdfium::PdfiumEngine;
 use ferrix_types::{DocId, PageIndex, PixelRect, Point, Rotation, Size};
 use fixtures::Page;
@@ -236,6 +238,54 @@ fn reads_outline() {
             ("Page 3", Some(PageIndex(2))),
         ]
     );
+}
+
+#[test]
+fn reads_links_in_page_space() {
+    let Some(mut engine) = engine() else { return };
+    let first = Page::letter()
+        // A GoTo action to the top 92 pt down page 3 ("XYZ" left 0, top 700).
+        .annotated(
+            "<< /Type /Annot /Subtype /Link /Rect [72 600 172 620] \
+             /A << /S /GoTo /D [{page:2} /XYZ 0 700 0] >> >>",
+        )
+        // A bare /Dest to page 2, whole page.
+        .annotated("<< /Type /Annot /Subtype /Link /Rect [72 500 172 520] /Dest [{page:1} /Fit] >>")
+        .annotated(
+            "<< /Type /Annot /Subtype /Link /Rect [72 400 172 420] \
+             /A << /S /URI /URI (https://example.com/a) >> >>",
+        )
+        // Launch actions are never offered.
+        .annotated(
+            "<< /Type /Annot /Subtype /Link /Rect [72 300 172 320] \
+             /A << /S /Launch /F (calc.exe) >> >>",
+        );
+    let doc = open(&mut engine, &[first, Page::letter(), Page::letter()]);
+    let links = engine.links(doc, PageIndex(0)).unwrap();
+    assert_eq!(links.len(), 3, "{links:?}");
+
+    assert_eq!(
+        links[0].target,
+        LinkTarget::Page(Destination {
+            page: PageIndex(2),
+            top: Some(92.0)
+        })
+    );
+    // /Rect [72 600 172 620] on a Letter page is 172..192 pt from the top.
+    let r = links[0].rect;
+    assert_eq!((r.x0, r.y0, r.x1, r.y1), (72.0, 172.0, 172.0, 192.0));
+    assert_eq!(
+        links[1].target,
+        LinkTarget::Page(Destination {
+            page: PageIndex(1),
+            top: None
+        })
+    );
+    assert_eq!(
+        links[2].target,
+        LinkTarget::Uri("https://example.com/a".into())
+    );
+    assert!(engine.links(doc, PageIndex(1)).unwrap().is_empty());
 }
 
 #[test]

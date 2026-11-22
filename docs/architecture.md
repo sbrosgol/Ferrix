@@ -212,6 +212,25 @@ Canvas draws, per page:  [best available cached tile, scaled] → [exact tile wh
 - Color management: render in sRGB v1; ICC/output-intent aware later.
 - High-DPI: tiles keyed by device-pixel scale; per-monitor DPI changes invalidate by key.
 
+**As built (2026-11-22):** `crates/ferrix-render` holds the UI-free parts (tile grid, banded
+batches, splitting, a byte-bounded LRU `TileCache`); `ferrix-app/src/tiling.rs` schedules and
+`page_paper.rs` draws.
+- A page whose longest on-screen edge is at most 3072 device px renders whole in one engine call,
+  as before. Larger pages get a whole-page base (longest edge 1536 px, or any earlier rendering)
+  and sharp tiles of the part in view plus half a tile around it.
+- Tiles are 512 px, not 256: each is under iced's synchronous upload limit, and PDFium
+  interprets the whole page on every call, so fewer, larger requests win. Missing tiles are
+  rendered in bands of up to 6 × 2 per call and cut into tiles on the engine thread.
+- One request is in flight. Priority: whole images of visible pages (so nothing is blank), then
+  their tiles, then whole images of the neighbours. A result for a stale view still lands in the
+  cache; the next request is computed from the view as it is then.
+- Tiles are keyed by page, level (source document, rotation, device scale, Dark Pages) and cell,
+  so zoom, scale-factor, preview and rotation changes never mix tiles. The cache keeps 192 MB,
+  evicting the least recently drawn first and never a tile on screen.
+- Zooming keeps the previous rendering stretched until sharp tiles arrive; maximum zoom is now
+  800 %. Not yet: drawing old-level tiles while new ones render, a GPU-texture budget, and
+  cancelling in-flight requests.
+
 ### 5.4 Document session & command model (`ferrix-core`)
 
 ```rust
@@ -327,6 +346,26 @@ Communication via channels (`tokio::sync::mpsc`, `watch` for view state). Every 
 | UI | Core is tested headless; a small set of end-to-end smoke tests drive the app via AccessKit |
 | Performance | `criterion` benches + CI perf budget on: open time, first paint, tile render p95, search throughput, RSS |
 
+**As built (2026-11-22):**
+- **Corpus:** `cargo xtask corpus` downloads 120 pdf.js test PDFs, pinned by commit and SHA-256
+  in `tests/corpus/manifest.txt` (plain text, not TOML). It also writes 68 generated files:
+  1 000 and 5 000 pages, mixed sizes and rotations, a 200-inch page, 2 000 annotations,
+  truncated and broken structures, 40 seeded byte-flip variants, and the qpdf-encrypted test
+  files. Everything goes to `tests/corpus/files/`, which is git-ignored.
+- **Soak:** `cargo xtask soak [--minutes 60]` runs `ferrix stress` on every file, each in its
+  own process, round after round. It renders thumbnails, pages and 400 % tiles, reads text,
+  links, annotations and the outline, parses with lopdf, and saves an annotation and reads it
+  back. A refusal passes; a crash, panic or hang (timeout) fails and names the file. The report
+  goes to `target/soak-report.json`.
+- **Bench:** `cargo xtask bench` runs the release `bench` example of `ferrix-app` and checks the
+  M1 criteria:
+  - first paint: the app's own `ferrix::perf` event, from asking to open to the first page drawn
+  - frame: update, view, layout and draw-recording of scroll steps on a headless renderer;
+    rasterizing is not counted
+  - per-page render time
+  It doesn't use `criterion`, since these are end-to-end timings rather than microbenchmarks.
+  Run it on a quiet machine.
+
 CI: GitHub Actions matrix (macOS arm64/x64, Windows x64/arm64, Ubuntu), `clippy -D warnings`,
 `rustfmt`, `cargo-deny` (licenses/advisories), `cargo-semver-checks` for library crates, MSRV pin.
 
@@ -371,4 +410,7 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 2. ~~UI toolkit~~ — **decided: iced** (ADR-0002); accessibility tracked as the top risk.
 3. Minimum OS versions (proposal: macOS 12+, Windows 10 22H2+, glibc 2.31+ / Flatpak runtime).
 4. Do we need XFA dynamic forms at all? (Proposal: no; show a clear notice.)
-5. Tabs vs. one window per document vs. both (proposal: tabs + "move to new window").
+5. ~~Tabs vs. one window per document~~ — **decided: tabs** in one window (2026-11-22; design
+   system › Viewer (M1) › Tabs). The active tab's document lives in the app's usual fields and
+   the others are parked (`ferrix-app/src/tabs.rs`); results for a parked document are dropped
+   and asked for again when it becomes active. "Move to new window" is not planned yet.

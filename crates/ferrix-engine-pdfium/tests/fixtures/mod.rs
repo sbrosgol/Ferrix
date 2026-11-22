@@ -9,6 +9,9 @@ pub(crate) struct Page {
     pub(crate) content: String,
     /// Put the boxes and rotation on the page-tree root, for the page to inherit.
     pub(crate) inherit: bool,
+    /// Annotation dictionaries, written inline in `/Annots`. `{page:N}` becomes a reference to
+    /// page N of the fixture.
+    pub(crate) annots: Vec<String>,
 }
 
 impl Page {
@@ -20,7 +23,13 @@ impl Page {
             rotate: 0,
             content: "1 0 0 rg 0 0 100 100 re f\nBT /F1 24 Tf 0 g 72 700 Td (Hello) Tj ET".into(),
             inherit: false,
+            annots: Vec::new(),
         }
+    }
+
+    pub(crate) fn annotated(mut self, annot: &str) -> Self {
+        self.annots.push(annot.to_owned());
+        self
     }
 
     /// Moves this page's boxes and rotation onto the page-tree root (one such page per fixture).
@@ -89,8 +98,20 @@ pub(crate) fn pdf(title: &str, pages: &[Page]) -> Vec<u8> {
         } else {
             boxes(page)
         };
+        let annots = if page.annots.is_empty() {
+            String::new()
+        } else {
+            let mut list = page.annots.join(" ");
+            for target in 0..pages.len() {
+                list = list.replace(
+                    &format!("{{page:{target}}}"),
+                    &format!("{} 0 R", page_obj(target)),
+                );
+            }
+            format!(" /Annots [{list}]")
+        };
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R{own} \
+            "<< /Type /Page /Parent 2 0 R{own}{annots} \
              /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
             n + 1
         ));

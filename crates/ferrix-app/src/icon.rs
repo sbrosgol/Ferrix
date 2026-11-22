@@ -63,6 +63,14 @@ pub(crate) enum Icon {
     Stamp,
     UnderlineWavy,
     Copy,
+    Pages,
+    Outline,
+    ChevronDown,
+    Back,
+    Eye,
+    EyeOff,
+    Plus,
+    FileWriting,
 }
 
 macro_rules! icons {
@@ -138,6 +146,14 @@ icons! {
     Stamp => "stamp",
     UnderlineWavy => "underline-wavy",
     Copy => "copy",
+    Pages => "gallery-vertical-end",
+    Outline => "list-tree",
+    ChevronDown => "chevron-down",
+    Back => "arrow-left",
+    Eye => "eye",
+    EyeOff => "eye-off",
+    Plus => "plus",
+    FileWriting => "file-pen-line",
 }
 
 fn load(source: &str) -> svg::Handle {

@@ -1,5 +1,7 @@
 //! `ferrix` — headless access to the Ferrix engine for scripting, debugging and tests.
 
+mod stress;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -96,6 +98,13 @@ enum Command {
     Source {
         /// PDF file.
         file: PathBuf,
+    },
+    /// Run one document through rendering, text, links, parsing and a save, printing one JSON
+    /// line. Used by `cargo xtask soak`; a crash or hang is the failure it looks for.
+    #[command(hide = true)]
+    Stress {
+        #[command(flatten)]
+        doc: DocArgs,
     },
     /// List, add or remove annotations. Coordinates are PDF points from the page's
     /// bottom-left corner, as stored in the file (unrotated).
@@ -240,6 +249,7 @@ fn main() -> Result<()> {
                 },
         } => annotate_remove(&mut engine, &doc, page, index, &output),
         Command::Info { doc, json } => info(&mut engine, &doc, json),
+        Command::Stress { doc } => stress::run(&mut engine, &doc.file, doc.password.as_deref()),
         Command::Render {
             doc,
             pages,
@@ -437,10 +447,18 @@ fn organize(
         bytes: &bytes,
         password: args.password.as_deref(),
     };
+    if !ferrix_pdf::edit_rights(source)?.assemble {
+        bail!(
+            "the document's permissions don't allow changing its pages; give its owner password \
+             with --password to override them"
+        );
+    }
     let out = ferrix_pdf::write_page_layout(source, &[], &layout)?;
 
-    // Check the result with the rendering engine before writing it anywhere.
-    let check = engine.open(DocSource::Bytes(out.clone()), None)?;
+    // Check the result with the rendering engine before writing it anywhere. An encrypted
+    // file stays encrypted, so the check needs the same password.
+    let password = args.password.as_deref().map(Secret::new);
+    let check = engine.open(DocSource::Bytes(out.clone()), password.as_ref())?;
     if check.page_count as usize != layout.len() {
         bail!(
             "verification failed: wrote {} pages, expected {}",
@@ -578,6 +596,12 @@ fn save_annotations(
         bytes,
         password: args.password.as_deref(),
     };
+    if !ferrix_pdf::edit_rights(source)?.annotate {
+        bail!(
+            "the document's permissions don't allow adding or changing annotations; give its \
+             owner password with --password to override them"
+        );
+    }
     let mut revision = ferrix_pdf::Revision::new(source, &[])?;
     let now = ferrix_annot::pdf_date(std::time::SystemTime::now());
     let report = ferrix_annot::write_annotations(&mut revision, &state.pages, &state.annots, &now)?;

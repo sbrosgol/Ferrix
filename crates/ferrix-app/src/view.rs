@@ -14,10 +14,10 @@ use ferrix_compose::{Align, ListKind, Toggle};
 use crate::{
     app::{
         App, Choice, FindState, MAX_ZOOM, MIN_ZOOM, Message, NewForm, ORIENTATIONS, PAPERS,
-        PageSetupForm, Recovery, THUMB_WIDTH, ZOOM_CHOICES, Zoom, ZoomChoice, find_input_id,
-        page_scroll_id, sidebar_scroll_id, writer_scroll_id,
+        PageSetupForm, Recovery, ZOOM_CHOICES, Zoom, ZoomChoice, find_input_id, page_scroll_id,
+        sidebar_scroll_id, writer_scroll_id,
     },
-    document::{Document, MAX_THUMBNAILS},
+    document::Document,
     icon::Icon,
     recovery::{Recoverable, describe},
     render::LOGICAL_PX_PER_POINT,
@@ -80,7 +80,12 @@ impl App {
             _ => main,
         };
 
-        let mut window = column![self.toolbar(), horizontal_divider()];
+        // The tab bar joins the toolbar with no hairline between, so they read as one header.
+        let mut window = column![self.toolbar()];
+        if let Some(tabs) = self.tab_bar() {
+            window = window.push(tabs);
+        }
+        let mut window = window.push(horizontal_divider());
         if let (Some(doc), Some(_)) = (&self.doc, &self.markup) {
             window = window.push(self.markup_bar(doc)).push(horizontal_divider());
         }
@@ -120,6 +125,15 @@ impl App {
         }
         if let Some(form) = &self.page_setup {
             return stack![window, page_setup_dialog(form)].into();
+        }
+        if let Some(names) = &self.quit_summary {
+            return stack![window, self.quit_summary_dialog(names)].into();
+        }
+        if let Some(prompt) = &self.password {
+            return stack![window, self.password_dialog(prompt)].into();
+        }
+        if let Some(uri) = &self.link_prompt {
+            return stack![window, self.link_dialog(uri)].into();
         }
         if self.menu_open {
             return stack![window, self.overflow_menu()].into();
@@ -409,6 +423,24 @@ impl App {
                 .push(item("New Document…", false, Message::NewDialog))
                 .push(item("Open…", false, Message::OpenDialog));
         }
+        items = items.push(
+            button(
+                row![
+                    Space::new().width(14),
+                    text("Open Recent").size(13).width(Length::Fill),
+                    svg(Icon::ChevronRight.handle())
+                        .width(12)
+                        .height(12)
+                        .style(theme::icon_colored(|t| t.text_muted)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(theme::menu_item(self.recent_open))
+            .on_press_maybe((!self.recent.is_empty()).then_some(Message::ToggleRecent)),
+        );
         if open && self.busy.is_none() {
             items = items.push(item("Print…", false, Message::Print));
         }
@@ -425,7 +457,15 @@ impl App {
                     Message::FitPage,
                 ));
         }
-        if is_compact(width) || open {
+        items = items.push(container(horizontal_divider()).padding([4, 0]));
+        if self.doc.is_some() && self.writer.is_none() {
+            items = items.push(
+                container(text("View").size(11).font(SEMIBOLD).style(theme::overline))
+                    .padding([4, 8]),
+            );
+            for view_item in self.view_menu_items(item) {
+                items = items.push(view_item);
+            }
             items = items.push(container(horizontal_divider()).padding([4, 0]));
         }
         items = items.push(
@@ -450,10 +490,19 @@ impl App {
                 .push(item("Page Setup…", false, Message::PageSetupDialog));
         }
         let panel = container(items).width(220).padding(6).style(theme::popover);
+        // Open Recent opens as a second panel to the left of the menu.
+        let panel: Element<'_, Message> = if self.recent_open {
+            row![opaque(self.recent_flyout()), opaque(panel)]
+                .spacing(4)
+                .align_y(Alignment::Start)
+                .into()
+        } else {
+            opaque(panel)
+        };
         stack![
             mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::ToggleMenu),
-            container(opaque(panel))
+            container(panel)
                 .width(Length::Fill)
                 .align_x(Alignment::End)
                 .padding(iced::Padding {
@@ -541,58 +590,73 @@ impl App {
         .width(Length::Fill)
         .padding([10, 12]);
 
-        let thumbs = doc
-            .state
-            .pages
-            .entries()
-            .iter()
-            .take(MAX_THUMBNAILS)
-            .enumerate()
-            .map(|(i, entry)| {
-                let selected = doc.selection.contains(&entry.key);
-                let current = i == doc.current;
-                let paper: Element<'_, Message> = match doc.thumbnails.get(&entry.key) {
-                    Some(thumb) => tiles(&thumb.image),
-                    None => Space::new()
-                        .width(THUMB_WIDTH)
-                        .height(THUMB_WIDTH * 1.3)
-                        .into(),
-                };
-                let label = container(text((i + 1).to_string()).size(11).font(if current {
-                    SEMIBOLD
-                } else {
-                    theme::UI_FONT
-                }))
-                .padding([1, 7])
-                .style(move |theme| theme::page_badge(theme, current));
-                let ring = container(container(paper).style(theme::thumbnail_paper))
-                    .padding(3)
-                    .style(move |theme| theme::thumbnail_ring(theme, selected));
-                button(column![ring, label].spacing(6).align_x(Alignment::Center))
-                    .on_press(Message::ThumbnailClicked(entry.key))
-                    .padding(0)
-                    .style(theme::plain)
-                    .into()
-            });
-        let list = column(thumbs)
-            .spacing(16)
-            .padding(iced::Padding {
-                top: 4.0,
-                right: 0.0,
-                bottom: 16.0,
-                left: 0.0,
-            })
-            .width(Length::Fill)
-            .align_x(Alignment::Center);
+        // Only thumbnails near the visible part are built; spacers stand in for the rest.
+        let column_layout = doc.thumb_column();
+        let near = column_layout.near(doc.thumb_scroll, doc.thumb_view);
+        let entries = doc.state.pages.entries();
+        let thumb = |i: usize| -> Element<'a, Message> {
+            let entry = &entries[i];
+            let selected = doc.selection.contains(&entry.key);
+            let current = i == doc.current;
+            let size = column_layout.papers[i];
+            let paper: Element<'_, Message> = match doc.thumbnails.get(&entry.key) {
+                Some(thumb) => tiles_at(&thumb.image, size),
+                None => Space::new().width(size.width).height(size.height).into(),
+            };
+            let label = container(text((i + 1).to_string()).size(11).font(if current {
+                SEMIBOLD
+            } else {
+                theme::UI_FONT
+            }))
+            .padding([1, 7])
+            .style(move |theme| theme::page_badge(theme, current));
+            let ring = container(container(paper).style(theme::thumbnail_paper))
+                .padding(crate::thumbs::RING)
+                .style(move |theme| theme::thumbnail_ring(theme, selected));
+            button(
+                column![
+                    ring,
+                    container(label)
+                        .height(crate::thumbs::LABEL_HEIGHT)
+                        .center_y(crate::thumbs::LABEL_HEIGHT)
+                ]
+                .spacing(crate::thumbs::LABEL_GAP)
+                .align_x(Alignment::Center),
+            )
+            .on_press(Message::ThumbnailClicked(entry.key))
+            .padding(0)
+            .style(theme::plain)
+            .into()
+        };
+        let mut list = column![].width(Length::Fill).align_x(Alignment::Center);
+        if let Some(&first) = column_layout.tops.get(near.start) {
+            list = list.push(Space::new().height(first));
+        }
+        let shown = near.clone();
+        for i in near {
+            list = list.push(thumb(i));
+            let gap = if i + 1 < shown.end {
+                crate::thumbs::GAP
+            } else {
+                // The rest of the column below, so the scrollbar spans the whole document.
+                column_layout.height - column_layout.bottom(i)
+            };
+            list = list.push(Space::new().height(gap));
+        }
 
         let body: Element<'a, Message> =
             if self.sidebar_tab == crate::annotate_ui::SidebarTab::Comments {
                 self.comments_list(doc)
+            } else if self.sidebar_tab == crate::annotate_ui::SidebarTab::Outline {
+                self.outline_list(doc)
             } else {
                 column![
                     scrollable(list)
                         .direction(scrollable::Direction::Vertical(thin_scrollbar()))
                         .id(sidebar_scroll_id())
+                        .on_scroll(|v| {
+                            Message::ThumbsScrolled(v.absolute_offset().y, v.bounds().height)
+                        })
                         .height(Length::Fill)
                         .style(theme::scrollbar),
                     horizontal_divider(),
@@ -611,20 +675,62 @@ impl App {
     /// rendered at another zoom are scaled until their new rendering arrives.
     fn page_view<'a>(&'a self, doc: &'a Document) -> Element<'a, Message> {
         let strip = &doc.strip;
-        let pages = doc
-            .state
-            .pages
-            .entries()
-            .iter()
-            .zip(&strip.sizes)
-            .map(|(entry, &size)| {
-                let paper: Element<'a, Message> = match doc.images.get(&entry.key) {
-                    Some(shown) if shown.rotation == entry.rotation => tiles_at(&shown.image, size),
-                    _ => Space::new().width(size.width).height(size.height).into(),
-                };
-                self.page_layers(doc, entry, size, container(paper).style(theme::page).into())
-            });
-        let column = column(pages)
+        let entries = doc.state.pages.entries();
+        let page = |i: usize| -> Element<'a, Message> {
+            let (entry, size) = (&entries[i], strip.sizes[i]);
+            let whole = doc
+                .images
+                .get(&entry.key)
+                .filter(|shown| shown.rotation == entry.rotation)
+                .map(|shown| &shown.image);
+            // Sharp tiles of a large page, placed in page logical pixels.
+            let tiles: Vec<(iced::Rectangle, iced::widget::image::Handle)> = self
+                .tile_plan(doc, i)
+                .map(|plan| {
+                    let (sx, sy) = (
+                        size.width / plan.grid.width as f32,
+                        size.height / plan.grid.height as f32,
+                    );
+                    plan.keys(entry.key)
+                        .filter_map(|k| doc.tiles.peek(&k))
+                        .map(|t| {
+                            let r = t.rect;
+                            (
+                                iced::Rectangle::new(
+                                    iced::Point::new(r.x as f32 * sx, r.y as f32 * sy),
+                                    iced::Size::new(r.width as f32 * sx, r.height as f32 * sy),
+                                ),
+                                t.handle.clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let paper: Element<'a, Message> = if whole.is_none() && tiles.is_empty() {
+                Space::new().width(size.width).height(size.height).into()
+            } else {
+                iced::widget::canvas(crate::page_paper::PagePaper { whole, tiles })
+                    .width(size.width)
+                    .height(size.height)
+                    .into()
+            };
+            self.page_layers(doc, entry, size, container(paper).style(theme::page).into())
+        };
+        let cover = self.layout == crate::app::Layout::TwoPagesCover;
+        let rows = strip.rows.iter().map(|pages| -> Element<'a, Message> {
+            if cover && pages.start == 0 && pages.len() == 1 && strip.rows.len() > 1 {
+                // Like a printed book, the cover is a right-hand page.
+                row![Space::new().width(strip.sizes[0].width + PAGE_GAP), page(0)].into()
+            } else if pages.len() == 1 {
+                page(pages.start)
+            } else {
+                row(pages.clone().map(page))
+                    .spacing(PAGE_GAP)
+                    .align_y(Alignment::Center)
+                    .into()
+            }
+        });
+        let column = column(rows)
             .spacing(PAGE_GAP)
             .padding(PAGE_MARGIN)
             .align_x(Alignment::Center);
@@ -641,7 +747,10 @@ impl App {
         };
         let scroll = scroll
             .id(page_scroll_id())
-            .on_scroll(|viewport| Message::PageScrolled(viewport.absolute_offset().y))
+            .on_scroll(|viewport| {
+                let offset = viewport.absolute_offset();
+                Message::PageScrolled(offset.y, offset.x)
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::scrollbar);
@@ -737,11 +846,20 @@ impl App {
         ]
         .spacing(10)
         .align_x(Alignment::Center);
+        let content = match self.recent_section() {
+            Some(recent) => content.push(Space::new().height(14)).push(recent),
+            None => content,
+        };
 
-        container(content)
-            .center(Length::Fill)
-            .style(theme::canvas)
-            .into()
+        // A short window scrolls the empty state rather than squeezing it.
+        container(
+            scrollable(container(content).center_x(Length::Fill).padding([24, 0]))
+                .direction(scrollable::Direction::Vertical(thin_scrollbar()))
+                .style(theme::scrollbar),
+        )
+        .center(Length::Fill)
+        .style(theme::canvas)
+        .into()
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
@@ -765,6 +883,10 @@ impl App {
                 .align_y(Alignment::Center)
                 .into(),
             )
+        } else if let Some(hint) = &self.link_hint {
+            muted(hint.as_str(), 12.0)
+                .wrapping(text::Wrapping::None)
+                .into()
         } else if let Some(notice) = &self.notice {
             dismissible(
                 muted(one_line(notice), 12.0)
@@ -795,17 +917,18 @@ impl App {
             Space::new().into()
         };
         // The toolbar shows a PDF's page; a written document's page is only shown here.
-        let right = match &self.writer {
-            Some(w) => format!("Page {} of {}", w.current_page() + 1, w.page_count()),
-            None => String::new(),
+        let right: Element<'_, Message> = match &self.writer {
+            Some(w) => muted(
+                format!("Page {} of {}", w.current_page() + 1, w.page_count()),
+                12.0,
+            )
+            .into(),
+            None => self.back_button().unwrap_or_else(|| Space::new().into()),
         };
         container(
-            row![
-                container(left).width(Length::Fill).clip(true),
-                muted(right, 12.0)
-            ]
-            .spacing(CLUSTER_GAP)
-            .align_y(Alignment::Center),
+            row![container(left).width(Length::Fill).clip(true), right]
+                .spacing(CLUSTER_GAP)
+                .align_y(Alignment::Center),
         )
         .height(STATUS_HEIGHT)
         .padding([0, 12])

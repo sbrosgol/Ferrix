@@ -6,7 +6,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 ## M0 — Foundations (weeks 1–4)
 - Cargo workspace per `architecture.md` §4.1, shared lints, MSRV, `rustfmt`/`clippy`/`cargo-deny` in CI
   on macOS, Windows, Linux.
-- `xtask fetch-pdfium` (pinned, hash-verified), `xtask corpus` (download test PDFs from manifest).
+- `xtask fetch-pdfium` (pinned, hash-verified), ~~`xtask corpus` (download test PDFs from manifest)~~ (done, with generated stress files; see
+  architecture §8).
 - `ferrix-types`, `ferrix-engine` trait + DTOs, `ferrix-engine-pdfium` (open, page info, render, text).
 - `ferrix-cli render <file> --page N --dpi D -o out.png` and `ferrix-cli text`.
 - Visual-regression harness running on the corpus.
@@ -16,19 +17,26 @@ demo. Exit criteria are the definition of done, not the feature list.
 **Exit:** CI green on 3 OSes; CLI renders 95% of corpus without error; app skeleton runs on all 3 OSes.
 
 ## M1 — Viewer MVP (weeks 5–12) → `0.1`
-- App shell: open (dialog, drag & drop, file association, recent files), tabs.
-- `ferrix-render`: continuous/single/two-page layouts, tiled progressive rendering, zoom
-  (fit width/page, pinch, ctrl+wheel), rotation, HiDPI, memory budget.
-- Thumbnails sidebar, outline/bookmarks, internal & external links (with confirmation).
+- App shell: open (dialog, drag & drop, ~~recent files~~, file association), ~~tabs~~. Open
+  Recent and tabs are done; file association remains.
+- `ferrix-render`: ~~continuous/single/two-page layouts~~ (done: Continuous, Single Page, Two
+  Pages, Two Pages with Cover), ~~tiled progressive rendering~~ (`ferrix-render`; see
+  architecture §5.3), zoom (fit width/page, ~~⌘/Ctrl + wheel~~, up to 800 %; pinch needs iced
+  support), rotation, HiDPI, ~~memory budget~~ (tile cache).
+- ~~Thumbnails sidebar~~ (virtualized, no page cap), ~~outline/bookmarks~~ (Outline tab),
+  ~~internal & external links (with confirmation)~~, plus Back/Forward.
 - ~~Text selection + copy~~ (done with ADR-0009 phase 3: `ferrix-text`, single page; drag,
   double/triple click, ⌘A/⌘C); ~~find-in-document with streaming results~~ (done:
   `ferrix_text::Query` and `PageText::find`, the app's PDF find bar; see architecture §5.5).
-- Password-protected PDFs, light/dark/system theme, page-inversion reading mode.
+- ~~Password-protected PDFs~~ (opened read-only until saving can keep their encryption),
+  light/dark/system theme, ~~page-inversion reading mode~~ (Dark Pages).
 - Keyboard navigation and basic a11y for chrome.
-- `ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom.
+- ~~`ferrix-store` (ADR-0005): preferences, recent files, per-document last page and zoom~~.
 
 **Exit:** first paint < 300 ms on 1,000-page doc; 60+ fps scroll; zero crashes on corpus in a
 1-hour soak; screen reader can operate all chrome.
+Measured by `cargo xtask bench` (first paint, frame time) and `cargo xtask soak` (crashes);
+see architecture §8.
 
 ## M2 — Annotate & save (weeks 13–20) → `0.2`
 - ~~Command stack, undo/redo~~ (done: `ferrix-core`); ~~autosave journal + crash recovery~~

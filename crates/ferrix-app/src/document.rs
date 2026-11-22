@@ -17,8 +17,6 @@ use crate::{
     strip::Strip,
 };
 
-/// Thumbnails beyond this are not rendered until the virtualized sidebar lands in M1.
-pub(crate) const MAX_THUMBNAILS: usize = 500;
 /// Assumed for pages not measured yet (US Letter), so the layout has something to show.
 const UNMEASURED: Size = Size {
     width: 612.0,
@@ -119,6 +117,8 @@ pub(crate) struct Shown {
     pub(crate) zoom: f32,
     pub(crate) scale_factor: f32,
     pub(crate) image: PageImage,
+    /// A low-resolution base under tiles, rather than the exact page.
+    pub(crate) base: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,11 +152,20 @@ pub(crate) struct Document {
     /// Rendered pages near the view.
     pub(crate) images: HashMap<PageKey, Shown>,
     pub(crate) render_busy: bool,
+    /// The current page has been shown once (for the first-paint measurement).
+    pub(crate) first_paint: bool,
+    /// Sharp tiles of pages too large to render whole.
+    pub(crate) tiles: ferrix_render::TileCache<crate::render::TileKey, crate::render::Tile>,
+    /// Horizontal scroll position of the page view, in logical pixels.
+    pub(crate) scroll_x: f32,
     /// Pages the engine couldn't render; shown blank and not tried again, so the error
     /// appears once rather than every time the page scrolls into view.
     pub(crate) render_failed: BTreeSet<PageKey>,
     pub(crate) thumbnails: HashMap<PageKey, Thumbnail>,
     pub(crate) thumbnail_busy: bool,
+    /// The sidebar's thumbnail column: scroll offset and visible height, in logical pixels.
+    pub(crate) thumb_scroll: f32,
+    pub(crate) thumb_view: f32,
     /// What the document allows for annotations; `None` until read (ADR-0009).
     pub(crate) annot_policy: Option<crate::annotate::Policy>,
     /// The document's own bytes, once read for annotations; previews are built from them.
@@ -172,6 +181,15 @@ pub(crate) struct Document {
     /// Each page's text, loaded as pages come into view (`ferrix-text`).
     pub(crate) texts: HashMap<PageKey, std::sync::Arc<ferrix_text::PageText>>,
     pub(crate) text_busy: bool,
+    /// Each page's links, read with its text.
+    pub(crate) links: HashMap<PageKey, crate::navigate::Links>,
+    /// The outline, flattened; `None` until read.
+    pub(crate) outline: Option<Vec<crate::navigate::OutlineNode>>,
+    /// Back and Forward through jumps.
+    pub(crate) trail: crate::navigate::Trail,
+    /// The password it was opened with. Encrypted documents are read-only until saving can
+    /// keep their encryption.
+    pub(crate) encrypted: Option<ferrix_engine::Secret>,
     /// The search of the find bar, while it is open.
     pub(crate) search: Option<crate::pdf_find::Search>,
 }
@@ -194,9 +212,14 @@ impl Document {
             scroll_within: 0.0,
             images: HashMap::new(),
             render_busy: false,
+            first_paint: false,
+            tiles: ferrix_render::TileCache::default(),
+            scroll_x: 0.0,
             render_failed: BTreeSet::new(),
             thumbnails: HashMap::new(),
             thumbnail_busy: false,
+            thumb_scroll: 0.0,
+            thumb_view: 800.0,
             annot_policy: None,
             base_bytes: None,
             previewed: AnnotSet::new(),
@@ -205,6 +228,10 @@ impl Document {
             tagged_noted: false,
             texts: HashMap::new(),
             text_busy: false,
+            links: HashMap::new(),
+            outline: None,
+            trail: crate::navigate::Trail::default(),
+            encrypted: None,
             search: None,
         };
         if let Some(key) = doc.key_at(0) {
@@ -245,6 +272,12 @@ impl Document {
 
     pub(crate) fn len(&self) -> usize {
         self.state.pages.len()
+    }
+
+    /// Encrypted, with or without a password to open: shown, never edited or saved
+    /// (ADR-0003), since a save would have to encrypt what it adds.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.info.encrypted || self.encrypted.is_some()
     }
 
     /// Unsaved edits, or a document that was never saved at all.
@@ -399,12 +432,25 @@ impl Document {
     }
 
     /// The next page whose thumbnail is missing or shows an outdated rotation.
-    pub(crate) fn next_thumbnail(&self) -> Option<(PageKey, PageRef)> {
-        self.state
-            .pages
-            .entries()
-            .iter()
-            .take(MAX_THUMBNAILS)
+    /// The thumbnail column for the current pages.
+    pub(crate) fn thumb_column(&self) -> crate::thumbs::Column {
+        crate::thumbs::Column::new(&self.page_sizes())
+    }
+
+    /// The next thumbnail to render: missing or stale, near the visible part of the sidebar,
+    /// the current page's first. Thumbnails far from view are dropped to bound memory.
+    pub(crate) fn next_thumbnail(&mut self) -> Option<(PageKey, PageRef)> {
+        let near = self.thumb_column().near(self.thumb_scroll, self.thumb_view);
+        let keep: std::collections::HashSet<PageKey> = near
+            .clone()
+            .chain(std::iter::once(self.current))
+            .filter_map(|i| self.key_at(i))
+            .collect();
+        self.thumbnails.retain(|k, _| keep.contains(k));
+        let entries = self.state.pages.entries();
+        std::iter::once(self.current)
+            .chain(near)
+            .filter_map(|i| entries.get(i))
             .find(|e| {
                 let source = self.sources.get(e.source.0 as usize).map(|s| s.doc);
                 self.thumbnails
@@ -536,6 +582,7 @@ mod tests {
                 page_count: pages,
                 pdf_version: None,
                 metadata: DocMetadata::default(),
+                encrypted: false,
             },
         )
     }

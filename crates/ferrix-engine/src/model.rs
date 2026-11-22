@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf};
 
-use ferrix_types::{DocId, PageIndex, PdfBox, PixelRect, Rect, Rotation, Size};
+use ferrix_types::{DocId, PageIndex, PageTransform, PdfBox, PixelRect, Rect, Rotation, Size};
 use serde::{Deserialize, Serialize};
 
 /// Where a document's bytes come from.
@@ -67,6 +67,10 @@ pub struct DocInfo {
     /// e.g. `"1.7"`; `None` if the header is unreadable.
     pub pdf_version: Option<String>,
     pub metadata: DocMetadata,
+    /// The file is encrypted, whether or not it needed a password to open (an owner password
+    /// alone only restricts what readers allow).
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -78,6 +82,8 @@ pub struct PageInfo {
     pub rotation: Rotation,
     /// Page label from the document (e.g. `"iv"`), if defined.
     pub label: Option<String>,
+    /// User space → page space.
+    pub transform: PageTransform,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,7 +160,34 @@ pub struct OutlineItem {
     pub title: String,
     /// Target page, if the entry points into this document.
     pub page: Option<PageIndex>,
+    /// Where on the target page, if the entry says.
+    pub top: Option<f32>,
     pub children: Vec<OutlineItem>,
+}
+
+/// A place in this document: a page, and how far down it, in page-space points.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Destination {
+    pub page: PageIndex,
+    /// Distance from the top of the displayed page; `None` for the whole page.
+    pub top: Option<f32>,
+}
+
+/// What following a link does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LinkTarget {
+    /// Somewhere in this document.
+    Page(Destination),
+    /// A URI action, e.g. a web page or `mailto:`. Untrusted: the UI asks before opening it.
+    Uri(String),
+}
+
+/// A link area on a page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PageLink {
+    /// The clickable area in page space.
+    pub rect: Rect,
+    pub target: LinkTarget,
 }
 
 /// An annotation as the engine sees it; used to verify what Ferrix wrote (ADR-0009 §6).

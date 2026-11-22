@@ -50,6 +50,10 @@ pub(crate) struct Overlay<'a> {
     /// Find matches on this page, and the current one, as quads in user space.
     pub(crate) find_quads: Vec<[PdfPoint; 4]>,
     pub(crate) find_current: Vec<[PdfPoint; 4]>,
+    /// Link areas in user space, and where they go.
+    pub(crate) links: Vec<(PdfBox, ferrix_engine::LinkTarget)>,
+    /// Whether a click on a link follows it (not while a Markup tool is armed).
+    pub(crate) follow_links: bool,
 }
 
 #[derive(Debug, Default)]
@@ -57,7 +61,14 @@ pub(crate) struct State {
     pressed: bool,
     /// The last press, to tell double and triple clicks apart.
     last_click: Option<iced::advanced::mouse::Click>,
+    /// A press on a link: where, and which link. Released close by, it follows the link.
+    link_press: Option<(iced::Point, usize)>,
+    /// The link under the pointer, so the status bar hears only of changes.
+    hover: Option<usize>,
 }
+
+/// How far a press may move and still count as a click on a link.
+const CLICK_SLOP: f32 = 4.0;
 
 impl Overlay<'_> {
     fn to_pdf(&self, bounds: Rectangle, position: iced::Point) -> PdfPoint {
@@ -66,6 +77,16 @@ impl Overlay<'_> {
             (position.y - bounds.y) / self.scale,
         );
         self.transform.to_pdf(local)
+    }
+
+    /// The link under `position` (window coordinates), if links are followed here.
+    fn link_at(&self, bounds: Rectangle, position: iced::Point) -> Option<usize> {
+        if !self.follow_links || !bounds.contains(position) {
+            return None;
+        }
+        let at = self.to_pdf(bounds, position);
+        // The last one drawn is on top.
+        self.links.iter().rposition(|(rect, _)| rect.contains(at))
     }
 
     fn to_px(&self, p: PdfPoint) -> iced::Point {
@@ -197,6 +218,7 @@ impl canvas::Program<Message> for Overlay<'_> {
                     .position_in(bounds)
                     .map(|p| iced::Point::new(p.x + bounds.x, p.y + bounds.y))?;
                 state.pressed = true;
+                state.link_press = self.link_at(bounds, position).map(|i| (position, i));
                 let at = self.to_pdf(bounds, position);
                 let click = iced::advanced::mouse::Click::new(
                     position,
@@ -214,6 +236,15 @@ impl canvas::Program<Message> for Overlay<'_> {
                         .and_capture(),
                 )
             }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if !state.pressed => {
+                let hover = self.link_at(bounds, *position);
+                if hover == state.hover {
+                    return None;
+                }
+                state.hover = hover;
+                let target = hover.map(|i| self.links[i].1.clone());
+                Some(canvas::Action::publish(Message::LinkHover(page, target)))
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) if state.pressed => {
                 let at = self.to_pdf(bounds, *position);
                 Some(
@@ -228,6 +259,20 @@ impl canvas::Program<Message> for Overlay<'_> {
                 state.pressed = false;
                 let position = cursor.position()?;
                 let at = self.to_pdf(bounds, position);
+                if let Some((from, i)) = state.link_press.take()
+                    && from.distance(position) <= CLICK_SLOP
+                    && self.link_at(bounds, position) == Some(i)
+                {
+                    // The release still ends the text gesture that the press began.
+                    return Some(
+                        canvas::Action::publish(Message::LinkReleased(
+                            page,
+                            at,
+                            self.links[i].1.clone(),
+                        ))
+                        .and_capture(),
+                    );
+                }
                 Some(
                     canvas::Action::publish(Message::Annot(AnnotMsg::Pointer(
                         page,
@@ -313,6 +358,10 @@ impl canvas::Program<Message> for Overlay<'_> {
         };
         if self.tool.draws() {
             return mouse::Interaction::Crosshair;
+        }
+        let window_point = iced::Point::new(position.x + bounds.x, position.y + bounds.y);
+        if self.link_at(bounds, window_point).is_some() {
+            return mouse::Interaction::Pointer;
         }
         let at = self.to_pdf(
             bounds,

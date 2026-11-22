@@ -6,6 +6,8 @@
 //!
 //! `--write` starts a written document and types formatted text into it; `--fit-page` and
 //! `--zoom-in` change the zoom afterwards.
+//! `--recent-menu`, `--outline`, `--two-pages`, `--single-page` and `--dark-pages` show the
+//! viewer's Open Recent flyout, Outline tab, layouts and Dark Pages.
 //! `--new` opens the New Document dialog, `--rotate` rotates the current page and `--recover`
 //! accepts the crash-recovery offer, each partway through the run, before capturing. `SHOT_SECS` sets how long the app
 //! runs first (default 3), `SHOT_SIZE=WxH` the window size in logical pixels.
@@ -81,6 +83,35 @@ fn main() {
     }
     if flag(&mut args, "--menu") {
         script.push(Message::ToggleMenu);
+    }
+    if flag(&mut args, "--recent-menu") {
+        script.extend([Message::ToggleMenu, Message::ToggleRecent]);
+    }
+    if flag(&mut args, "--outline") {
+        script.push(Message::SidebarTab(
+            ferrix_app::annotate_ui::SidebarTab::Outline,
+        ));
+    }
+    if flag(&mut args, "--two-pages") {
+        script.push(Message::SetLayout(ferrix_app::Layout::TwoPagesCover));
+    }
+    if flag(&mut args, "--single-page") {
+        script.extend([
+            Message::SetLayout(ferrix_app::Layout::SinglePage),
+            Message::Next,
+        ]);
+    }
+    // `--then-open <file>` opens a second document, closing (and remembering) the first.
+    if let Some(i) = args.iter().position(|a| a == "--then-open") {
+        let path = args.remove(i + 1);
+        args.remove(i);
+        script.push(Message::Open(PathBuf::from(path)));
+    }
+    if flag(&mut args, "--dark-pages") {
+        script.push(Message::ToggleInvert);
+    }
+    if flag(&mut args, "--zoom-600") {
+        script.push(Message::ZoomPicked(ferrix_app::ZoomChoice::Percent(600)));
     }
     if flag(&mut args, "--zoom-in") {
         script.extend([Message::ZoomIn, Message::ZoomIn, Message::ZoomIn]);

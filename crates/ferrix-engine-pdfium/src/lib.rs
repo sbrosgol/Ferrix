@@ -8,8 +8,9 @@ mod library;
 use std::{collections::HashMap, path::Path};
 
 use ferrix_engine::{
-    AnnotSummary, DocInfo, DocMetadata, DocSource, EngineCaps, EngineError, OutlineItem, PageInfo,
-    PdfEngine, RenderedTile, Secret, TextChar, TextPage, TileRequest,
+    AnnotSummary, Destination, DocInfo, DocMetadata, DocSource, EngineCaps, EngineError,
+    LinkTarget, OutlineItem, PageInfo, PageLink, PdfEngine, RenderedTile, Secret, TextChar,
+    TextPage, TileRequest,
 };
 use ferrix_types::{DocId, PageIndex, PageTransform, PdfBox, Rect, Rotation};
 pub use library::{LibraryError, PDFIUM_DIR_ENV};
@@ -22,6 +23,10 @@ const MAX_PAGE_EDGE: u32 = 1 << 20;
 /// Guards against malicious or cyclic outlines.
 const MAX_OUTLINE_DEPTH: usize = 64;
 const MAX_OUTLINE_ITEMS: usize = 100_000;
+/// Guards against pages stuffed with link annotations.
+const MAX_PAGE_LINKS: usize = 10_000;
+/// URIs longer than this are not offered (they would only be shown, truncated, to be refused).
+const MAX_URI_LEN: usize = 8192;
 
 #[derive(Debug)]
 pub struct PdfiumEngine {
@@ -108,6 +113,11 @@ impl PdfEngine for PdfiumEngine {
             page_count: page_count(document.pages()),
             pdf_version: version_string(document.version()),
             metadata: metadata(document.metadata()),
+            // A handler revision PDFium can't name (AES-256's R5/R6) is still encryption.
+            encrypted: !matches!(
+                document.permissions().security_handler_revision(),
+                Ok(PdfSecurityHandlerRevision::Unprotected)
+            ),
         };
         self.docs.insert(id, document);
         tracing::debug!(%id, pages = info.page_count, "opened document");
@@ -126,6 +136,7 @@ impl PdfEngine for PdfiumEngine {
             size: transform.page_size(),
             rotation,
             label: page.label().map(str::to_owned),
+            transform,
         })
     }
 
@@ -228,11 +239,106 @@ impl PdfEngine for PdfiumEngine {
     }
 
     fn outline(&mut self, doc: DocId) -> Result<Vec<OutlineItem>, EngineError> {
-        let Some(first) = self.doc(doc)?.bookmarks().root() else {
+        let document = self.doc(doc)?;
+        let Some(first) = document.bookmarks().root() else {
             return Ok(Vec::new());
         };
         let mut budget = MAX_OUTLINE_ITEMS;
-        Ok(outline_level(Some(first), 0, &mut budget))
+        let mut tops = Tops::new(document);
+        Ok(outline_level(Some(first), 0, &mut budget, &mut tops))
+    }
+
+    fn links(&mut self, doc: DocId, index: PageIndex) -> Result<Vec<PageLink>, EngineError> {
+        let page = self.page(doc, index)?;
+        let (transform, _) = page_transform(&page)?;
+        let mut tops = Tops::new(self.doc(doc)?);
+        let mut links = Vec::new();
+        for link in page.links().iter().take(MAX_PAGE_LINKS) {
+            let Ok(rect) = link.rect() else { continue };
+            let rect = transform.box_to_page(pdf_box(&rect));
+            if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                continue;
+            }
+            let target = match link.action() {
+                Some(action) => match action.action_type() {
+                    PdfActionType::GoToDestinationInSameDocument => action
+                        .as_local_destination_action()
+                        .and_then(|a| a.destination().ok())
+                        .and_then(|d| tops.destination(&d))
+                        .map(LinkTarget::Page),
+                    PdfActionType::Uri => action
+                        .as_uri_action()
+                        .and_then(|a| a.uri().ok())
+                        .map(|uri| uri.trim().to_owned())
+                        .filter(|uri| !uri.is_empty() && uri.len() <= MAX_URI_LEN)
+                        .map(LinkTarget::Uri),
+                    // Launching files, other documents and scripts are not followed.
+                    _ => None,
+                },
+                // A link with `/Dest` instead of an action.
+                None => link
+                    .destination()
+                    .and_then(|d| tops.destination(&d))
+                    .map(LinkTarget::Page),
+            };
+            if let Some(target) = target {
+                links.push(PageLink { rect, target });
+            }
+        }
+        Ok(links)
+    }
+}
+
+/// Resolves destinations to page space, measuring each target page once.
+struct Tops<'a> {
+    doc: &'a PdfDocument<'static>,
+    transforms: HashMap<u32, Option<(PageTransform, Rotation)>>,
+}
+
+impl<'a> Tops<'a> {
+    fn new(doc: &'a PdfDocument<'static>) -> Self {
+        Self {
+            doc,
+            transforms: HashMap::new(),
+        }
+    }
+
+    fn destination(&mut self, dest: &PdfDestination<'_>) -> Option<Destination> {
+        let page = u32::try_from(dest.page_index().ok()?).ok()?;
+        if page >= page_count(self.doc.pages()) {
+            return None;
+        }
+        Some(Destination {
+            page: PageIndex(page),
+            top: self.top(page, dest),
+        })
+    }
+
+    /// The destination's top edge in page space, if it names one.
+    fn top(&mut self, page: u32, dest: &PdfDestination<'_>) -> Option<f32> {
+        use PdfDestinationViewSettings as V;
+        let (x, y) = match dest.view_settings().ok()? {
+            V::SpecificCoordinatesAndZoom(x, y, _) => (x, y?),
+            V::FitPageHorizontallyToWindow(top) | V::FitBoundsHorizontallyToWindow(top) => {
+                (None, top?)
+            }
+            V::FitPageToRectangle(rect) => (Some(rect.left()), rect.top()),
+            _ => return None,
+        };
+        let doc = self.doc;
+        let (transform, rotation) = (*self.transforms.entry(page).or_insert_with(|| {
+            let raw = i32::try_from(page).ok()?;
+            page_transform(&doc.pages().get(raw).ok()?).ok()
+        }))?;
+        let x = match x {
+            Some(x) => x.value,
+            // On a sideways page the PDF's x runs down the screen, so a top without an x
+            // says nothing about where to scroll.
+            None if rotation.is_sideways() => return None,
+            None => 0.0,
+        };
+        let size = transform.page_size();
+        Some(transform.to_page(x, y.value).y.clamp(0.0, size.height))
     }
 }
 
@@ -241,6 +347,7 @@ fn outline_level(
     first: Option<PdfBookmark<'_>>,
     depth: usize,
     budget: &mut usize,
+    tops: &mut Tops<'_>,
 ) -> Vec<OutlineItem> {
     let mut items = Vec::new();
     let mut next = first;
@@ -250,17 +357,15 @@ fn outline_level(
         }
         *budget -= 1;
         let children = if depth + 1 < MAX_OUTLINE_DEPTH {
-            outline_level(bookmark.first_child(), depth + 1, budget)
+            outline_level(bookmark.first_child(), depth + 1, budget, tops)
         } else {
             Vec::new()
         };
+        let dest = bookmark.destination().and_then(|d| tops.destination(&d));
         items.push(OutlineItem {
             title: bookmark.title().unwrap_or_default(),
-            page: bookmark
-                .destination()
-                .and_then(|d| d.page_index().ok())
-                .and_then(|i| u32::try_from(i).ok())
-                .map(PageIndex),
+            page: dest.map(|d| d.page),
+            top: dest.and_then(|d| d.top),
             children,
         });
         next = bookmark.next_sibling();

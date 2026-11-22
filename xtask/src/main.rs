@@ -1,5 +1,9 @@
 //! Build automation for Ferrix. Run with `cargo xtask <task>`.
 
+mod bench;
+mod corpus;
+mod soak;
+
 use std::{
     env, fs,
     io::Read,
@@ -73,6 +77,29 @@ enum Task {
         /// Documents to open with `--open`.
         files: Vec<PathBuf>,
     },
+    /// Download the real-world test PDFs and write the generated ones into
+    /// `tests/corpus/files/`.
+    Corpus {
+        /// Only write the generated files; download nothing.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Run every corpus file through the engine and parser, each in its own process, until
+    /// the time is up; fails on any crash, panic or hang.
+    Soak {
+        /// How long to keep going, in minutes. Every file runs at least once.
+        #[arg(long, default_value_t = 60.0)]
+        minutes: f64,
+        /// Seconds before a run counts as hung.
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Only files whose path contains this.
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// Measure first paint, frame time and page rendering on the corpus against the M1 exit
+    /// criteria; fails if a target is missed. Run on a quiet machine.
+    Bench,
     /// Render the app icon into a macOS `.icns` file (used by `dist/package.sh`).
     Icns {
         /// Where to write the `.icns` file.
@@ -94,6 +121,13 @@ fn main() -> Result<()> {
             open,
             files,
         } => bundle(release, open, &files),
+        Task::Corpus { offline } => corpus::fetch(&workspace_root(), offline),
+        Task::Soak {
+            minutes,
+            timeout,
+            only,
+        } => soak::soak(&workspace_root(), minutes, timeout, only.as_deref()),
+        Task::Bench => bench::bench(&workspace_root()),
         Task::Icns { out } => make_icns(
             &workspace_root().join("crates/ferrix-app/assets/app-icon.svg"),
             &out.with_extension("iconset"),

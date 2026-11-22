@@ -12,6 +12,9 @@ cargo run -p ferrix-app [-- file.pdf]    # desktop app
 cargo xtask bundle [--release] [--open]  # macOS: target/<profile>/Ferrix.app, named “Ferrix” in the menu bar
 cargo run -p ferrix-cli -- --help        # `ferrix`: info, render, text, outline, organize, annotate, compose, source
 cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace
+cargo xtask corpus                       # test PDFs into tests/corpus/files (git-ignored)
+cargo xtask soak [--minutes 60]          # every corpus file in its own process; fails on crash/hang
+cargo xtask bench                        # M1 exit criteria: first paint, frame time (quiet machine)
 ```
 
 PDFium-backed tests skip locally when PDFium is missing (they print `skipping:` only with
@@ -28,6 +31,8 @@ The only expected warning is the `block v0.1.6` future-incompatibility note from
 | `ferrix-core` | PDF edit model: pages (`PageList`, `Edit`), annotations (`AnnotSet`, `AnnotEdit`), both in `DocState`/`DocEdit`; generic `History` |
 | `ferrix-annot` | annotations (ADR-0009): read into the model, appearance display list, text boxes via `ferrix-compose`/krilla, write into a `Revision` |
 | `ferrix-text` | page text from PDFium: caret hit-testing, words, lines, selection, copied text, highlight quads |
+| `ferrix-render` | page view tiling: tile grid, render bands, byte-bounded tile cache (UI-free) |
+| `ferrix-store` | preferences (`settings.json`) and history (`state.db`: recent files, positions), ADR-0005 |
 | `ferrix-io` | atomic writes, `FileStamp`, crash-recovery journal frames, `app_data_dir` (`FERRIX_DATA_DIR` overrides) |
 | `ferrix-print` | native print dialogs; the only crate with `unsafe` (confined platform modules) |
 | `ferrix-convert` | images and Office files → PDF via Word/LibreOffice |
@@ -50,6 +55,8 @@ App (`ferrix-app`):
 - Keys → commands: [`key_command`](crates/ferrix-app/src/writer.rs:213); page images: [`Writer::refresh`](crates/ferrix-app/src/writer.rs:99)
 - Input/caret overlay widget: [`Canvas::update`](crates/ferrix-app/src/writer_canvas.rs:172); views: [`writer_view`](crates/ferrix-app/src/view.rs:822), [`format_bar`](crates/ferrix-app/src/view.rs:893)
 - Recovery: [`WriterJournal`](crates/ferrix-app/src/recovery.rs:172); clipboard: [`RichClipboard`](crates/ferrix-app/src/clipboard.rs:17)
+
+Page view: tiles scheduled in [`App::render_pages`](crates/ferrix-app/src/tiling.rs:1), drawn by [`PagePaper`](crates/ferrix-app/src/page_paper.rs:1); layout in [`Strip`](crates/ferrix-app/src/strip.rs:1).
 
 PDF viewing/organizing: [`PdfEngine`](crates/ferrix-engine/src/lib.rs:24), [`Revision`](crates/ferrix-pdf/src/layout.rs:55), [`content_digest`](crates/ferrix-pdf/src/inspect.rs:89), [`PageList::apply`](crates/ferrix-core/src/pages.rs:168), [`write_atomic`](crates/ferrix-io/src/lib.rs:35).
 

@@ -213,6 +213,10 @@ impl App {
                 top.is_finite().then_some(top)
             })
             .unwrap_or(0.0);
+        self.place_page(index);
+        let Some(doc) = self.doc.as_ref() else {
+            return Task::none();
+        };
         let scale = doc.strip.zoom * crate::render::LOGICAL_PX_PER_POINT;
         let Some(&page_top) = doc.strip.tops.get(index) else {
             return Task::none();

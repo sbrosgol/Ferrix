@@ -61,3 +61,26 @@ existing digital signatures or corrupt files. Engines are slow to re-render afte
 - Clean close, save, discard and quit delete the journal and its blobs.
 - Privacy: the journal holds file paths and, for unsaved new/converted documents, their
   content, in the user's own app-data directory only.
+
+## Encrypted documents (2026-11-22)
+Encrypted PDFs are view-only in the app, whether or not they need a password to open. Ferrix
+asks for a password when one is needed (ADR-0005's history never stores it). Files with only an
+owner password open without asking. The engine reports encryption on open (`DocInfo::encrypted`,
+from PDFium's security handler revision), page and annotation edits are off, Markup mode stays
+off, and pages of an encrypted file can't be inserted elsewhere. Both places where edits land
+(`App::apply` and `App::apply_annot`) refuse too, so nothing can be saved by another path. Writing an incremental update into an encrypted file would mean encrypting the
+new objects with the file's keys, and a mistake there would leave content readable without the
+password. Revisit when saving can keep the encryption and is tested against Acrobat and qpdf.
+
+`ferrix-pdf` writes incremental updates into encrypted files correctly, and the CLI's
+`organize` and `annotate` use this. lopdf encrypts each added or replaced object with its own
+key and keeps `/Encrypt` and `/ID` in the new trailer. This was checked on 2026-11-22: 102
+outputs across RC4-128, AES-128 and AES-256, with user+owner and owner-only passwords, read back
+by qpdf, poppler, pypdf and PDFium (annotation text, appearance streams and page order).
+
+The CLI honours the file's permissions (`/P`, ISO 32000-2 §7.6.4.2) unless the owner password is
+given: `ferrix_pdf::edit_rights` reports what may change. Annotations need bit 6; organizing
+needs bit 11 or bit 4 (bit 4 only for revision 2). lopdf drops `/Encrypt` after decrypting, so
+the owner password is checked against a dictionary rebuilt from the kept security-handler
+values. Tests use qpdf-made fixtures (`crates/ferrix-pdf/tests/fixtures/encrypted`, with
+`make.py`) so lopdf isn't checked against itself. The app stays view-only regardless.

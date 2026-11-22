@@ -1,6 +1,6 @@
 //! Application state and update logic. Layout lives in `view.rs`.
 
-use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use ferrix_convert::{Converter, Kind};
 use ferrix_core::{Edit, PageKey};
@@ -19,6 +19,7 @@ use iced::{
 };
 
 use ferrix_convert::kind_of;
+pub use ferrix_store::Layout;
 
 use ferrix_compose::{Editor, Fonts, Opened, PageSetup};
 
@@ -33,11 +34,12 @@ use crate::{
     writer::{Action as WriteAction, KeyCommand, MarginChoice, Writer},
 };
 
-const ZOOM_STEPS: [f32; 15] = [
-    0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0,
+const ZOOM_STEPS: [f32; 18] = [
+    0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0,
 ];
 pub(crate) const MIN_ZOOM: f32 = 0.1;
-pub(crate) const MAX_ZOOM: f32 = 4.0;
+/// Large pages render as tiles of the part in view, so zoom isn't limited by page memory.
+pub(crate) const MAX_ZOOM: f32 = 8.0;
 /// "Automatic" zoom fits the width but never enlarges beyond this (as pdf.js does).
 const MAX_AUTO_ZOOM: f32 = 1.25;
 pub(crate) const THUMB_WIDTH: f32 = 112.0;
@@ -64,6 +66,24 @@ impl Appearance {
     }
 }
 
+impl Appearance {
+    fn from_saved(saved: ferrix_store::Appearance) -> Self {
+        match saved {
+            ferrix_store::Appearance::System => Self::System,
+            ferrix_store::Appearance::Light => Self::Light,
+            ferrix_store::Appearance::Dark => Self::Dark,
+        }
+    }
+
+    fn to_saved(self) -> ferrix_store::Appearance {
+        match self {
+            Self::System => ferrix_store::Appearance::System,
+            Self::Light => ferrix_store::Appearance::Light,
+            Self::Dark => ferrix_store::Appearance::Dark,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Zoom {
     Auto,
@@ -73,10 +93,34 @@ pub(crate) enum Zoom {
 }
 
 impl Zoom {
+    fn from_saved(saved: ferrix_store::SavedZoom) -> Self {
+        match saved.sanitized() {
+            ferrix_store::SavedZoom::Auto => Self::Auto,
+            ferrix_store::SavedZoom::FitWidth => Self::FitWidth,
+            ferrix_store::SavedZoom::FitPage => Self::FitPage,
+            ferrix_store::SavedZoom::Fixed(z) => Self::Fixed(z.clamp(MIN_ZOOM, MAX_ZOOM)),
+        }
+    }
+
+    pub(crate) fn to_saved(self) -> ferrix_store::SavedZoom {
+        match self {
+            Self::Auto => ferrix_store::SavedZoom::Auto,
+            Self::FitWidth => ferrix_store::SavedZoom::FitWidth,
+            Self::FitPage => ferrix_store::SavedZoom::FitPage,
+            Self::Fixed(z) => ferrix_store::SavedZoom::Fixed(z),
+        }
+    }
+
     /// The zoom factor (1.0 = 100%) for a page of `page` points in a viewport of `canvas`
     /// logical pixels.
-    fn resolve(self, page: Size, canvas: iced::Size) -> f32 {
-        let fit_width = canvas.width / (page.width * LOGICAL_PX_PER_POINT);
+    fn resolve(self, page: Size, canvas: iced::Size, layout: Layout) -> f32 {
+        // Two pages side by side share the width, less the gap between them.
+        let (across, gaps) = match layout {
+            Layout::Continuous | Layout::SinglePage => (1.0, 0.0),
+            Layout::TwoPages | Layout::TwoPagesCover => (2.0, crate::strip::PAGE_GAP),
+        };
+        let fit_width =
+            (canvas.width - gaps).max(1.0) / (across * page.width * LOGICAL_PX_PER_POINT);
         let fit_page = fit_width.min(canvas.height / (page.height * LOGICAL_PX_PER_POINT));
         let zoom = match self {
             Self::Auto => fit_width.min(MAX_AUTO_ZOOM),
@@ -126,6 +170,8 @@ pub(crate) enum Proceed {
     Open(PathBuf),
     NewDialog,
     Recover,
+    /// Close the active tab.
+    CloseTab,
     Quit,
 }
 
@@ -239,6 +285,26 @@ pub(crate) struct FindState {
     pub(crate) focused: bool,
 }
 
+/// Shown when an encrypted PDF opens, and if anything tries to change one.
+pub(crate) const READ_ONLY_NOTICE: &str =
+    "This PDF is encrypted, so Ferrix shows it read-only for now.";
+
+/// The password dialog of an encrypted PDF.
+#[derive(Debug, Clone)]
+pub(crate) struct PasswordPrompt {
+    pub(crate) origin: Origin,
+    pub(crate) password: String,
+    pub(crate) reveal: bool,
+    /// The last password was wrong.
+    pub(crate) wrong: bool,
+    /// Waiting for the engine to try the password.
+    pub(crate) checking: bool,
+}
+
+pub(crate) fn password_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("password")
+}
+
 pub(crate) fn find_input_id() -> iced::widget::Id {
     iced::widget::Id::new("find")
 }
@@ -284,7 +350,7 @@ pub struct App {
     pub(crate) engine: Result<Worker, String>,
     window: Option<window::Id>,
     pub(crate) window_size: iced::Size,
-    scale_factor: f32,
+    pub(crate) scale_factor: f32,
     pub(crate) appearance: Appearance,
     system_dark: bool,
     /// The toolbar's overflow menu (`⋯`) is open.
@@ -321,14 +387,14 @@ pub struct App {
     /// The New Document dialog, while open.
     pub(crate) new_form: Option<NewForm>,
     /// Crash-recovery journal of the current document while it has unsaved changes.
-    journal: Option<Journal>,
+    pub(crate) journal: Option<Journal>,
     /// Unsaved work from crashed sessions, offered one at a time.
     pub(crate) recoveries: Vec<Recoverable>,
     /// The document being written, when one is open (instead of `doc`).
     pub(crate) writer: Option<Writer>,
     /// Fonts for writing: loaded in the background at startup, reused between documents.
     fonts: Option<Fonts>,
-    writer_journal: Option<WriterJournal>,
+    pub(crate) writer_journal: Option<WriterJournal>,
     /// The Page Setup dialog, while open.
     pub(crate) page_setup: Option<PageSetupForm>,
     /// Shown once the document being opened is open.
@@ -337,12 +403,62 @@ pub struct App {
     pub(crate) find: Option<FindState>,
     /// Formatted copy and paste for written documents.
     clipboard: crate::clipboard::RichClipboard,
+    /// Preferences as last saved (ADR-0005); compared after each update to save changes.
+    settings: ferrix_store::Settings,
+    /// Recent files and positions; `None` until opened, or if it can't be.
+    history: Option<crate::prefs::History>,
+    /// Open Recent, newest first.
+    pub(crate) recent: Vec<ferrix_store::RecentFile>,
+    /// How pages are arranged.
+    pub(crate) layout: Layout,
+    /// The Open Recent flyout of the `⋯` menu is open.
+    pub(crate) recent_open: bool,
+    /// Asking for the password of an encrypted PDF.
+    pub(crate) password: Option<PasswordPrompt>,
+    /// A web or mail link waiting for confirmation.
+    pub(crate) link_prompt: Option<String>,
+    /// Where the hovered link goes, for the status bar.
+    pub(crate) link_hint: Option<String>,
+    /// Pages shown with inverted colours.
+    pub(crate) invert: bool,
+    /// Every tab; the active one's slot is a placeholder while its state is in the fields
+    /// above (see `tabs.rs`).
+    pub(crate) tabs: Vec<crate::tabs::Tab>,
+    pub(crate) active_tab: usize,
+    /// The document pages are being inserted into, so the result can't land in another tab.
+    inserting: Option<DocId>,
+    /// When the file being opened was asked for, to report the time to its first page.
+    open_clock: Option<(PathBuf, std::time::Instant)>,
+    /// The tab under the pointer, which shows its close button.
+    pub(crate) hovered_tab: Option<usize>,
+    /// Quitting with several edited tabs: their names, for the summary dialog.
+    pub(crate) quit_summary: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     OpenDialog,
     Open(PathBuf),
+    /// A file from Open Recent; forgotten if it's gone.
+    OpenRecent(PathBuf),
+    /// ⌘T: open a document in a new tab.
+    NewTab,
+    /// ⌘W, or a tab's close button (its index).
+    CloseTab(Option<usize>),
+    SelectTab(usize),
+    /// The pointer is over a tab, or none.
+    TabHover(Option<usize>),
+    /// The quit summary's answers: review each edited tab, or discard them all.
+    QuitReview,
+    QuitDiscard,
+    /// The next (true) or previous tab.
+    StepTab(bool),
+    ClearRecent,
+    ToggleRecent,
+    HistoryReady(Result<(crate::prefs::History, Vec<ferrix_store::RecentFile>), String>),
+    RecentChanged(Vec<ferrix_store::RecentFile>),
+    SetLayout(Layout),
+    ToggleInvert,
     DialogClosed,
     Opened(Origin, Result<DocInfo, String>),
     GoTo(usize),
@@ -365,8 +481,37 @@ pub enum Message {
     TextLoaded(
         DocId,
         PageKey,
-        Result<std::sync::Arc<ferrix_text::PageText>, String>,
+        Result<
+            (
+                std::sync::Arc<ferrix_text::PageText>,
+                crate::navigate::Links,
+            ),
+            String,
+        >,
     ),
+    /// The file is encrypted: ask for its password.
+    NeedsPassword(Origin),
+    PasswordInput(String),
+    PasswordReveal,
+    PasswordSubmit,
+    PasswordCancel,
+    OutlineLoaded(DocId, Result<Vec<ferrix_engine::OutlineItem>, String>),
+    /// Open or close an outline entry (index, with its descendants).
+    OutlineToggle(usize, bool),
+    OutlineJump(usize),
+    /// A link on a page was clicked: the release that ends the press, then the link.
+    LinkReleased(PageKey, ferrix_types::PdfPoint, ferrix_engine::LinkTarget),
+    /// The pointer moved onto a link, or off one.
+    LinkHover(PageKey, Option<ferrix_engine::LinkTarget>),
+    /// The link confirmation: open it or not.
+    LinkAnswer(bool),
+    CopyLink,
+    Back,
+    Forward,
+    /// Space / Shift+Space: one screen down (true) or up.
+    ScreenScroll(bool),
+    /// The scroll wheel turned; with ⌘ (Ctrl elsewhere) held it zooms by this factor.
+    Wheel(f32),
     CopyText,
     SelectAllText,
     /// Mark the selected text: style and palette colour index.
@@ -374,7 +519,10 @@ pub enum Message {
     SidebarTab(crate::annotate_ui::SidebarTab),
     SetAppearance(Appearance),
     SystemTheme(iced::theme::Mode),
-    Measured(DocId, Result<Vec<Size>, String>),
+    Measured(
+        DocId,
+        Result<Vec<(Size, ferrix_types::PageTransform)>, String>,
+    ),
     /// A page image: (document, page, rotation, the engine document it was rendered from,
     /// scale factor, result).
     Rendered(
@@ -385,7 +533,17 @@ pub enum Message {
         f32,
         Result<Rendered, String>,
     ),
-    PageScrolled(f32),
+    /// The page view scrolled: vertical and horizontal offsets.
+    PageScrolled(f32, f32),
+    /// A band of tiles arrived (document, page, level, tiles).
+    TilesRendered(
+        DocId,
+        PageKey,
+        crate::render::Level,
+        Result<Vec<ferrix_render::TilePixels>, String>,
+    ),
+    /// The thumbnail column scrolled: offset and visible height.
+    ThumbsScrolled(f32, f32),
     Thumbnail(DocId, PageKey, Rotation, DocId, Result<Rendered, String>),
     WindowOpened(Option<window::Id>),
     ScaleFactor(f32),
@@ -483,12 +641,14 @@ impl App {
         initial: Option<PathBuf>,
     ) -> (Self, Task<Message>) {
         let error = engine.as_ref().err().cloned();
+        let settings = crate::prefs::load_settings();
+        let (zoom, layout) = (Zoom::from_saved(settings.zoom), settings.layout);
         let app = Self {
             engine,
             window: None,
             window_size: iced::Size::new(1180.0, 860.0),
             scale_factor: 1.0,
-            appearance: Appearance::System,
+            appearance: Appearance::from_saved(settings.appearance),
             system_dark: false,
             menu_open: false,
             markup: None,
@@ -496,10 +656,12 @@ impl App {
             signed_prompt: false,
             sidebar_tab: crate::annotate_ui::SidebarTab::Pages,
             text_selection: None,
-            author: None,
+            author: settings.author.clone(),
             author_input: String::new(),
-            sidebar: true,
-            zoom: Zoom::Auto,
+            sidebar: settings.sidebar,
+            zoom: Zoom::from_saved(settings.zoom),
+            layout: settings.layout,
+            invert: settings.invert_pages,
             doc: None,
             page_input: String::new(),
             error,
@@ -520,6 +682,19 @@ impl App {
             open_notice: None,
             find: None,
             clipboard: crate::clipboard::RichClipboard::default(),
+            settings,
+            history: None,
+            recent: Vec::new(),
+            link_prompt: None,
+            link_hint: None,
+            tabs: crate::tabs::first_tab(zoom, layout),
+            active_tab: 0,
+            inserting: None,
+            hovered_tab: None,
+            open_clock: None,
+            quit_summary: None,
+            password: None,
+            recent_open: false,
         };
         let open = initial.map_or_else(Task::none, |path| Task::done(Message::Open(path)));
         let boot = Task::batch([
@@ -531,6 +706,7 @@ impl App {
                     Message::ConverterReady(Arc::new(found.unwrap_or_default()))
                 },
             ),
+            Task::perform(crate::prefs::History::open(), Message::HistoryReady),
             Task::perform(blocking(|| Ok(crate::recovery::scan())), |found| {
                 Message::RecoveryFound(found.unwrap_or_default())
             }),
@@ -575,7 +751,7 @@ impl App {
 
     /// Whether page-editing actions are available right now.
     pub(crate) fn can_edit(&self) -> bool {
-        (self.doc.is_some() || self.writer.is_some())
+        (self.doc.as_ref().is_some_and(|d| !d.is_read_only()) || self.writer.is_some())
             && self.busy.is_none()
             && self.page_setup.is_none()
             && self.confirm.is_none()
@@ -584,16 +760,249 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        Task::batch([task, self.save_settings()])
+    }
+
+    /// Saves the preferences if this update changed any of them.
+    fn save_settings(&mut self) -> Task<Message> {
+        let mut settings = self.settings.clone();
+        settings.appearance = self.appearance.to_saved();
+        settings.author.clone_from(&self.author);
+        settings.sidebar = self.sidebar;
+        settings.zoom = self.zoom.to_saved();
+        settings.layout = self.layout;
+        settings.invert_pages = self.invert;
+        if settings == self.settings {
+            return Task::none();
+        }
+        self.settings = settings.clone();
+        Task::future(crate::prefs::save_settings(settings)).discard()
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::NewTab => {
+                self.menu_open = false;
+                return self.new_empty_tab();
+            }
+            Message::TabHover(tab) => self.hovered_tab = tab,
+            Message::QuitReview => {
+                self.quit_summary = None;
+                // Left to right: the first edited tab is asked about first.
+                let first = (0..self.tabs.len()).find(|&i| {
+                    if i == self.active_tab {
+                        self.active_dirty()
+                    } else {
+                        self.tabs[i].is_dirty()
+                    }
+                });
+                let show = first.map_or_else(Task::none, |i| self.select_tab(i));
+                self.confirm = Some(Proceed::Quit);
+                return show;
+            }
+            Message::QuitDiscard => {
+                self.quit_summary = None;
+                return self.quit_now();
+            }
+            Message::CloseTab(index) => {
+                self.menu_open = false;
+                if let Some(i) = index
+                    && i != self.active_tab
+                {
+                    // Closing another tab shows it first, so its unsaved changes can be asked
+                    // about with the document in view.
+                    let show = self.select_tab(i);
+                    if self.active_tab != i {
+                        return show;
+                    }
+                    return Task::batch([show, self.guard(Proceed::CloseTab)]);
+                }
+                return self.guard(Proceed::CloseTab);
+            }
+            Message::SelectTab(i) => return self.select_tab(i),
+            Message::StepTab(forward) => return self.step_tab(forward),
+            Message::OpenRecent(path) => {
+                self.menu_open = false;
+                self.recent_open = false;
+                if path.is_file() {
+                    return self.guard(Proceed::Open(path));
+                }
+                self.error = Some(format!(
+                    "“{}” couldn’t be found. It may have been moved or deleted, so it’s been \
+                     removed from Recent.",
+                    file_name(&path)
+                ));
+                self.recent.retain(|r| r.path != path);
+                if let Some(history) = self.history.clone() {
+                    return Task::perform(history.forget(path), Message::RecentChanged);
+                }
+            }
+            Message::ToggleRecent => self.recent_open = !self.recent_open,
+            Message::ClearRecent => {
+                self.menu_open = false;
+                self.recent_open = false;
+                self.recent.clear();
+                self.notice = Some("Recent documents cleared.".into());
+                if let Some(history) = self.history.clone() {
+                    return Task::perform(history.clear(), Message::RecentChanged);
+                }
+            }
+            Message::NeedsPassword(origin) => {
+                self.reopen_at = None;
+                match self.password.as_mut() {
+                    // A wrong password: say so and select it, so typing replaces it.
+                    Some(prompt) if prompt.checking => {
+                        prompt.checking = false;
+                        prompt.wrong = true;
+                    }
+                    _ => {
+                        self.password = Some(PasswordPrompt {
+                            origin,
+                            password: String::new(),
+                            reveal: false,
+                            wrong: false,
+                            checking: false,
+                        });
+                    }
+                }
+                return Task::batch([
+                    operation::focus(password_input_id()),
+                    operation::select_all(password_input_id()),
+                ]);
+            }
+            Message::PasswordInput(value) => {
+                if let Some(prompt) = self.password.as_mut() {
+                    prompt.password = value;
+                    prompt.wrong = false;
+                }
+            }
+            Message::PasswordReveal => {
+                if let Some(prompt) = self.password.as_mut() {
+                    prompt.reveal = !prompt.reveal;
+                }
+            }
+            Message::PasswordCancel => self.password = None,
+            Message::PasswordSubmit => {
+                let Some(prompt) = self.password.as_mut().filter(|p| !p.checking) else {
+                    return Task::none();
+                };
+                if prompt.password.is_empty() {
+                    return Task::none();
+                }
+                prompt.checking = true;
+                let (origin, secret) = (
+                    prompt.origin.clone(),
+                    ferrix_engine::Secret::new(prompt.password.clone()),
+                );
+                return self.load_with(origin, Some(secret), Message::Opened);
+            }
+            Message::OutlineLoaded(doc, result) => self.outline_loaded(doc, result),
+            Message::OutlineToggle(index, all) => self.outline_toggle(index, all),
+            Message::OutlineJump(index) => return self.outline_jump(index),
+            Message::LinkReleased(page, at, target) => {
+                self.link_hint = None;
+                let release = self.annot_update(crate::annotate_ui::AnnotMsg::Pointer(
+                    page,
+                    crate::markup_canvas::Pointer::Release(at),
+                ));
+                // A click leaves no selection behind.
+                self.text_selection = None;
+                return Task::batch([release, self.follow_link(page, target)]);
+            }
+            Message::LinkHover(page, target) => self.link_hover(page, target),
+            Message::LinkAnswer(open) => return self.link_answer(open),
+            Message::CopyLink => return self.copy_link(),
+            Message::Back => return self.go_back(),
+            Message::ScreenScroll(down) => {
+                let height = self.viewport_height();
+                let Some(doc) = self.doc.as_ref().filter(|_| self.writer.is_none()) else {
+                    return Task::none();
+                };
+                // One screen, keeping 48 of overlap so the reader doesn't lose the line.
+                let step = (height - 48.0).max(48.0);
+                let max = (doc.strip.content.height - height).max(0.0);
+                let top = if down {
+                    doc.scroll + step
+                } else {
+                    doc.scroll - step
+                }
+                .clamp(0.0, max);
+                return self.scroll_pages_to(top);
+            }
+            Message::Wheel(factor) => {
+                let zoom_key = if cfg!(target_os = "macos") {
+                    self.modifiers.logo()
+                } else {
+                    self.modifiers.control()
+                };
+                if !zoom_key || self.confirm.is_some() || self.new_form.is_some() {
+                    return Task::none();
+                }
+                let current = match &self.writer {
+                    Some(w) => Some(w.zoom / LOGICAL_PX_PER_POINT),
+                    None => self
+                        .doc
+                        .as_ref()
+                        .filter(|d| d.is_measured())
+                        .map(|d| d.strip.zoom),
+                };
+                if let Some(current) = current {
+                    let next = (current * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+                    if (next - current).abs() > 1e-4 {
+                        return self.set_zoom(Zoom::Fixed(next));
+                    }
+                }
+            }
+            Message::Forward => return self.go_forward(),
+            Message::HistoryReady(Ok((history, recent))) => {
+                self.history = Some(history);
+                self.recent = recent;
+            }
+            Message::HistoryReady(Err(e)) => tracing::warn!("history: {e}"),
+            Message::RecentChanged(recent) => self.recent = recent,
+            Message::SetLayout(layout) => {
+                self.menu_open = false;
+                if layout != self.layout {
+                    self.layout = layout;
+                    return self.render();
+                }
+            }
+            Message::ToggleInvert => {
+                self.menu_open = false;
+                self.invert = !self.invert;
+                if let Some(doc) = self.doc.as_mut() {
+                    // Rendered pages and thumbnails carry the old colours.
+                    doc.images.clear();
+                    doc.tiles.clear();
+                    doc.thumbnails.clear();
+                }
+                return Task::batch([self.render_pages(), self.next_thumbnail()]);
+            }
             Message::OpenDialog => {
                 self.menu_open = false;
                 return self.guard(Proceed::OpenDialog);
             }
             Message::Open(path) => return self.guard(Proceed::Open(path)),
             Message::DialogClosed => {}
-            Message::Opened(origin, Ok(info)) => return self.opened(origin, info),
+            Message::Opened(origin, Ok(info)) => {
+                let password = self.password.take().filter(|p| p.checking);
+                let task = self.opened(origin, info);
+                if let Some(doc) = self.doc.as_mut() {
+                    if let Some(prompt) = password {
+                        doc.encrypted = Some(ferrix_engine::Secret::new(prompt.password));
+                    }
+                    // Also files that open without a password but are encrypted all the same:
+                    // a save would have to encrypt what it adds (ADR-0003).
+                    if doc.is_read_only() {
+                        self.notice = Some(READ_ONLY_NOTICE.into());
+                    }
+                }
+                return task;
+            }
             Message::Opened(origin, Err(e)) => {
                 self.reopen_at = None;
+                self.password = None;
                 self.error = Some(format!("Couldn’t open “{}”: {e}", origin.file_name()));
             }
             Message::GoTo(index) => return self.go_to(index),
@@ -609,7 +1018,7 @@ impl App {
             }
             Message::PageSubmit => {
                 let task = match self.page_input.parse::<usize>() {
-                    Ok(n) if n >= 1 => self.go_to(n - 1),
+                    Ok(n) if n >= 1 => self.jump(n - 1, None),
                     _ => Task::none(),
                 };
                 self.sync_page_input();
@@ -637,7 +1046,10 @@ impl App {
                     Appearance::Dark
                 };
             }
-            Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::ToggleMenu => {
+                self.menu_open = !self.menu_open;
+                self.recent_open = false;
+            }
             Message::Annot(msg) => return self.annot_update(msg),
             Message::TextLoaded(doc_id, page, result) => {
                 return self.text_loaded(doc_id, page, result);
@@ -666,7 +1078,13 @@ impl App {
                     return Task::none(); // the document was closed meanwhile
                 };
                 match result {
-                    Ok(sizes) => source.sizes = sizes,
+                    Ok(pages) => {
+                        source.sizes = pages.iter().map(|(s, _)| *s).collect();
+                        // Until (or unless) the annotations are read, which read them too.
+                        if source.transforms.is_empty() {
+                            source.transforms = pages.into_iter().map(|(_, t)| t).collect();
+                        }
+                    }
                     Err(e) => self.error = Some(format!("Couldn’t read the page sizes: {e}")),
                 }
                 return self.render();
@@ -677,7 +1095,24 @@ impl App {
                 };
                 doc.render_busy = false;
                 match result {
+                    // Rendered before Dark Pages was switched; render it again.
+                    Ok(r) if r.inverted != self.invert => {}
                     Ok(r) => {
+                        // The first page on screen: report the time since it was asked for
+                        // (`FERRIX_LOG=ferrix::perf=info`; the benchmark reads it too).
+                        if !doc.first_paint && doc.key_at(doc.current) == Some(key) {
+                            doc.first_paint = true;
+                            if let Some((path, at)) = self.open_clock.take()
+                                && doc.origin.path() == Some(path.as_path())
+                            {
+                                tracing::info!(
+                                    target: "ferrix::perf",
+                                    first_paint_ms = at.elapsed().as_secs_f64() * 1000.0,
+                                    pages = doc.len(),
+                                    "first paint"
+                                );
+                            }
+                        }
                         doc.images.insert(
                             key,
                             Shown {
@@ -685,6 +1120,7 @@ impl App {
                                 source,
                                 zoom: r.zoom,
                                 scale_factor,
+                                base: r.base,
                                 image: r.into_image(),
                             },
                         );
@@ -697,13 +1133,30 @@ impl App {
                 }
                 return Task::batch([self.render_pages(), self.load_texts()]);
             }
-            Message::PageScrolled(top) => return self.page_scrolled(top),
+            Message::PageScrolled(top, left) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.scroll_x = left;
+                }
+                return self.page_scrolled(top);
+            }
+            Message::TilesRendered(doc_id, key, level, result) => {
+                return self.tiles_rendered(doc_id, key, level, result);
+            }
+            Message::ThumbsScrolled(top, height) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.thumb_scroll = top;
+                    doc.thumb_view = height;
+                }
+                return self.next_thumbnail();
+            }
             Message::Thumbnail(doc_id, key, rotation, source, result) => {
                 let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
                     return Task::none(); // the document was closed meanwhile
                 };
                 doc.thumbnail_busy = false;
-                if let Ok(r) = result {
+                if let Ok(r) = result
+                    && r.inverted == self.invert
+                {
                     doc.thumbnails.insert(
                         key,
                         Thumbnail {
@@ -854,6 +1307,7 @@ impl App {
                 });
             }
             Message::Insert(path) => {
+                self.inserting = self.doc.as_ref().map(|d| d.info.id);
                 if kind_of(&path) == Some(Kind::Pdf) {
                     return self.load(Origin::File(path), Message::Inserted);
                 }
@@ -954,6 +1408,15 @@ impl App {
                     Message::SaveAsPicked(file.map(|f| f.path().to_path_buf()))
                 });
             }
+            Message::SaveAsPicked(Some(path))
+                if self.tab_with(&path).is_some_and(|i| i != self.active_tab) =>
+            {
+                self.after_save = None;
+                self.error = Some(format!(
+                    "“{}” is open in another tab. Close it first, then save.",
+                    file_name(&path)
+                ));
+            }
             Message::SaveAsPicked(Some(path)) if self.writer.is_some() => {
                 return self.save_writer(path);
             }
@@ -1029,6 +1492,11 @@ impl App {
                     Choice::Discard => return self.proceed(next),
                     Choice::Cancel => {}
                 }
+            }
+            Message::Escape if self.quit_summary.is_some() => self.quit_summary = None,
+            Message::Escape if self.link_prompt.is_some() => self.link_prompt = None,
+            Message::Escape if self.password.as_ref().is_some_and(|p| !p.checking) => {
+                self.password = None;
             }
             Message::Escape if self.menu_open => self.menu_open = false,
             Message::Escape if self.signed_prompt => self.signed_prompt = false,
@@ -1449,6 +1917,19 @@ impl App {
                 {
                     shortcut(&key, modifiers)
                 }
+                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Back)) => {
+                    Some(Message::Back)
+                }
+                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Forward)) => {
+                    Some(Message::Forward)
+                }
+                _ => None,
+            }),
+            // ⌘ + scroll on macOS (Ctrl + scroll is the system's zoom there), Ctrl elsewhere.
+            event::listen_with(|event, _status, _window| match event {
+                Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                    Some(Message::Wheel(wheel_factor(delta)))
+                }
                 _ => None,
             }),
         ])
@@ -1460,6 +1941,17 @@ impl App {
     fn guard(&mut self, next: Proceed) -> Task<Message> {
         if self.busy.is_some() {
             return Task::none();
+        }
+        // Everything else opens in a new tab and loses nothing.
+        if !matches!(next, Proceed::CloseTab | Proceed::Quit) {
+            return self.proceed(next);
+        }
+        if next == Proceed::Quit {
+            let edited = self.dirty_tab_names();
+            if edited.len() > 1 {
+                self.quit_summary = Some(edited);
+                return Task::none();
+            }
         }
         if self.doc.as_ref().is_some_and(Document::is_dirty)
             || self.writer.as_ref().is_some_and(|w| w.editor.is_dirty())
@@ -1477,8 +1969,12 @@ impl App {
                     Message::Open(f.path().to_path_buf())
                 })
             }),
-            // Unsaved changes were already dealt with, so open directly.
             Proceed::Open(path) => {
+                // Already open: show it rather than opening it twice.
+                if let Some(i) = self.tab_with(&path) {
+                    return self.select_tab(i);
+                }
+                self.open_clock = Some((path.clone(), std::time::Instant::now()));
                 if kind_of(&path) == Some(Kind::Pdf) {
                     self.check_writing(path)
                 } else {
@@ -1490,15 +1986,25 @@ impl App {
                 Task::none()
             }
             Proceed::Recover => self.start_recovery(),
+            Proceed::CloseTab => {
+                // Saved, discarded or clean: closing loses nothing it shouldn't.
+                let close = self.close_document();
+                Task::batch([close, self.remove_active_tab()])
+            }
             Proceed::Quit => {
-                // Leaving with nothing unsaved (or by choice): no recovery needed.
-                if let Some(journal) = self.journal.take() {
-                    journal.discard();
+                // The active tab is saved, discarded or clean. A parked tab with unsaved
+                // changes is shown next and asked about; quitting resumes after its answer.
+                if self.dirty_parked_tab().is_some() {
+                    let close = self.close_document();
+                    let remove = self.remove_active_tab();
+                    let show = match self.dirty_parked_tab() {
+                        Some(next) if !self.active_dirty() => self.select_tab(next),
+                        _ => Task::none(),
+                    };
+                    self.confirm = Some(Proceed::Quit);
+                    return Task::batch([close, remove, show]);
                 }
-                if let Some(journal) = self.writer_journal.take() {
-                    journal.discard();
-                }
-                iced::exit()
+                self.quit_now()
             }
         }
     }
@@ -1522,6 +2028,17 @@ impl App {
         origin: Origin,
         done: fn(Origin, Result<DocInfo, String>) -> Message,
     ) -> Task<Message> {
+        self.load_with(origin, None, done)
+    }
+
+    /// Opens `origin` with `password`; an encrypted file asks for its password instead of
+    /// reporting an error.
+    fn load_with(
+        &mut self,
+        origin: Origin,
+        password: Option<ferrix_engine::Secret>,
+        done: fn(Origin, Result<DocInfo, String>) -> Message,
+    ) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
@@ -1532,10 +2049,17 @@ impl App {
                     Origin::File(path) => DocSource::Path(path.clone()),
                     Origin::Untitled { bytes, .. } => DocSource::Bytes(bytes.as_ref().clone()),
                 };
-                let result = flatten(engine.call(move |e| e.open(source, None)).await);
+                let result = engine
+                    .call(move |e| e.open(source, password.as_ref()))
+                    .await;
                 (origin, result)
             },
-            move |(origin, result)| done(origin, result),
+            move |(origin, result)| match result {
+                Ok(Err(ferrix_engine::EngineError::PasswordRequired)) => {
+                    Message::NeedsPassword(origin)
+                }
+                other => done(origin, flatten(other)),
+            },
         )
     }
 
@@ -1567,12 +2091,17 @@ impl App {
     }
 
     fn opened(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
+        // A reload after saving stays in its tab; anything else gets a tab of its own.
+        if self.reopen_at.is_none() {
+            self.open_in_new_tab();
+        }
         let close = self.close_document();
         if info.page_count == 0 {
             self.error = Some("This document has no pages".into());
             return close;
         }
         let mut doc = Document::new(origin, info);
+        let mut touch = Task::none();
         if let Some(at) = self.reopen_at.take() {
             let at = at.min(doc.len() - 1);
             doc.current = at;
@@ -1581,13 +2110,41 @@ impl App {
             }
         } else {
             self.notice = self.open_notice.take();
+            if let (Some(history), Some(path)) =
+                (&self.history, doc.origin.path().map(PathBuf::from))
+            {
+                let saved = self
+                    .settings
+                    .restore_position
+                    .then(|| history.view(&path))
+                    .flatten();
+                if let Some(view) = saved {
+                    let at = (view.page as usize).min(doc.len() - 1);
+                    doc.current = at;
+                    doc.scroll_within = view.within;
+                    if let Some(key) = doc.key_at(at) {
+                        doc.select_only(key);
+                    }
+                    self.zoom = Zoom::from_saved(view.zoom);
+                    self.layout = view.layout;
+                }
+                touch = Task::perform(history.clone().touch(path), Message::RecentChanged);
+            }
         }
         let measure = self.measure(doc.info.id, doc.info.page_count);
         let annots = load_annotations(&doc.origin, doc.info.id, ferrix_core::SourceId::BASE);
+        let outline = self.load_outline(doc.info.id);
         self.doc = Some(doc);
         self.sync_journal();
         self.sync_page_input();
-        Task::batch([close, measure, annots, self.next_thumbnail()])
+        Task::batch([
+            close,
+            measure,
+            annots,
+            outline,
+            touch,
+            self.next_thumbnail(),
+        ])
     }
 
     /// Opens the documents behind the first recoverable session.
@@ -1663,6 +2220,7 @@ impl App {
             }
             return Task::none();
         }
+        self.open_in_new_tab();
         let close = self.close_document();
         let base_and_sources: Vec<(DocId, u32)> =
             infos.iter().map(|i| (i.id, i.page_count)).collect();
@@ -1735,16 +2293,66 @@ impl App {
         if let Some(writer) = self.writer.take() {
             self.fonts = Some(writer.editor.into_fonts());
         }
+        let remember = self.remember_view();
         let (Some(doc), Ok(engine)) = (self.doc.take(), self.engine.clone()) else {
-            return Task::none();
+            return remember;
         };
         let ids = doc.engine_docs();
-        Task::future(async move {
+        let close = Task::future(async move {
             engine
                 .call(move |e| ids.into_iter().for_each(|id| e.close(id)))
                 .await
         })
-        .discard()
+        .discard();
+        Task::batch([remember, close])
+    }
+
+    /// Where the open PDF is left, if it is a file whose position is worth keeping.
+    fn view_state(&self) -> Option<(PathBuf, ferrix_store::ViewState)> {
+        let doc = self.doc.as_ref().filter(|d| d.is_measured())?;
+        let path = doc.origin.path()?.to_path_buf();
+        let view = ferrix_store::ViewState {
+            page: u32::try_from(doc.current).unwrap_or(0),
+            within: doc.scroll_within,
+            zoom: self.zoom.to_saved(),
+            layout: self.layout,
+        };
+        Some((path, view))
+    }
+
+    /// Quits now: positions remembered, every unsaved change let go (by choice, or there are
+    /// none), so no recovery is offered next time.
+    fn quit_now(&mut self) -> Task<Message> {
+        // The app exits before a background write could finish.
+        if let Some(history) = &self.history {
+            let views = self.view_state().into_iter().chain(self.parked_views());
+            for (path, view) in views {
+                history.set_view_now(&path, view);
+            }
+        }
+        if let Some(journal) = self.journal.take() {
+            journal.discard();
+        }
+        if let Some(journal) = self.writer_journal.take() {
+            journal.discard();
+        }
+        self.discard_parked_journals();
+        iced::exit()
+    }
+
+    /// A reload of the saved document is on its way; it must land in this tab.
+    pub(crate) fn reloading(&self) -> bool {
+        self.reopen_at.is_some()
+    }
+
+    /// Remembers where the open PDF was left, in the background.
+    fn remember_view(&self) -> Task<Message> {
+        match (self.view_state(), self.history.clone()) {
+            (Some((path, view)), Some(history)) => {
+                Task::future(history.set_view(path, view)).discard()
+            }
+            _ => Task::none(),
+        }
     }
 
     // ── Editing ───────────────────────────────────────────────────────────────
@@ -1761,6 +2369,11 @@ impl App {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
+        // The last line of defence: no path may edit an encrypted document (ADR-0003).
+        if doc.is_read_only() {
+            self.notice = Some(READ_ONLY_NOTICE.into());
+            return Task::none();
+        }
         match doc.edit(edit, label) {
             Ok(()) => {
                 self.notice = None;
@@ -1824,6 +2437,18 @@ impl App {
     }
 
     fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
+        // The pages belong to the document they were chosen for, which may be in another tab
+        // by now.
+        if self.inserting.take() != self.doc.as_ref().map(|d| d.info.id) {
+            return close_engine_id(self.engine.clone().ok(), Some(info.id));
+        }
+        if info.encrypted {
+            self.error = Some(format!(
+                "“{}” is encrypted, so its pages can’t be inserted yet.",
+                origin.file_name()
+            ));
+            return close_engine_id(self.engine.clone().ok(), Some(info.id));
+        }
         let Some(doc) = self.editable() else {
             return Task::none();
         };
@@ -1856,13 +2481,21 @@ impl App {
 
     /// Replaces whatever is open with a written document.
     fn open_writer(&mut self, writer: Writer) -> Task<Message> {
+        self.open_in_new_tab();
         let close = self.close_document();
+        let touch = match (&self.history, &writer.path) {
+            (Some(history), Some(path)) => {
+                Task::perform(history.clone().touch(path.clone()), Message::RecentChanged)
+            }
+            _ => Task::none(),
+        };
         self.error = None;
         self.writer = Some(writer);
         self.sync_writer_journal();
         self.refresh_writer();
         Task::batch([
             close,
+            touch,
             operation::snap_to(writer_scroll_id(), scrollable::RelativeOffset::START),
         ])
     }
@@ -2031,7 +2664,7 @@ impl App {
     }
 
     /// Applies the zoom to the writer and redraws its pages.
-    fn refresh_writer(&mut self) {
+    pub(crate) fn refresh_writer(&mut self) {
         let canvas = crate::view::canvas_size(self.window_size, false);
         let (zoom, scale_factor) = (self.zoom, self.scale_factor);
         let Some(w) = &mut self.writer else {
@@ -2044,6 +2677,7 @@ impl App {
                 height: page.height,
             },
             canvas,
+            Layout::Continuous,
         );
         w.zoom = factor * LOGICAL_PX_PER_POINT;
         w.refresh(scale_factor);
@@ -2257,6 +2891,9 @@ impl App {
     /// The window minus the Markup bar while it shows, for page-layout sums.
     fn view_window(&self) -> iced::Size {
         let mut size = self.window_size;
+        if self.tabs.len() > 1 {
+            size.height -= crate::view_tabs::TAB_BAR_HEIGHT + 1.0;
+        }
         if self.markup.is_some() {
             size.height -= crate::view::BAR_HEIGHT + 1.0;
         }
@@ -2348,6 +2985,7 @@ impl App {
 
     /// Scrolls the page view to the top of page `index`, and the sidebar to its thumbnail.
     fn show_page(&mut self, index: usize) -> Task<Message> {
+        self.place_page(index);
         let height = self.viewport_height();
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
@@ -2360,6 +2998,23 @@ impl App {
             self.follow_in_sidebar(),
             self.render_pages(),
         ])
+    }
+
+    /// In the single page layout, lays the view out for page `index` if another page is
+    /// shown. Other layouts place every page already.
+    pub(crate) fn place_page(&mut self, index: usize) {
+        let layout = self.layout;
+        let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
+            return;
+        };
+        if layout != Layout::SinglePage
+            || doc.strip.rows.first().is_some_and(|r| r.contains(&index))
+        {
+            return;
+        }
+        let sizes = doc.page_sizes();
+        doc.current = index;
+        doc.strip = Strip::with_layout(&sizes, doc.strip.zoom, layout, index);
     }
 
     pub(crate) fn scroll_pages_to(&mut self, top: f32) -> Task<Message> {
@@ -2376,19 +3031,27 @@ impl App {
     }
 
     /// Keeps the current page's thumbnail in view.
-    pub(crate) fn follow_in_sidebar(&self) -> Task<Message> {
-        let Some(doc) = &self.doc else {
+    pub(crate) fn follow_in_sidebar(&mut self) -> Task<Message> {
+        let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
-        let follow = if doc.len() > 1 {
-            doc.current as f32 / (doc.len() - 1) as f32
-        } else {
-            0.0
+        let Some(top) = doc
+            .thumb_column()
+            .reveal(doc.current, doc.thumb_scroll, doc.thumb_view)
+        else {
+            return Task::none();
         };
-        operation::snap_to(
-            sidebar_scroll_id(),
-            scrollable::RelativeOffset { x: 0.0, y: follow },
-        )
+        doc.thumb_scroll = top;
+        Task::batch([
+            operation::scroll_to(
+                sidebar_scroll_id(),
+                scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(top),
+                },
+            ),
+            self.next_thumbnail(),
+        ])
     }
 
     /// The user scrolled the pages: the page filling most of the view becomes current.
@@ -2418,12 +3081,17 @@ impl App {
 
     /// Lays the pages out for the current zoom and window, keeping the view on the same spot
     /// of the current page, then renders the pages in view.
-    fn render(&mut self) -> Task<Message> {
+    pub(crate) fn render(&mut self) -> Task<Message> {
         if self.writer.is_some() {
             self.refresh_writer();
             return Task::none();
         }
-        let (zoom, canvas, height) = (self.zoom, self.canvas_size(), self.viewport_height());
+        let (zoom, canvas, height, layout) = (
+            self.zoom,
+            self.canvas_size(),
+            self.viewport_height(),
+            self.layout,
+        );
         let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
             return Task::none();
         };
@@ -2432,9 +3100,14 @@ impl App {
         let largest = sizes.iter().fold(Size::new(0.0, 0.0), |m, s| {
             Size::new(m.width.max(s.width), m.height.max(s.height))
         });
-        let strip = Strip::new(&sizes, zoom.resolve(largest, canvas));
+        let strip = Strip::with_layout(
+            &sizes,
+            zoom.resolve(largest, canvas, layout),
+            layout,
+            doc.current,
+        );
         let first = doc.strip.len() == 0;
-        let top = if first {
+        let top = if first && doc.scroll_within == 0.0 {
             let top = strip.offset_of(doc.current, height);
             doc.scroll_within = strip.fraction(doc.current, top);
             top
@@ -2450,67 +3123,8 @@ impl App {
         Task::batch([scroll, self.render_pages()])
     }
 
-    /// Renders the next page in or next to the view that is missing or out of date; each
-    /// result schedules the one after it. Pages further away are dropped.
-    pub(crate) fn render_pages(&mut self) -> Task<Message> {
-        let (height, scale_factor) = (self.viewport_height(), self.scale_factor);
-        let Ok(engine) = self.engine.clone() else {
-            return Task::none();
-        };
-        let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
-            return Task::none();
-        };
-        let visible = doc.strip.visible(doc.scroll, height);
-        // One page either side, so a short scroll finds it ready.
-        let near = visible.start.saturating_sub(1)..(visible.end + 1).min(doc.len());
-        let keep: HashSet<PageKey> = near.clone().filter_map(|i| doc.key_at(i)).collect();
-        doc.images.retain(|k, _| keep.contains(k));
-        if doc.render_busy {
-            return Task::none();
-        }
-        let zoom = doc.strip.zoom;
-        // The current page first, then the rest of the view, then its neighbours.
-        let next = std::iter::once(doc.current)
-            .chain(visible)
-            .chain(near.clone())
-            .filter(|i| near.contains(i))
-            .find_map(|i| {
-                let entry = doc.state.pages.get(i)?;
-                if doc.render_failed.contains(&entry.key) {
-                    return None;
-                }
-                let page = doc.page_ref(entry)?;
-                // Also stale once the source shows a newer annotation preview (ADR-0009 §7).
-                let fresh = doc.images.get(&entry.key).is_some_and(|s| {
-                    s.rotation == entry.rotation
-                        && s.source == page.doc
-                        && s.zoom == zoom
-                        && s.scale_factor == scale_factor
-                });
-                if fresh { None } else { Some((entry.key, page)) }
-            });
-        let Some((key, page)) = next else {
-            return Task::none();
-        };
-        doc.render_busy = true;
-        let doc_id = doc.info.id;
-        Task::perform(
-            async move {
-                let result = engine
-                    .call(move |e| {
-                        render_page(e, page, zoom * LOGICAL_PX_PER_POINT, scale_factor, zoom)
-                    })
-                    .await;
-                flatten(result)
-            },
-            move |result| {
-                Message::Rendered(doc_id, key, page.rotation, page.doc, scale_factor, result)
-            },
-        )
-    }
-
     /// Reads the size of every page of an engine document in the background.
-    fn measure(&self, doc: DocId, pages: u32) -> Task<Message> {
+    pub(crate) fn measure(&self, doc: DocId, pages: u32) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
@@ -2519,7 +3133,10 @@ impl App {
                 let result = engine
                     .call(move |e| {
                         (0..pages)
-                            .map(|i| e.page_info(doc, PageIndex(i)).map(|p| p.size))
+                            .map(|i| {
+                                e.page_info(doc, PageIndex(i))
+                                    .map(|p| (p.size, p.transform))
+                            })
                             .collect::<Result<Vec<_>, _>>()
                     })
                     .await;
@@ -2530,7 +3147,7 @@ impl App {
     }
 
     /// Renders the next missing thumbnail; each result schedules the one after it.
-    fn next_thumbnail(&mut self) -> Task<Message> {
+    pub(crate) fn next_thumbnail(&mut self) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
@@ -2543,10 +3160,11 @@ impl App {
         doc.thumbnail_busy = true;
         let doc_id = doc.info.id;
         let scale_factor = self.scale_factor.max(2.0);
+        let invert = self.invert;
         Task::perform(
             async move {
                 let result = engine
-                    .call(move |e| render_thumbnail(e, page, scale_factor))
+                    .call(move |e| render_thumbnail(e, page, scale_factor, invert))
                     .await;
                 flatten(result)
             },
@@ -2559,11 +3177,12 @@ fn render_thumbnail(
     engine: &mut PdfiumEngine,
     page: PageRef,
     scale_factor: f32,
+    invert: bool,
 ) -> Result<Rendered, ferrix_engine::EngineError> {
     let size = crate::render::page_size(engine, page)?;
     // Fit a box THUMB_WIDTH wide, and not much taller, whatever the orientation.
     let scale = (THUMB_WIDTH / size.width).min(THUMB_WIDTH * 1.4 / size.height);
-    render_page(engine, page, scale, scale_factor, 0.0)
+    render_page(engine, page, scale, scale_factor, 0.0, invert)
 }
 
 /// Closes a preview that is no longer wanted.
@@ -2584,7 +3203,7 @@ fn close_engine_id(engine: Option<Worker>, id: Option<DocId>) -> Task<Message> {
 }
 
 /// Reads a source's annotations in the background.
-fn load_annotations(
+pub(crate) fn load_annotations(
     origin: &Origin,
     engine_doc: DocId,
     source: ferrix_core::SourceId,
@@ -2676,10 +3295,46 @@ impl Export {
 fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     use keyboard::Key;
     match key.as_ref() {
+        // Back and Forward: ⌘[ ⌘] on macOS, Alt+← Alt+→ elsewhere.
+        Key::Named(Named::ArrowLeft) if modifiers.alt() && !cfg!(target_os = "macos") => {
+            Some(Message::Back)
+        }
+        Key::Named(Named::ArrowRight) if modifiers.alt() && !cfg!(target_os = "macos") => {
+            Some(Message::Forward)
+        }
+        Key::Character("[") if modifiers.command() && cfg!(target_os = "macos") => {
+            Some(Message::Back)
+        }
+        Key::Character("]") if modifiers.command() && cfg!(target_os = "macos") => {
+            Some(Message::Forward)
+        }
+        // Sidebar tabs: ⌥⌘2/3/4 on macOS (Preview's keys), Ctrl+Shift+2/3/4 elsewhere, where
+        // Ctrl+Alt is AltGr. Shifted digits arrive as symbols on some layouts, so match the
+        // physical key's digit too.
+        Key::Character(c)
+            if modifiers.command()
+                && (if cfg!(target_os = "macos") {
+                    modifiers.alt()
+                } else {
+                    modifiers.shift()
+                })
+                && sidebar_tab_key(c).is_some() =>
+        {
+            sidebar_tab_key(c).map(Message::SidebarTab)
+        }
+        Key::Named(Named::Space) => Some(Message::ScreenScroll(!modifiers.shift())),
+        // Control+Tab on every platform (⌘ is never Control here, even on macOS).
+        Key::Named(Named::Tab) if modifiers.control() => Some(Message::StepTab(!modifiers.shift())),
         Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::Move { earlier: true }),
         Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::Move { earlier: false }),
-        Key::Named(Named::ArrowRight | Named::PageDown) => Some(Message::Next),
-        Key::Named(Named::ArrowLeft | Named::PageUp) => Some(Message::Previous),
+        Key::Named(Named::ArrowRight) => Some(Message::Next),
+        Key::Named(Named::ArrowLeft) => Some(Message::Previous),
+        Key::Named(Named::PageDown) if modifiers.control() => Some(Message::StepTab(true)),
+        Key::Named(Named::PageUp) if modifiers.control() => Some(Message::StepTab(false)),
+        Key::Named(Named::F4) if modifiers.control() => Some(Message::CloseTab(None)),
+        // One screen at a time, as in Preview and Acrobat; ← → still turn pages.
+        Key::Named(Named::PageDown) => Some(Message::ScreenScroll(true)),
+        Key::Named(Named::PageUp) => Some(Message::ScreenScroll(false)),
         Key::Named(Named::Home) => Some(Message::First),
         Key::Named(Named::End) => Some(Message::Last),
         Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
@@ -2696,6 +3351,10 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "a" => Some(Message::SelectAllText),
                 "c" => Some(Message::CopyText),
                 "o" => Some(Message::OpenDialog),
+                "t" => Some(Message::NewTab),
+                "w" => Some(Message::CloseTab(None)),
+                "}" | "]" if shift => Some(Message::StepTab(true)),
+                "{" | "[" if shift => Some(Message::StepTab(false)),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
                 "f" => Some(Message::FindOpen),
@@ -2722,6 +3381,29 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
     }
 }
 
+/// The zoom factor for one wheel event: ×1.1 per notch, trackpads proportionally.
+fn wheel_factor(delta: iced::mouse::ScrollDelta) -> f32 {
+    let notches = match delta {
+        iced::mouse::ScrollDelta::Lines { y, .. } => y,
+        iced::mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
+    };
+    1.1_f32.powf(notches.clamp(-5.0, 5.0))
+}
+
+/// The sidebar tab a digit key selects.
+fn sidebar_tab_key(c: &str) -> Option<crate::annotate_ui::SidebarTab> {
+    use crate::annotate_ui::SidebarTab;
+    match c {
+        "2" | "@" | "\"" | "é" => Some(SidebarTab::Pages),
+        "3" | "#" | "§" | "\u{a3}" => Some(SidebarTab::Outline),
+        "4" | "$" | "'" | "\u{a4}" => Some(SidebarTab::Comments),
+        // ⌥ on macOS turns digits into symbols (US layout: ™ £ ¢).
+        "™" => Some(SidebarTab::Pages),
+        "¢" => Some(SidebarTab::Comments),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2731,16 +3413,40 @@ mod tests {
     #[test]
     fn fit_modes_fill_the_canvas() {
         let canvas = iced::Size::new(816.0, 600.0); // exactly letter width at 100%
-        assert!((Zoom::FitWidth.resolve(LETTER, canvas) - 1.0).abs() < 1e-4);
-        let fit_page = Zoom::FitPage.resolve(LETTER, canvas);
+        assert!((Zoom::FitWidth.resolve(LETTER, canvas, Layout::Continuous) - 1.0).abs() < 1e-4);
+        let fit_page = Zoom::FitPage.resolve(LETTER, canvas, Layout::Continuous);
         assert!((fit_page * 792.0 * LOGICAL_PX_PER_POINT - 600.0).abs() < 0.01);
     }
 
     #[test]
     fn auto_zoom_never_enlarges_past_the_cap() {
         let huge = iced::Size::new(4000.0, 4000.0);
-        assert_eq!(Zoom::Auto.resolve(LETTER, huge), MAX_AUTO_ZOOM);
-        assert_eq!(Zoom::Fixed(9.0).resolve(LETTER, huge), MAX_ZOOM);
+        assert_eq!(
+            Zoom::Auto.resolve(LETTER, huge, Layout::Continuous),
+            MAX_AUTO_ZOOM
+        );
+        assert_eq!(
+            Zoom::Fixed(9.0).resolve(LETTER, huge, Layout::Continuous),
+            MAX_ZOOM
+        );
+    }
+
+    #[test]
+    fn page_keys_scroll_a_screen_and_arrows_turn_pages() {
+        let none = keyboard::Modifiers::default();
+        let key = |n| keyboard::Key::Named(n);
+        assert!(matches!(
+            shortcut(&key(Named::PageDown), none),
+            Some(Message::ScreenScroll(true))
+        ));
+        assert!(matches!(
+            shortcut(&key(Named::PageUp), none),
+            Some(Message::ScreenScroll(false))
+        ));
+        assert!(matches!(
+            shortcut(&key(Named::ArrowRight), none),
+            Some(Message::Next)
+        ));
     }
 
     #[test]
@@ -2840,6 +3546,183 @@ mod tests {
             }
             .run(),
         )
+    }
+
+    /// Opens fixture `name` through the app as the user would, returning its path.
+    fn open_in_app(app: &mut App, worker: &Worker, name: &str, pages: u32) -> PathBuf {
+        let doc = open_fixture(worker, name, pages);
+        let path = doc.origin.path().expect("a file").to_path_buf();
+        let _ = app.update(Message::Opened(Origin::File(path.clone()), Ok(doc.info)));
+        path
+    }
+
+    fn active_name(app: &App) -> Option<String> {
+        app.doc.as_ref().map(|d| d.origin.file_name())
+    }
+
+    #[test]
+    fn documents_open_in_tabs_and_close_or_quit_asking_about_unsaved_ones() {
+        let Some(worker) = worker() else { return };
+        let (mut app, _boot) = App::new(Ok(worker.clone()), None);
+        let a = open_in_app(&mut app, &worker, "tab-a.pdf", 2);
+        assert_eq!(
+            (app.tabs.len(), app.active_tab),
+            (1, 0),
+            "the empty tab is reused"
+        );
+        let b = open_in_app(&mut app, &worker, "tab-b.pdf", 3);
+        assert_eq!((app.tabs.len(), app.active_tab), (2, 1));
+        assert_eq!(active_name(&app).as_deref(), Some("tab-b.pdf"));
+
+        let _ = app.update(Message::SelectTab(0));
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+        assert_eq!(app.doc.as_ref().map(Document::len), Some(2));
+        // Opening a file that's already open shows its tab instead.
+        let _ = app.update(Message::Open(b.clone()));
+        assert_eq!((app.tabs.len(), app.active_tab), (2, 1));
+
+        // Unsaved changes in B: closing asks; Don't Save closes it and shows A.
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        assert!(app.active_dirty());
+        let _ = app.update(Message::CloseTab(None));
+        assert!(app.confirm.is_some(), "asks before closing unsaved work");
+        let _ = app.update(Message::Confirmed(Choice::Discard));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+
+        // Quitting with unsaved work in a background tab shows that tab and asks.
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let _c = open_in_app(&mut app, &worker, "tab-c.pdf", 1);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-c.pdf"));
+        let _ = app.update(Message::CloseRequested);
+        assert_eq!(
+            active_name(&app).as_deref(),
+            Some("tab-a.pdf"),
+            "the unsaved tab is shown"
+        );
+        assert!(matches!(app.confirm, Some(Proceed::Quit)));
+        // Cancel keeps everything open.
+        let _ = app.update(Message::Confirmed(Choice::Cancel));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "the clean tab was already closed on the way"
+        );
+        assert!(app.active_dirty());
+
+        // Two edited tabs: one summary first; Review shows the leftmost edited tab and asks.
+        let _d = open_in_app(&mut app, &worker, "tab-d.pdf", 1);
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let _ = app.update(Message::CloseRequested);
+        assert_eq!(app.quit_summary.as_ref().map(Vec::len), Some(2));
+        assert!(app.confirm.is_none(), "no per-tab question yet");
+        let _ = app.update(Message::QuitReview);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+        assert!(matches!(app.confirm, Some(Proceed::Quit)));
+        // ⌘T opens an empty tab at the end.
+        let _ = app.update(Message::Confirmed(Choice::Cancel));
+        let _ = app.update(Message::NewTab);
+        assert_eq!((app.tabs.len(), app.active_tab), (3, 2));
+        assert!(app.doc.is_none() && app.writer.is_none());
+        let _ = (a, b);
+    }
+
+    /// `fixture(pages)` encrypted with an owner password only: it opens without asking.
+    fn owner_locked_fixture(pages: u32) -> Vec<u8> {
+        use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions, StringFormat};
+        let mut doc = lopdf::Document::load_mem(&fixture(pages)).expect("fixture parses");
+        let id = Object::String(b"owner-locked-id".to_vec(), StringFormat::Hexadecimal);
+        doc.trailer.set("ID", vec![id.clone(), id]);
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password: "",
+            key_length: 128,
+            permissions: Permissions::PRINTABLE,
+        })
+        .expect("encryption state");
+        doc.encrypt(&state).expect("encrypts");
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("saves");
+        out
+    }
+
+    /// An encrypted PDF that needs no password still can't be edited, by any path.
+    #[test]
+    fn encrypted_documents_are_read_only_even_without_a_password() {
+        let Some(worker) = worker() else { return };
+        let bytes = owner_locked_fixture(2);
+        let info = flatten(iced::futures::executor::block_on(
+            worker.call(move |e| e.open(DocSource::Bytes(bytes), None)),
+        ))
+        .expect("opens without a password");
+        assert!(info.encrypted, "the engine reports the encryption");
+
+        let doc = Document::new(
+            Origin::File(PathBuf::from("/tmp/ferrix-owner-locked.pdf")),
+            info,
+        );
+        assert!(doc.is_read_only());
+        let (mut app, _boot) = App::new(Ok(worker.clone()), None);
+        app.doc = Some(doc);
+        assert!(!app.can_edit(), "the UI offers no edits");
+
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let doc = app.doc.as_ref().expect("still open");
+        assert!(!doc.is_dirty(), "the edit was refused");
+        assert_eq!(app.notice.as_deref(), Some(READ_ONLY_NOTICE));
+
+        // An ordinary file opens editable.
+        let plain = fixture(1);
+        let info = flatten(iced::futures::executor::block_on(
+            worker.call(move |e| e.open(DocSource::Bytes(plain), None)),
+        ))
+        .expect("opens");
+        assert!(!info.encrypted);
     }
 
     #[test]
