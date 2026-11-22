@@ -12,6 +12,9 @@ cargo run -p ferrix-app [-- file.pdf]    # desktop app
 cargo xtask bundle [--release] [--open]  # macOS: target/<profile>/Ferrix.app, named “Ferrix” in the menu bar
 cargo run -p ferrix-cli -- --help        # `ferrix`: info, render, text, outline, organize, annotate, compose, source
 cargo fmt --all && cargo clippy --workspace --all-targets && cargo test --workspace
+cargo xtask corpus                       # test PDFs into tests/corpus/files (git-ignored)
+cargo xtask soak [--minutes 60]          # every corpus file in its own process; fails on crash/hang
+cargo xtask bench                        # M1 exit criteria: first paint, frame time (quiet machine)
 ```
 
 PDFium-backed tests skip locally when PDFium is missing (they print `skipping:` only with

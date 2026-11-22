@@ -152,6 +152,8 @@ pub(crate) struct Document {
     /// Rendered pages near the view.
     pub(crate) images: HashMap<PageKey, Shown>,
     pub(crate) render_busy: bool,
+    /// The current page has been shown once (for the first-paint measurement).
+    pub(crate) first_paint: bool,
     /// Sharp tiles of pages too large to render whole.
     pub(crate) tiles: ferrix_render::TileCache<crate::render::TileKey, crate::render::Tile>,
     /// Horizontal scroll position of the page view, in logical pixels.
@@ -210,6 +212,7 @@ impl Document {
             scroll_within: 0.0,
             images: HashMap::new(),
             render_busy: false,
+            first_paint: false,
             tiles: ferrix_render::TileCache::default(),
             scroll_x: 0.0,
             render_failed: BTreeSet::new(),

@@ -1,5 +1,7 @@
 //! `ferrix` — headless access to the Ferrix engine for scripting, debugging and tests.
 
+mod stress;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -96,6 +98,13 @@ enum Command {
     Source {
         /// PDF file.
         file: PathBuf,
+    },
+    /// Run one document through rendering, text, links, parsing and a save, printing one JSON
+    /// line. Used by `cargo xtask soak`; a crash or hang is the failure it looks for.
+    #[command(hide = true)]
+    Stress {
+        #[command(flatten)]
+        doc: DocArgs,
     },
     /// List, add or remove annotations. Coordinates are PDF points from the page's
     /// bottom-left corner, as stored in the file (unrotated).
@@ -240,6 +249,7 @@ fn main() -> Result<()> {
                 },
         } => annotate_remove(&mut engine, &doc, page, index, &output),
         Command::Info { doc, json } => info(&mut engine, &doc, json),
+        Command::Stress { doc } => stress::run(&mut engine, &doc.file, doc.password.as_deref()),
         Command::Render {
             doc,
             pages,

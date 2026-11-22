@@ -346,6 +346,26 @@ Communication via channels (`tokio::sync::mpsc`, `watch` for view state). Every 
 | UI | Core is tested headless; a small set of end-to-end smoke tests drive the app via AccessKit |
 | Performance | `criterion` benches + CI perf budget on: open time, first paint, tile render p95, search throughput, RSS |
 
+**As built (2026-11-22):**
+- **Corpus:** `cargo xtask corpus` downloads 120 pdf.js test PDFs, pinned by commit and SHA-256
+  in `tests/corpus/manifest.txt` (plain text, not TOML). It also writes 68 generated files:
+  1 000 and 5 000 pages, mixed sizes and rotations, a 200-inch page, 2 000 annotations,
+  truncated and broken structures, 40 seeded byte-flip variants, and the qpdf-encrypted test
+  files. Everything goes to `tests/corpus/files/`, which is git-ignored.
+- **Soak:** `cargo xtask soak [--minutes 60]` runs `ferrix stress` on every file, each in its
+  own process, round after round. It renders thumbnails, pages and 400 % tiles, reads text,
+  links, annotations and the outline, parses with lopdf, and saves an annotation and reads it
+  back. A refusal passes; a crash, panic or hang (timeout) fails and names the file. The report
+  goes to `target/soak-report.json`.
+- **Bench:** `cargo xtask bench` runs the release `bench` example of `ferrix-app` and checks the
+  M1 criteria:
+  - first paint: the app's own `ferrix::perf` event, from asking to open to the first page drawn
+  - frame: update, view, layout and draw-recording of scroll steps on a headless renderer;
+    rasterizing is not counted
+  - per-page render time
+  It doesn't use `criterion`, since these are end-to-end timings rather than microbenchmarks.
+  Run it on a quiet machine.
+
 CI: GitHub Actions matrix (macOS arm64/x64, Windows x64/arm64, Ubuntu), `clippy -D warnings`,
 `rustfmt`, `cargo-deny` (licenses/advisories), `cargo-semver-checks` for library crates, MSRV pin.
 
