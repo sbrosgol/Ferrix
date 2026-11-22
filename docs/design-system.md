@@ -64,6 +64,7 @@ All colours come from `theme::Tokens`; never write a colour literal in a view.
   - dialog controls 32
   - status bar 28
   - sidebar 220 wide
+  - tab bar 36, tabs 28
   - writer format bar 42
 - **Elevation:**
   - pages: two-layer shadow, a tight one plus a soft one
@@ -309,8 +310,9 @@ Opening, finding your place and reading. Everything reuses the menu, dialog, sid
 bar components above; the only new assets are Lucide icons.
 
 - **New icons** (Lucide, 16): `gallery-vertical-end` (Pages), `list-tree` (Outline),
-  `chevron-down` (tree), `arrow-left` (Back), `eye` / `eye-off` (password). Existing: `x`,
-  `file-text`, `chevron-right`, `message-square-text`.
+  `chevron-down` (tree), `arrow-left` (Back), `eye` / `eye-off` (password), `file-pen-line`
+  (written document tab), `plus` (New Tab). Existing: `x`, `file-text`, `chevron-right`,
+  `message-square-text`.
 
 ### Overflow menu
 
@@ -521,12 +523,127 @@ Order, top to bottom (sections under the existing overline style, hairline divid
   number badge and ring as usual, and clickable. No spinner or shimmer. With Dark Pages on, the
   blank frame uses the dark paper colour.
 
+### Tabs
+
+Several PDFs and written documents in one window (settles `architecture.md` §11 question 5;
+"move to new window" and drag-to-reorder are out of scope).
+
+- **Placement:** a 36-high `chrome` bar directly under the toolbar (no hairline between them,
+  so they read as one header), hairline under it. Shown only with 2+ tabs; with one, the window
+  looks exactly as now. Per-tab bars (Markup, format, find) sit below it, because they belong to
+  the tab. The toolbar is unchanged: it keeps the macOS traffic lights and the title with its
+  "Edited" dot (the active document's full name, where the tab's is often cut). The OS window
+  title is the active document's name.
+
+  ```
+  ┌────────────────────────────────────────────────────────────────────────────────┐
+  │ ● ● ●  [▯] [↶][↷]  Q3 report.pdf · Edited   ‹ [3] / 12 ›   [✎] [− 125 % +] [⋯] │ 48
+  │ ┌──────────────────────┐                                                       │
+  │ │ ▤ Q3 report.pdf    × │ ▤ Lease agreement.pdf  • │ ✎ Notes            [+]     │ 36
+  │ └──────────────────────┘                                                       │
+  ├────────────────────────────────────────────────────────────────────────────────┤
+  ```
+- **Bar:** padding [4, 8]; tabs 2 apart, then 4, then New Tab. Tabs share the width equally
+  between 120 and 220; at 220 they stay left-aligned with space after. When they'd go below 120,
+  the bar scrolls horizontally (`scrollable`, scrollbar hidden; the wheel and trackpad scroll it,
+  mapping vertical deltas if iced doesn't), New Tab stays pinned at the right, and an All Tabs
+  button appears after it. The active tab is always scrolled into view (its offset is
+  `index × 122`, since tabs are at the minimum).
+- **Tab** (`mouse_area` over a `container`, 28 high, radius 6, padding [0, 4, 0, 8]), left to
+  right: icon 14 in `text_muted`, 6, title 13 filling and clipping, 4, a 24 × 24 end slot.
+  - icon: `file-text` for PDFs (Word files and images open as PDFs), `file-pen-line` for written
+    documents; none for an empty tab
+  - title: the file name with its extension, cut at the end with “…” to fit (estimated from the
+    tab width at about 7 px per character of 13 Inter; the container also clips); an empty tab
+    reads "New Tab"
+  - end slot: the close button (ghost `x` 12, radius 4, tooltip "Close Tab (⌘W)"), or the 6 px
+    `edited_badge` dot (no word) when the document has unsaved changes. The close button shows on
+    the active tab always and on others on hover; on an edited tab hover swaps the dot for it. 24
+    is below our 28 but meets WCAG 2.2 AA (2.5.8); ⌘W and middle-click are the other paths.
+- **States:**
+  - active: `surface` fill, 1 px `border`, the `segment_active` shadow; title `text`
+  - inactive: no fill; title `text_muted`
+  - hover (inactive): `hover` overlay; pressed: `pressed`
+  - separators: 1 × 16 `border`, centred, only between two inactive tabs (none touching the active
+    one). Equal-width tabs without fills need a boundary; this is the one exception to "no rules".
+  - a tab still opening has its title at once; only its pane shows "Loading…"
+- **Pointer:** press (not release) activates, as in browsers (`mouse_area::on_press`; the close
+  button captures its own press). Middle-click closes. Tooltip (after the usual delay): the full
+  path, home as `~`; "Converted from ~/…/Lease.docx" for converted files; "Not saved yet" for
+  new documents.
+- **New Tab:** a 28 ghost `icon_button`, `plus`, tooltip "New Tab (⌘T)". It opens an empty tab
+  showing the empty state (Open…, New Document…, Recent): one surface for both kinds of document,
+  and the Recent list is one click away, which an Open dialog wouldn't give.
+- **All Tabs** (only while scrolling): 28 ghost `chevron-down`, tooltip "All Tabs". Opens a
+  280-wide `theme::popover` under it, clamped to the window: one `menu_item` per tab (icon,
+  name, dot when edited), the active one checked. ↑ ↓ move, Return activates, Esc closes.
+- **Keys** (work with the bar hidden too):
+
+  | macOS | Windows / Linux | Does |
+  |---|---|---|
+  | ⌘T | Ctrl+T | New Tab |
+  | ⌘W | Ctrl+W, Ctrl+F4 | close the tab |
+  | ⌃Tab / ⌃⇧Tab | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab, wrapping |
+  | ⌘⇧] / ⌘⇧[ | Ctrl+Page Down / Ctrl+Page Up | the same |
+
+  ⌘⇧] arrives as `}` on many layouts; match the physical key. No ⌘1…⌘9: ⌘0 / ⌘1 / ⌘2 stay Actual
+  Size / Fit Page / Fit Width (Acrobat's keys, and Acrobat has tabs too), because zoom is used
+  every minute and switching by number rarely. Tabs aren't in the Tab focus order (as in Safari);
+  the keys above are the keyboard path.
+- **Opening:** Open, Open Recent, drop, New Document… and the command line open a new tab at the
+  end and activate it, unless the active tab is empty, which is then used (so the first file in
+  a fresh window opens as now). Several dropped files open in drop order; the first is
+  activated. A file already open (same canonical path; for converted files, the same source) just
+  activates its tab. Password Cancel, or a failed open, removes the new tab and returns to the
+  previous one; the error shows in the status bar as now.
+- **Closing:** ⌘W closes the active tab; its right neighbour becomes active, else the left one.
+  An edited tab first shows "Save changes to “{name}”?" as now (Cancel keeps it). Closing the
+  last tab leaves the window on the empty state, never quits; ⌘W on an empty, only tab does
+  nothing. The window's close button and ⌘Q quit, as now.
+- **Quitting with unsaved changes:** one edited tab: the existing dialog. Two or more: one
+  summary first (480 wide, the save-changes frame), as macOS does:
+
+  ```
+  ┌────────────────────────────────────────────────┐
+  │ Review unsaved changes before quitting?     ×  │  17 semibold
+  │ 3 documents have unsaved changes. If you don’t │  13 text_muted
+  │ review them, the changes will be lost.         │
+  │ Q3 report.pdf · Lease agreement.pdf · Notes    │  13 text, up to 5, then “and 2 more”
+  │                                                │  16
+  │ [Discard Changes]  [Cancel] [Review Changes…]  │  32 high; Review primary
+  └────────────────────────────────────────────────┘
+  ```
+  Review Changes… activates each edited tab left to right and shows its "Save changes to
+  “{name}”?"; Save and Don’t Save go on to the next, Cancel (or a failed save) stops quitting,
+  keeping what was already saved. Return reviews, Esc cancels. Discard Changes quits at once. The
+  same summary, titled "Review unsaved changes before closing?", would serve any multi-tab close.
+- **Per tab:** the document and its history, page and offset, zoom, page layout, sidebar tab and
+  outline expansion, Markup mode and the active tool, the find bar (open, query, matches), text
+  selection, the Back stack, and status messages about that document. A new tab starts with the
+  last-chosen sidebar tab.
+- **Window-wide:** sidebar shown, Appearance, Dark Pages, Author name, each tool's session
+  defaults, and messages not tied to a tab (an open that failed, Recent cleared).
+- **Inactive tabs** release their page tiles; switching back shows the low-resolution base at
+  the remembered position, then sharpens, never a blank page. No limit on tabs.
+- **Edge cases:**
+  - Save As onto a path open in another tab is refused: "“{name}” is open in another tab. Close
+    it first, then save."
+  - crash recovery: each recovered document opens in its own tab, after the dialog as now
+  - a file changed on disk is per tab, handled as now when that tab saves
+- **Narrow (760):** tabs keep 120 minimum, so about five fit before scrolling; nothing folds into
+  `⋯`. The bar never wraps to two rows.
+
 Why: Open Recent sits where people already look for it (the menu with Open… and the screen with
 Open…), and a flyout in the menu's own stack avoids a custom widget. Link confirmation shows the
 host prominently because the URL, not the button, is the decision. Back appears only once there
 is somewhere to go back to. View options live in `⋯` because they are set once per document and
 then remembered; the toolbar stays for things used every minute. Dark Pages adds two render
-constants rather than tokens because paper colour is content, not chrome.
+constants rather than tokens because paper colour is content, not chrome. Tabs sit under the
+toolbar, not in it, so the toolbar never changes shape when a second document opens, and per-tab
+bars stack below the tab they belong to; hiding the bar for one tab keeps the single-document
+window as quiet as before. A new tab is the empty state because it already offers Open, New and
+Recent. One summary before quitting beats a dialog per tab: it says how much is at stake before
+asking anything.
 
 ## Writing rules
 

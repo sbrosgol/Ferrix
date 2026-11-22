@@ -80,7 +80,12 @@ impl App {
             _ => main,
         };
 
-        let mut window = column![self.toolbar(), horizontal_divider()];
+        // The tab bar joins the toolbar with no hairline between, so they read as one header.
+        let mut window = column![self.toolbar()];
+        if let Some(tabs) = self.tab_bar() {
+            window = window.push(tabs);
+        }
+        let mut window = window.push(horizontal_divider());
         if let (Some(doc), Some(_)) = (&self.doc, &self.markup) {
             window = window.push(self.markup_bar(doc)).push(horizontal_divider());
         }
@@ -120,6 +125,9 @@ impl App {
         }
         if let Some(form) = &self.page_setup {
             return stack![window, page_setup_dialog(form)].into();
+        }
+        if let Some(names) = &self.quit_summary {
+            return stack![window, self.quit_summary_dialog(names)].into();
         }
         if let Some(prompt) = &self.password {
             return stack![window, self.password_dialog(prompt)].into();

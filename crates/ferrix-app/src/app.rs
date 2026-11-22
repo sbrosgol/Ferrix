@@ -102,7 +102,7 @@ impl Zoom {
         }
     }
 
-    fn to_saved(self) -> ferrix_store::SavedZoom {
+    pub(crate) fn to_saved(self) -> ferrix_store::SavedZoom {
         match self {
             Self::Auto => ferrix_store::SavedZoom::Auto,
             Self::FitWidth => ferrix_store::SavedZoom::FitWidth,
@@ -170,6 +170,8 @@ pub(crate) enum Proceed {
     Open(PathBuf),
     NewDialog,
     Recover,
+    /// Close the active tab.
+    CloseTab,
     Quit,
 }
 
@@ -385,14 +387,14 @@ pub struct App {
     /// The New Document dialog, while open.
     pub(crate) new_form: Option<NewForm>,
     /// Crash-recovery journal of the current document while it has unsaved changes.
-    journal: Option<Journal>,
+    pub(crate) journal: Option<Journal>,
     /// Unsaved work from crashed sessions, offered one at a time.
     pub(crate) recoveries: Vec<Recoverable>,
     /// The document being written, when one is open (instead of `doc`).
     pub(crate) writer: Option<Writer>,
     /// Fonts for writing: loaded in the background at startup, reused between documents.
     fonts: Option<Fonts>,
-    writer_journal: Option<WriterJournal>,
+    pub(crate) writer_journal: Option<WriterJournal>,
     /// The Page Setup dialog, while open.
     pub(crate) page_setup: Option<PageSetupForm>,
     /// Shown once the document being opened is open.
@@ -419,6 +421,16 @@ pub struct App {
     pub(crate) link_hint: Option<String>,
     /// Pages shown with inverted colours.
     pub(crate) invert: bool,
+    /// Every tab; the active one's slot is a placeholder while its state is in the fields
+    /// above (see `tabs.rs`).
+    pub(crate) tabs: Vec<crate::tabs::Tab>,
+    pub(crate) active_tab: usize,
+    /// The document pages are being inserted into, so the result can't land in another tab.
+    inserting: Option<DocId>,
+    /// The tab under the pointer, which shows its close button.
+    pub(crate) hovered_tab: Option<usize>,
+    /// Quitting with several edited tabs: their names, for the summary dialog.
+    pub(crate) quit_summary: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -427,6 +439,18 @@ pub enum Message {
     Open(PathBuf),
     /// A file from Open Recent; forgotten if it's gone.
     OpenRecent(PathBuf),
+    /// ⌘T: open a document in a new tab.
+    NewTab,
+    /// ⌘W, or a tab's close button (its index).
+    CloseTab(Option<usize>),
+    SelectTab(usize),
+    /// The pointer is over a tab, or none.
+    TabHover(Option<usize>),
+    /// The quit summary's answers: review each edited tab, or discard them all.
+    QuitReview,
+    QuitDiscard,
+    /// The next (true) or previous tab.
+    StepTab(bool),
     ClearRecent,
     ToggleRecent,
     HistoryReady(Result<(crate::prefs::History, Vec<ferrix_store::RecentFile>), String>),
@@ -616,6 +640,7 @@ impl App {
     ) -> (Self, Task<Message>) {
         let error = engine.as_ref().err().cloned();
         let settings = crate::prefs::load_settings();
+        let (zoom, layout) = (Zoom::from_saved(settings.zoom), settings.layout);
         let app = Self {
             engine,
             window: None,
@@ -660,6 +685,11 @@ impl App {
             recent: Vec::new(),
             link_prompt: None,
             link_hint: None,
+            tabs: crate::tabs::first_tab(zoom, layout),
+            active_tab: 0,
+            inserting: None,
+            hovered_tab: None,
+            quit_summary: None,
             password: None,
             recent_open: false,
         };
@@ -749,6 +779,46 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::NewTab => {
+                self.menu_open = false;
+                return self.new_empty_tab();
+            }
+            Message::TabHover(tab) => self.hovered_tab = tab,
+            Message::QuitReview => {
+                self.quit_summary = None;
+                // Left to right: the first edited tab is asked about first.
+                let first = (0..self.tabs.len()).find(|&i| {
+                    if i == self.active_tab {
+                        self.active_dirty()
+                    } else {
+                        self.tabs[i].is_dirty()
+                    }
+                });
+                let show = first.map_or_else(Task::none, |i| self.select_tab(i));
+                self.confirm = Some(Proceed::Quit);
+                return show;
+            }
+            Message::QuitDiscard => {
+                self.quit_summary = None;
+                return self.quit_now();
+            }
+            Message::CloseTab(index) => {
+                self.menu_open = false;
+                if let Some(i) = index
+                    && i != self.active_tab
+                {
+                    // Closing another tab shows it first, so its unsaved changes can be asked
+                    // about with the document in view.
+                    let show = self.select_tab(i);
+                    if self.active_tab != i {
+                        return show;
+                    }
+                    return Task::batch([show, self.guard(Proceed::CloseTab)]);
+                }
+                return self.guard(Proceed::CloseTab);
+            }
+            Message::SelectTab(i) => return self.select_tab(i),
+            Message::StepTab(forward) => return self.step_tab(forward),
             Message::OpenRecent(path) => {
                 self.menu_open = false;
                 self.recent_open = false;
@@ -1219,6 +1289,7 @@ impl App {
                 });
             }
             Message::Insert(path) => {
+                self.inserting = self.doc.as_ref().map(|d| d.info.id);
                 if kind_of(&path) == Some(Kind::Pdf) {
                     return self.load(Origin::File(path), Message::Inserted);
                 }
@@ -1319,6 +1390,15 @@ impl App {
                     Message::SaveAsPicked(file.map(|f| f.path().to_path_buf()))
                 });
             }
+            Message::SaveAsPicked(Some(path))
+                if self.tab_with(&path).is_some_and(|i| i != self.active_tab) =>
+            {
+                self.after_save = None;
+                self.error = Some(format!(
+                    "“{}” is open in another tab. Close it first, then save.",
+                    file_name(&path)
+                ));
+            }
             Message::SaveAsPicked(Some(path)) if self.writer.is_some() => {
                 return self.save_writer(path);
             }
@@ -1395,6 +1475,7 @@ impl App {
                     Choice::Cancel => {}
                 }
             }
+            Message::Escape if self.quit_summary.is_some() => self.quit_summary = None,
             Message::Escape if self.link_prompt.is_some() => self.link_prompt = None,
             Message::Escape if self.password.as_ref().is_some_and(|p| !p.checking) => {
                 self.password = None;
@@ -1843,6 +1924,17 @@ impl App {
         if self.busy.is_some() {
             return Task::none();
         }
+        // Everything else opens in a new tab and loses nothing.
+        if !matches!(next, Proceed::CloseTab | Proceed::Quit) {
+            return self.proceed(next);
+        }
+        if next == Proceed::Quit {
+            let edited = self.dirty_tab_names();
+            if edited.len() > 1 {
+                self.quit_summary = Some(edited);
+                return Task::none();
+            }
+        }
         if self.doc.as_ref().is_some_and(Document::is_dirty)
             || self.writer.as_ref().is_some_and(|w| w.editor.is_dirty())
         {
@@ -1859,8 +1951,11 @@ impl App {
                     Message::Open(f.path().to_path_buf())
                 })
             }),
-            // Unsaved changes were already dealt with, so open directly.
             Proceed::Open(path) => {
+                // Already open: show it rather than opening it twice.
+                if let Some(i) = self.tab_with(&path) {
+                    return self.select_tab(i);
+                }
                 if kind_of(&path) == Some(Kind::Pdf) {
                     self.check_writing(path)
                 } else {
@@ -1872,19 +1967,25 @@ impl App {
                 Task::none()
             }
             Proceed::Recover => self.start_recovery(),
+            Proceed::CloseTab => {
+                // Saved, discarded or clean: closing loses nothing it shouldn't.
+                let close = self.close_document();
+                Task::batch([close, self.remove_active_tab()])
+            }
             Proceed::Quit => {
-                // The app exits before a background write could finish.
-                if let (Some((path, view)), Some(history)) = (self.view_state(), &self.history) {
-                    history.set_view_now(&path, view);
+                // The active tab is saved, discarded or clean. A parked tab with unsaved
+                // changes is shown next and asked about; quitting resumes after its answer.
+                if self.dirty_parked_tab().is_some() {
+                    let close = self.close_document();
+                    let remove = self.remove_active_tab();
+                    let show = match self.dirty_parked_tab() {
+                        Some(next) if !self.active_dirty() => self.select_tab(next),
+                        _ => Task::none(),
+                    };
+                    self.confirm = Some(Proceed::Quit);
+                    return Task::batch([close, remove, show]);
                 }
-                // Leaving with nothing unsaved (or by choice): no recovery needed.
-                if let Some(journal) = self.journal.take() {
-                    journal.discard();
-                }
-                if let Some(journal) = self.writer_journal.take() {
-                    journal.discard();
-                }
-                iced::exit()
+                self.quit_now()
             }
         }
     }
@@ -1971,6 +2072,10 @@ impl App {
     }
 
     fn opened(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
+        // A reload after saving stays in its tab; anything else gets a tab of its own.
+        if self.reopen_at.is_none() {
+            self.open_in_new_tab();
+        }
         let close = self.close_document();
         if info.page_count == 0 {
             self.error = Some("This document has no pages".into());
@@ -2096,6 +2201,7 @@ impl App {
             }
             return Task::none();
         }
+        self.open_in_new_tab();
         let close = self.close_document();
         let base_and_sources: Vec<(DocId, u32)> =
             infos.iter().map(|i| (i.id, i.page_count)).collect();
@@ -2195,6 +2301,31 @@ impl App {
         Some((path, view))
     }
 
+    /// Quits now: positions remembered, every unsaved change let go (by choice, or there are
+    /// none), so no recovery is offered next time.
+    fn quit_now(&mut self) -> Task<Message> {
+        // The app exits before a background write could finish.
+        if let Some(history) = &self.history {
+            let views = self.view_state().into_iter().chain(self.parked_views());
+            for (path, view) in views {
+                history.set_view_now(&path, view);
+            }
+        }
+        if let Some(journal) = self.journal.take() {
+            journal.discard();
+        }
+        if let Some(journal) = self.writer_journal.take() {
+            journal.discard();
+        }
+        self.discard_parked_journals();
+        iced::exit()
+    }
+
+    /// A reload of the saved document is on its way; it must land in this tab.
+    pub(crate) fn reloading(&self) -> bool {
+        self.reopen_at.is_some()
+    }
+
     /// Remembers where the open PDF was left, in the background.
     fn remember_view(&self) -> Task<Message> {
         match (self.view_state(), self.history.clone()) {
@@ -2287,6 +2418,11 @@ impl App {
     }
 
     fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
+        // The pages belong to the document they were chosen for, which may be in another tab
+        // by now.
+        if self.inserting.take() != self.doc.as_ref().map(|d| d.info.id) {
+            return close_engine_id(self.engine.clone().ok(), Some(info.id));
+        }
         if info.encrypted {
             self.error = Some(format!(
                 "“{}” is encrypted, so its pages can’t be inserted yet.",
@@ -2326,6 +2462,7 @@ impl App {
 
     /// Replaces whatever is open with a written document.
     fn open_writer(&mut self, writer: Writer) -> Task<Message> {
+        self.open_in_new_tab();
         let close = self.close_document();
         let touch = match (&self.history, &writer.path) {
             (Some(history), Some(path)) => {
@@ -2508,7 +2645,7 @@ impl App {
     }
 
     /// Applies the zoom to the writer and redraws its pages.
-    fn refresh_writer(&mut self) {
+    pub(crate) fn refresh_writer(&mut self) {
         let canvas = crate::view::canvas_size(self.window_size, false);
         let (zoom, scale_factor) = (self.zoom, self.scale_factor);
         let Some(w) = &mut self.writer else {
@@ -2735,6 +2872,9 @@ impl App {
     /// The window minus the Markup bar while it shows, for page-layout sums.
     fn view_window(&self) -> iced::Size {
         let mut size = self.window_size;
+        if self.tabs.len() > 1 {
+            size.height -= crate::view_tabs::TAB_BAR_HEIGHT + 1.0;
+        }
         if self.markup.is_some() {
             size.height -= crate::view::BAR_HEIGHT + 1.0;
         }
@@ -2922,7 +3062,7 @@ impl App {
 
     /// Lays the pages out for the current zoom and window, keeping the view on the same spot
     /// of the current page, then renders the pages in view.
-    fn render(&mut self) -> Task<Message> {
+    pub(crate) fn render(&mut self) -> Task<Message> {
         if self.writer.is_some() {
             self.refresh_writer();
             return Task::none();
@@ -2965,7 +3105,7 @@ impl App {
     }
 
     /// Reads the size of every page of an engine document in the background.
-    fn measure(&self, doc: DocId, pages: u32) -> Task<Message> {
+    pub(crate) fn measure(&self, doc: DocId, pages: u32) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
@@ -2988,7 +3128,7 @@ impl App {
     }
 
     /// Renders the next missing thumbnail; each result schedules the one after it.
-    fn next_thumbnail(&mut self) -> Task<Message> {
+    pub(crate) fn next_thumbnail(&mut self) -> Task<Message> {
         let Ok(engine) = self.engine.clone() else {
             return Task::none();
         };
@@ -3044,7 +3184,7 @@ fn close_engine_id(engine: Option<Worker>, id: Option<DocId>) -> Task<Message> {
 }
 
 /// Reads a source's annotations in the background.
-fn load_annotations(
+pub(crate) fn load_annotations(
     origin: &Origin,
     engine_doc: DocId,
     source: ferrix_core::SourceId,
@@ -3164,10 +3304,15 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
             sidebar_tab_key(c).map(Message::SidebarTab)
         }
         Key::Named(Named::Space) => Some(Message::ScreenScroll(!modifiers.shift())),
+        // Control+Tab on every platform (⌘ is never Control here, even on macOS).
+        Key::Named(Named::Tab) if modifiers.control() => Some(Message::StepTab(!modifiers.shift())),
         Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::Move { earlier: true }),
         Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::Move { earlier: false }),
         Key::Named(Named::ArrowRight) => Some(Message::Next),
         Key::Named(Named::ArrowLeft) => Some(Message::Previous),
+        Key::Named(Named::PageDown) if modifiers.control() => Some(Message::StepTab(true)),
+        Key::Named(Named::PageUp) if modifiers.control() => Some(Message::StepTab(false)),
+        Key::Named(Named::F4) if modifiers.control() => Some(Message::CloseTab(None)),
         // One screen at a time, as in Preview and Acrobat; ← → still turn pages.
         Key::Named(Named::PageDown) => Some(Message::ScreenScroll(true)),
         Key::Named(Named::PageUp) => Some(Message::ScreenScroll(false)),
@@ -3187,6 +3332,10 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
                 "a" => Some(Message::SelectAllText),
                 "c" => Some(Message::CopyText),
                 "o" => Some(Message::OpenDialog),
+                "t" => Some(Message::NewTab),
+                "w" => Some(Message::CloseTab(None)),
+                "}" | "]" if shift => Some(Message::StepTab(true)),
+                "{" | "[" if shift => Some(Message::StepTab(false)),
                 "n" => Some(Message::NewDialog),
                 "p" => Some(Message::Print),
                 "f" => Some(Message::FindOpen),
@@ -3378,6 +3527,118 @@ mod tests {
             }
             .run(),
         )
+    }
+
+    /// Opens fixture `name` through the app as the user would, returning its path.
+    fn open_in_app(app: &mut App, worker: &Worker, name: &str, pages: u32) -> PathBuf {
+        let doc = open_fixture(worker, name, pages);
+        let path = doc.origin.path().expect("a file").to_path_buf();
+        let _ = app.update(Message::Opened(Origin::File(path.clone()), Ok(doc.info)));
+        path
+    }
+
+    fn active_name(app: &App) -> Option<String> {
+        app.doc.as_ref().map(|d| d.origin.file_name())
+    }
+
+    #[test]
+    fn documents_open_in_tabs_and_close_or_quit_asking_about_unsaved_ones() {
+        let Some(worker) = worker() else { return };
+        let (mut app, _boot) = App::new(Ok(worker.clone()), None);
+        let a = open_in_app(&mut app, &worker, "tab-a.pdf", 2);
+        assert_eq!(
+            (app.tabs.len(), app.active_tab),
+            (1, 0),
+            "the empty tab is reused"
+        );
+        let b = open_in_app(&mut app, &worker, "tab-b.pdf", 3);
+        assert_eq!((app.tabs.len(), app.active_tab), (2, 1));
+        assert_eq!(active_name(&app).as_deref(), Some("tab-b.pdf"));
+
+        let _ = app.update(Message::SelectTab(0));
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+        assert_eq!(app.doc.as_ref().map(Document::len), Some(2));
+        // Opening a file that's already open shows its tab instead.
+        let _ = app.update(Message::Open(b.clone()));
+        assert_eq!((app.tabs.len(), app.active_tab), (2, 1));
+
+        // Unsaved changes in B: closing asks; Don't Save closes it and shows A.
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        assert!(app.active_dirty());
+        let _ = app.update(Message::CloseTab(None));
+        assert!(app.confirm.is_some(), "asks before closing unsaved work");
+        let _ = app.update(Message::Confirmed(Choice::Discard));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+
+        // Quitting with unsaved work in a background tab shows that tab and asks.
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let _c = open_in_app(&mut app, &worker, "tab-c.pdf", 1);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-c.pdf"));
+        let _ = app.update(Message::CloseRequested);
+        assert_eq!(
+            active_name(&app).as_deref(),
+            Some("tab-a.pdf"),
+            "the unsaved tab is shown"
+        );
+        assert!(matches!(app.confirm, Some(Proceed::Quit)));
+        // Cancel keeps everything open.
+        let _ = app.update(Message::Confirmed(Choice::Cancel));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "the clean tab was already closed on the way"
+        );
+        assert!(app.active_dirty());
+
+        // Two edited tabs: one summary first; Review shows the leftmost edited tab and asks.
+        let _d = open_in_app(&mut app, &worker, "tab-d.pdf", 1);
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let _ = app.update(Message::CloseRequested);
+        assert_eq!(app.quit_summary.as_ref().map(Vec::len), Some(2));
+        assert!(app.confirm.is_none(), "no per-tab question yet");
+        let _ = app.update(Message::QuitReview);
+        assert_eq!(active_name(&app).as_deref(), Some("tab-a.pdf"));
+        assert!(matches!(app.confirm, Some(Proceed::Quit)));
+        // ⌘T opens an empty tab at the end.
+        let _ = app.update(Message::Confirmed(Choice::Cancel));
+        let _ = app.update(Message::NewTab);
+        assert_eq!((app.tabs.len(), app.active_tab), (3, 2));
+        assert!(app.doc.is_none() && app.writer.is_none());
+        let _ = (a, b);
     }
 
     /// `fixture(pages)` encrypted with an owner password only: it opens without asking.

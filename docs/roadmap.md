@@ -16,8 +16,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 **Exit:** CI green on 3 OSes; CLI renders 95% of corpus without error; app skeleton runs on all 3 OSes.
 
 ## M1 — Viewer MVP (weeks 5–12) → `0.1`
-- App shell: open (dialog, drag & drop, ~~recent files~~, file association), tabs. Open Recent is
-  done (`ferrix-store`, the `⋯` menu and the empty state); file association and tabs remain.
+- App shell: open (dialog, drag & drop, ~~recent files~~, file association), ~~tabs~~. Open
+  Recent and tabs are done; file association remains.
 - `ferrix-render`: ~~continuous/single/two-page layouts~~ (done: Continuous, Single Page, Two
   Pages, Two Pages with Cover), ~~tiled progressive rendering~~ (`ferrix-render`; see
   architecture §5.3), zoom (fit width/page, ~~⌘/Ctrl + wheel~~, up to 800 %; pinch needs iced

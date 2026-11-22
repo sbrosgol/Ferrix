@@ -390,4 +390,7 @@ Threat: a crafted PDF attempts code execution, data exfiltration, or resource ex
 2. ~~UI toolkit~~ — **decided: iced** (ADR-0002); accessibility tracked as the top risk.
 3. Minimum OS versions (proposal: macOS 12+, Windows 10 22H2+, glibc 2.31+ / Flatpak runtime).
 4. Do we need XFA dynamic forms at all? (Proposal: no; show a clear notice.)
-5. Tabs vs. one window per document vs. both (proposal: tabs + "move to new window").
+5. ~~Tabs vs. one window per document~~ — **decided: tabs** in one window (2026-11-22; design
+   system › Viewer (M1) › Tabs). The active tab's document lives in the app's usual fields and
+   the others are parked (`ferrix-app/src/tabs.rs`); results for a parked document are dropped
+   and asked for again when it becomes active. "Move to new window" is not planned yet.
