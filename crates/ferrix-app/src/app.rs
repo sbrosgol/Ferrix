@@ -3193,8 +3193,11 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         Key::Named(Named::Space) => Some(Message::ScreenScroll(!modifiers.shift())),
         Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::Move { earlier: true }),
         Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::Move { earlier: false }),
-        Key::Named(Named::ArrowRight | Named::PageDown) => Some(Message::Next),
-        Key::Named(Named::ArrowLeft | Named::PageUp) => Some(Message::Previous),
+        Key::Named(Named::ArrowRight) => Some(Message::Next),
+        Key::Named(Named::ArrowLeft) => Some(Message::Previous),
+        // One screen at a time, as in Preview and Acrobat; ← → still turn pages.
+        Key::Named(Named::PageDown) => Some(Message::ScreenScroll(true)),
+        Key::Named(Named::PageUp) => Some(Message::ScreenScroll(false)),
         Key::Named(Named::Home) => Some(Message::First),
         Key::Named(Named::End) => Some(Message::Last),
         Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
@@ -3285,6 +3288,24 @@ mod tests {
             Zoom::Fixed(9.0).resolve(LETTER, huge, Layout::Continuous),
             MAX_ZOOM
         );
+    }
+
+    #[test]
+    fn page_keys_scroll_a_screen_and_arrows_turn_pages() {
+        let none = keyboard::Modifiers::default();
+        let key = |n| keyboard::Key::Named(n);
+        assert!(matches!(
+            shortcut(&key(Named::PageDown), none),
+            Some(Message::ScreenScroll(true))
+        ));
+        assert!(matches!(
+            shortcut(&key(Named::PageUp), none),
+            Some(Message::ScreenScroll(false))
+        ));
+        assert!(matches!(
+            shortcut(&key(Named::ArrowRight), none),
+            Some(Message::Next)
+        ));
     }
 
     #[test]
