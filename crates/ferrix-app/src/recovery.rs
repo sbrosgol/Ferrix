@@ -446,6 +446,7 @@ mod tests {
             page_count: pages,
             pdf_version: None,
             metadata: DocMetadata::default(),
+            encrypted: false,
         }
     }
 

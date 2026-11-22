@@ -63,8 +63,17 @@ existing digital signatures or corrupt files. Engines are slow to re-render afte
   content, in the user's own app-data directory only.
 
 ## Encrypted documents (2026-11-22)
-PDFs that need a password to open are view-only: Ferrix asks for the password (ADR-0005's
-history never stores it) and shows the file, but page and annotation edits are off, so there is
-nothing to save. Writing an incremental update into an encrypted file would mean encrypting the
+Encrypted PDFs are view-only in the app, whether or not they need a password to open. Ferrix
+asks for a password when one is needed (ADR-0005's history never stores it). Files with only an
+owner password open without asking. The engine reports encryption on open (`DocInfo::encrypted`,
+from PDFium's security handler revision), page and annotation edits are off, Markup mode stays
+off, and pages of an encrypted file can't be inserted elsewhere. Both places where edits land
+(`App::apply` and `App::apply_annot`) refuse too, so nothing can be saved by another path. Writing an incremental update into an encrypted file would mean encrypting the
 new objects with the file's keys, and a mistake there would leave content readable without the
 password. Revisit when saving can keep the encryption and is tested against Acrobat and qpdf.
+
+`ferrix-pdf` itself can still write an incremental update into an encrypted file (a test
+organizes one), and the CLI's `organize` and `annotate` use that. Its check only re-reads the
+output with the password and counts pages; whether the added objects are encrypted correctly
+has not been verified against other readers.
+

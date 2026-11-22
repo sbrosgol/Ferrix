@@ -271,6 +271,12 @@ impl Document {
         self.state.pages.len()
     }
 
+    /// Encrypted, with or without a password to open: shown, never edited or saved
+    /// (ADR-0003), since a save would have to encrypt what it adds.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.info.encrypted || self.encrypted.is_some()
+    }
+
     /// Unsaved edits, or a document that was never saved at all.
     pub(crate) fn is_dirty(&self) -> bool {
         self.history.is_dirty() || self.is_untitled()
@@ -573,6 +579,7 @@ mod tests {
                 page_count: pages,
                 pdf_version: None,
                 metadata: DocMetadata::default(),
+                encrypted: false,
             },
         )
     }

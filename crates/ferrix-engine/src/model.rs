@@ -67,6 +67,10 @@ pub struct DocInfo {
     /// e.g. `"1.7"`; `None` if the header is unreadable.
     pub pdf_version: Option<String>,
     pub metadata: DocMetadata,
+    /// The file is encrypted, whether or not it needed a password to open (an owner password
+    /// alone only restricts what readers allow).
+    #[serde(default)]
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
