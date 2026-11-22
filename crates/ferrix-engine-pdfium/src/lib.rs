@@ -113,6 +113,11 @@ impl PdfEngine for PdfiumEngine {
             page_count: page_count(document.pages()),
             pdf_version: version_string(document.version()),
             metadata: metadata(document.metadata()),
+            // A handler revision PDFium can't name (AES-256's R5/R6) is still encryption.
+            encrypted: !matches!(
+                document.permissions().security_handler_revision(),
+                Ok(PdfSecurityHandlerRevision::Unprotected)
+            ),
         };
         self.docs.insert(id, document);
         tracing::debug!(%id, pages = info.page_count, "opened document");

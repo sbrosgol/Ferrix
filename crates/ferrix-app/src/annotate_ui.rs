@@ -79,6 +79,10 @@ impl App {
     pub(crate) fn annot_update(&mut self, msg: AnnotMsg) -> Task<Message> {
         match msg {
             AnnotMsg::Toggle => {
+                if self.markup.is_none() && self.doc.as_ref().is_some_and(|d| d.is_read_only()) {
+                    self.notice = Some(crate::app::READ_ONLY_NOTICE.into());
+                    return Task::none();
+                }
                 let close = if self.markup.take().is_none()
                     && self.doc.is_some()
                     && self.writer.is_none()
@@ -865,6 +869,11 @@ impl App {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
+        // The last line of defence: no path may edit an encrypted document (ADR-0003).
+        if doc.is_read_only() {
+            self.notice = Some(crate::app::READ_ONLY_NOTICE.into());
+            return Task::none();
+        }
         match doc.edit(edit, label.to_owned()) {
             Ok(()) => {
                 self.notice = None;

@@ -283,6 +283,10 @@ pub(crate) struct FindState {
     pub(crate) focused: bool,
 }
 
+/// Shown when an encrypted PDF opens, and if anything tries to change one.
+pub(crate) const READ_ONLY_NOTICE: &str =
+    "This PDF is encrypted, so Ferrix shows it read-only for now.";
+
 /// The password dialog of an encrypted PDF.
 #[derive(Debug, Clone)]
 pub(crate) struct PasswordPrompt {
@@ -714,7 +718,7 @@ impl App {
 
     /// Whether page-editing actions are available right now.
     pub(crate) fn can_edit(&self) -> bool {
-        (self.doc.as_ref().is_some_and(|d| d.encrypted.is_none()) || self.writer.is_some())
+        (self.doc.as_ref().is_some_and(|d| !d.is_read_only()) || self.writer.is_some())
             && self.busy.is_none()
             && self.page_setup.is_none()
             && self.confirm.is_none()
@@ -911,10 +915,15 @@ impl App {
             Message::Opened(origin, Ok(info)) => {
                 let password = self.password.take().filter(|p| p.checking);
                 let task = self.opened(origin, info);
-                if let (Some(doc), Some(prompt)) = (self.doc.as_mut(), password) {
-                    doc.encrypted = Some(ferrix_engine::Secret::new(prompt.password));
-                    self.notice =
-                        Some("This PDF is encrypted, so Ferrix shows it read-only for now.".into());
+                if let Some(doc) = self.doc.as_mut() {
+                    if let Some(prompt) = password {
+                        doc.encrypted = Some(ferrix_engine::Secret::new(prompt.password));
+                    }
+                    // Also files that open without a password but are encrypted all the same:
+                    // a save would have to encrypt what it adds (ADR-0003).
+                    if doc.is_read_only() {
+                        self.notice = Some(READ_ONLY_NOTICE.into());
+                    }
                 }
                 return task;
             }
@@ -2210,6 +2219,11 @@ impl App {
         let Some(doc) = self.doc.as_mut() else {
             return Task::none();
         };
+        // The last line of defence: no path may edit an encrypted document (ADR-0003).
+        if doc.is_read_only() {
+            self.notice = Some(READ_ONLY_NOTICE.into());
+            return Task::none();
+        }
         match doc.edit(edit, label) {
             Ok(()) => {
                 self.notice = None;
@@ -2273,6 +2287,13 @@ impl App {
     }
 
     fn inserted(&mut self, origin: Origin, info: DocInfo) -> Task<Message> {
+        if info.encrypted {
+            self.error = Some(format!(
+                "“{}” is encrypted, so its pages can’t be inserted yet.",
+                origin.file_name()
+            ));
+            return close_engine_id(self.engine.clone().ok(), Some(info.id));
+        }
         let Some(doc) = self.editable() else {
             return Task::none();
         };
@@ -3357,6 +3378,71 @@ mod tests {
             }
             .run(),
         )
+    }
+
+    /// `fixture(pages)` encrypted with an owner password only: it opens without asking.
+    fn owner_locked_fixture(pages: u32) -> Vec<u8> {
+        use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions, StringFormat};
+        let mut doc = lopdf::Document::load_mem(&fixture(pages)).expect("fixture parses");
+        let id = Object::String(b"owner-locked-id".to_vec(), StringFormat::Hexadecimal);
+        doc.trailer.set("ID", vec![id.clone(), id]);
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password: "",
+            key_length: 128,
+            permissions: Permissions::PRINTABLE,
+        })
+        .expect("encryption state");
+        doc.encrypt(&state).expect("encrypts");
+        let mut out = Vec::new();
+        doc.save_to(&mut out).expect("saves");
+        out
+    }
+
+    /// An encrypted PDF that needs no password still can't be edited, by any path.
+    #[test]
+    fn encrypted_documents_are_read_only_even_without_a_password() {
+        let Some(worker) = worker() else { return };
+        let bytes = owner_locked_fixture(2);
+        let info = flatten(iced::futures::executor::block_on(
+            worker.call(move |e| e.open(DocSource::Bytes(bytes), None)),
+        ))
+        .expect("opens without a password");
+        assert!(info.encrypted, "the engine reports the encryption");
+
+        let doc = Document::new(
+            Origin::File(PathBuf::from("/tmp/ferrix-owner-locked.pdf")),
+            info,
+        );
+        assert!(doc.is_read_only());
+        let (mut app, _boot) = App::new(Ok(worker.clone()), None);
+        app.doc = Some(doc);
+        assert!(!app.can_edit(), "the UI offers no edits");
+
+        let keys: Vec<PageKey> = app
+            .doc
+            .as_ref()
+            .map(|d| d.state.pages.entries().iter().map(|e| e.key).collect())
+            .unwrap_or_default();
+        let _ = app.apply(
+            Edit::Rotate {
+                keys,
+                by: Rotation::R90,
+            },
+            "Rotate".into(),
+        );
+        let doc = app.doc.as_ref().expect("still open");
+        assert!(!doc.is_dirty(), "the edit was refused");
+        assert_eq!(app.notice.as_deref(), Some(READ_ONLY_NOTICE));
+
+        // An ordinary file opens editable.
+        let plain = fixture(1);
+        let info = flatten(iced::futures::executor::block_on(
+            worker.call(move |e| e.open(DocSource::Bytes(plain), None)),
+        ))
+        .expect("opens");
+        assert!(!info.encrypted);
     }
 
     #[test]
