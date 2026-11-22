@@ -380,6 +380,29 @@ pub fn segment_active(theme: &Theme, _status: button::Status) -> button::Style {
     }
 }
 
+/// A document tab: the active one lifted like a segment, others flat with a hover overlay.
+pub fn tab(theme: &Theme, active: bool, hovered: bool) -> container::Style {
+    let t = tokens(theme);
+    if active {
+        container::Style {
+            background: Some(Background::Color(t.surface)),
+            border: border(t.border, 1.0, RADIUS),
+            shadow: Shadow {
+                color: Color::BLACK.scale_alpha(0.08),
+                offset: Vector::new(0.0, 1.0),
+                blur_radius: 2.0,
+            },
+            ..container::Style::default()
+        }
+    } else {
+        container::Style {
+            background: hovered.then_some(Background::Color(t.hover)),
+            border: border(Color::TRANSPARENT, 0.0, RADIUS),
+            ..container::Style::default()
+        }
+    }
+}
+
 /// A ghost button that is currently switched on (e.g. sidebar shown, fit-width active).
 pub fn ghost_active(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

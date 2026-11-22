@@ -69,6 +69,8 @@ pub(crate) enum Icon {
     Back,
     Eye,
     EyeOff,
+    Plus,
+    FileWriting,
 }
 
 macro_rules! icons {
@@ -150,6 +152,8 @@ icons! {
     Back => "arrow-left",
     Eye => "eye",
     EyeOff => "eye-off",
+    Plus => "plus",
+    FileWriting => "file-pen-line",
 }
 
 fn load(source: &str) -> svg::Handle {
