@@ -1,0 +1,14 @@
+# PDFs and other binary fixtures must be checked out byte-for-byte: git's text
+# heuristic classifies some small PDFs as text, and Windows checkouts
+# (core.autocrlf=true) then turn LF into CRLF, which breaks xref offsets and
+# encrypted streams.
+*.pdf   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ttf   binary
+*.otf   binary
+*.docx  binary
+*.xlsx  binary
+*.pptx  binary
+*.odt   binary
