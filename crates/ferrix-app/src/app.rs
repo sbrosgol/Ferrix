@@ -427,6 +427,8 @@ pub struct App {
     pub(crate) active_tab: usize,
     /// The document pages are being inserted into, so the result can't land in another tab.
     inserting: Option<DocId>,
+    /// When the file being opened was asked for, to report the time to its first page.
+    open_clock: Option<(PathBuf, std::time::Instant)>,
     /// The tab under the pointer, which shows its close button.
     pub(crate) hovered_tab: Option<usize>,
     /// Quitting with several edited tabs: their names, for the summary dialog.
@@ -689,6 +691,7 @@ impl App {
             active_tab: 0,
             inserting: None,
             hovered_tab: None,
+            open_clock: None,
             quit_summary: None,
             password: None,
             recent_open: false,
@@ -1095,6 +1098,21 @@ impl App {
                     // Rendered before Dark Pages was switched; render it again.
                     Ok(r) if r.inverted != self.invert => {}
                     Ok(r) => {
+                        // The first page on screen: report the time since it was asked for
+                        // (`FERRIX_LOG=ferrix::perf=info`; the benchmark reads it too).
+                        if !doc.first_paint && doc.key_at(doc.current) == Some(key) {
+                            doc.first_paint = true;
+                            if let Some((path, at)) = self.open_clock.take()
+                                && doc.origin.path() == Some(path.as_path())
+                            {
+                                tracing::info!(
+                                    target: "ferrix::perf",
+                                    first_paint_ms = at.elapsed().as_secs_f64() * 1000.0,
+                                    pages = doc.len(),
+                                    "first paint"
+                                );
+                            }
+                        }
                         doc.images.insert(
                             key,
                             Shown {
@@ -1956,6 +1974,7 @@ impl App {
                 if let Some(i) = self.tab_with(&path) {
                     return self.select_tab(i);
                 }
+                self.open_clock = Some((path.clone(), std::time::Instant::now()));
                 if kind_of(&path) == Some(Kind::Pdf) {
                     self.check_writing(path)
                 } else {

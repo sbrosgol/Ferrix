@@ -18,6 +18,9 @@ path = "src/main.rs"
 [[example]]
 name = "screenshot"
 
+[[example]]
+name = "bench"
+
 [dependencies]
 arboard.workspace = true
 ferrix-compose.workspace = true
@@ -46,6 +49,7 @@ tracing-subscriber.workspace = true
 ferrix-compose.workspace = true
 ferrix-types.workspace = true
 iced_test = "0.14.0"
+iced_runtime = "0.14.0"
 image.workspace = true
 
 [lints]

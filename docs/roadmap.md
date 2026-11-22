@@ -6,7 +6,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 ## M0 — Foundations (weeks 1–4)
 - Cargo workspace per `architecture.md` §4.1, shared lints, MSRV, `rustfmt`/`clippy`/`cargo-deny` in CI
   on macOS, Windows, Linux.
-- `xtask fetch-pdfium` (pinned, hash-verified), `xtask corpus` (download test PDFs from manifest).
+- `xtask fetch-pdfium` (pinned, hash-verified), ~~`xtask corpus` (download test PDFs from manifest)~~ (done, with generated stress files; see
+  architecture §8).
 - `ferrix-types`, `ferrix-engine` trait + DTOs, `ferrix-engine-pdfium` (open, page info, render, text).
 - `ferrix-cli render <file> --page N --dpi D -o out.png` and `ferrix-cli text`.
 - Visual-regression harness running on the corpus.
@@ -34,6 +35,8 @@ demo. Exit criteria are the definition of done, not the feature list.
 
 **Exit:** first paint < 300 ms on 1,000-page doc; 60+ fps scroll; zero crashes on corpus in a
 1-hour soak; screen reader can operate all chrome.
+Measured by `cargo xtask bench` (first paint, frame time) and `cargo xtask soak` (crashes);
+see architecture §8.
 
 ## M2 — Annotate & save (weeks 13–20) → `0.2`
 - ~~Command stack, undo/redo~~ (done: `ferrix-core`); ~~autosave journal + crash recovery~~
