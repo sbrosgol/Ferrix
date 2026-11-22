@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use ferrix_core::{AnnotEdit, AnnotKind, Annotation, MarkupStyle, PageKey, Rgb};
-use ferrix_engine::PdfEngine;
 use ferrix_text::{PageText, Selection};
 use ferrix_types::{DocId, PageTransform, PdfBox, PdfPoint, Point};
 use iced::Task;
@@ -97,11 +96,18 @@ impl App {
         let key = entry.key;
         Task::perform(
             async move {
-                flatten(engine.call(move |e| e.text_page(page.doc, page.page)).await)
-                    .map_err(|e| e.to_string())
+                flatten(
+                    engine
+                        .call(move |e| crate::navigate::text_and_links(e, page.doc, page.page))
+                        .await,
+                )
             },
             move |result| {
-                Message::TextLoaded(doc_id, key, result.map(|t| Arc::new(PageText::new(&t))))
+                Message::TextLoaded(
+                    doc_id,
+                    key,
+                    result.map(|(t, links)| (Arc::new(PageText::new(&t)), Arc::new(links))),
+                )
             },
         )
     }
@@ -110,17 +116,16 @@ impl App {
         &mut self,
         doc_id: DocId,
         page: PageKey,
-        result: Result<Arc<PageText>, String>,
+        result: Result<(Arc<PageText>, crate::navigate::Links), String>,
     ) -> Task<Message> {
         let Some(doc) = self.doc.as_mut().filter(|d| d.info.id == doc_id) else {
             return Task::none();
         };
         doc.text_busy = false;
         // A page without text (or one PDFium can't read) is remembered as empty.
-        doc.texts.insert(
-            page,
-            result.unwrap_or_else(|_| Arc::new(PageText::default())),
-        );
+        let (text, links) = result.unwrap_or_default();
+        doc.texts.insert(page, text);
+        doc.links.insert(page, links);
         Task::batch([self.search_page(page), self.load_texts()])
     }
 

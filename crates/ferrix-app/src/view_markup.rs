@@ -12,7 +12,7 @@ use iced::{
 };
 
 use crate::{
-    annotate_ui::{AnnotMsg, CERTIFIED, SidebarTab},
+    annotate_ui::{AnnotMsg, CERTIFIED},
     app::{App, Message},
     document::Document,
     icon::Icon,
@@ -434,6 +434,20 @@ impl App {
             selection_quads: selection_quads.clone(),
             find_quads,
             find_current,
+            links: intrinsic
+                .zip(doc.links.get(&entry.key))
+                .map(|(t, links)| {
+                    links
+                        .iter()
+                        .map(|l| (t.rect_to_pdf(l.rect), l.target.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            // With a Markup tool armed the page is for drawing; with Select, ⌘-click follows.
+            follow_links: match m {
+                None => true,
+                Some(_) => tool == Tool::Select && self.modifiers.command(),
+            },
         };
         let mut layers = stack![page, canvas(overlay).width(size.width).height(size.height)];
         // The selection bar, just above the selection once the pointer is up.
@@ -531,50 +545,6 @@ impl App {
             );
         }
         layers.into()
-    }
-
-    /// The sidebar header: a Pages | Comments switch.
-    pub(crate) fn sidebar_switch<'a>(&'a self, doc: &'a Document) -> Element<'a, Message> {
-        // Replies are part of their comment's thread, not counted on their own.
-        let comments = doc
-            .state
-            .annots
-            .pages()
-            .flat_map(|(_, list)| list.iter())
-            .filter(|(_, a)| a.reply_to.is_none())
-            .count();
-        let tab = |label: String, which: SidebarTab| {
-            let active = self.sidebar_tab == which;
-            button(
-                container(text(label).size(12).font(if active {
-                    SEMIBOLD
-                } else {
-                    theme::UI_FONT
-                }))
-                .center_x(Length::Fill),
-            )
-            .width(Length::Fill)
-            .padding([5, 8])
-            .style(if active {
-                theme::segment_active
-            } else {
-                theme::ghost
-            })
-            .on_press(Message::SidebarTab(which))
-        };
-        container(
-            container(
-                row![
-                    tab(format!("Pages  {}", doc.len()), SidebarTab::Pages),
-                    tab(format!("Comments  {comments}"), SidebarTab::Comments),
-                ]
-                .spacing(2),
-            )
-            .padding(2)
-            .style(theme::pill),
-        )
-        .padding([10, 12])
-        .into()
     }
 
     /// Every annotation, grouped by page.

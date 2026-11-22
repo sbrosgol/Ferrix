@@ -12,8 +12,9 @@ mod model;
 
 pub use error::EngineError;
 pub use model::{
-    AnnotSummary, DocInfo, DocMetadata, DocSource, EngineCaps, OutlineItem, PageInfo, RenderFlags,
-    RenderedTile, Secret, TextChar, TextPage, TileRequest,
+    AnnotSummary, Destination, DocInfo, DocMetadata, DocSource, EngineCaps, LinkTarget,
+    OutlineItem, PageInfo, PageLink, RenderFlags, RenderedTile, Secret, TextChar, TextPage,
+    TileRequest,
 };
 
 use ferrix_types::{DocId, PageIndex};
@@ -44,6 +45,12 @@ pub trait PdfEngine: Send {
     fn text_page(&mut self, doc: DocId, page: PageIndex) -> Result<TextPage, EngineError>;
 
     fn outline(&mut self, doc: DocId) -> Result<Vec<OutlineItem>, EngineError>;
+
+    /// The links of a page that Ferrix can follow: to places in this document, and URIs.
+    /// Other actions (launching files, scripts, remote documents) are left out.
+    fn links(&mut self, _doc: DocId, _page: PageIndex) -> Result<Vec<PageLink>, EngineError> {
+        Ok(Vec::new())
+    }
 
     /// The annotations of a page in the engine's order, popups and form widgets included.
     fn annotations(

@@ -8,7 +8,9 @@ mod document;
 mod icon;
 pub mod markup;
 pub mod markup_canvas;
+mod navigate;
 mod pdf_find;
+mod prefs;
 #[cfg(windows)]
 mod print;
 mod recovery;
@@ -16,16 +18,18 @@ mod render;
 mod strip;
 mod text_select;
 pub mod theme;
+mod thumbs;
 mod titlebar;
 mod view;
 mod view_markup;
+mod view_viewer;
 mod worker;
 pub mod writer;
 mod writer_canvas;
 
 use std::path::PathBuf;
 
-pub use app::{App, Appearance, Message, Recovery};
+pub use app::{App, Appearance, Layout, Message, Recovery};
 pub use document::Origin;
 use ferrix_engine_pdfium::PdfiumEngine;
 use iced::{Theme, window};

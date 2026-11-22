@@ -37,6 +37,8 @@ pub struct Rendered {
     rows: Vec<Vec<RawTile>>,
     logical: iced::Size,
     pub(crate) zoom: f32,
+    /// Rendered with inverted lightness (the dark reading mode).
+    pub(crate) inverted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +90,7 @@ pub(crate) fn render_page(
     logical_scale: f32,
     scale_factor: f32,
     zoom: f32,
+    invert: bool,
 ) -> Result<Rendered, EngineError> {
     let size = page_size(engine, page)?;
     let wanted = logical_scale * scale_factor;
@@ -104,12 +107,37 @@ pub(crate) fn render_page(
         flags: RenderFlags::default(),
     })?;
     let (width, height) = (pixels.region.width, pixels.region.height);
+    let mut pixels = pixels.pixels;
+    if invert {
+        invert_lightness(&mut pixels);
+    }
     Ok(Rendered {
         width,
-        rows: slice_tiles(&pixels.pixels, width, height),
+        rows: slice_tiles(&pixels, width, height),
         logical: iced::Size::new(size.width * logical_scale, size.height * logical_scale),
         zoom,
+        inverted: invert,
     })
+}
+
+/// Dark Pages' paper (white becomes `#1E1E1E`) and ink (black becomes `#E6E6E6`).
+const DARK_PAPER: i32 = 0x1E;
+const LIGHT_INK: i32 = 0xE6;
+
+/// Turns light into dark and back while keeping hues: white paper becomes black, black text
+/// white, and a red heading stays red. Shifting all three channels by one amount keeps hue and
+/// chroma; this amount mirrors the HSL lightness `(max + min) / 2` around the middle.
+pub(crate) fn invert_lightness(rgba: &mut [u8]) {
+    for px in rgba.as_chunks_mut::<4>().0 {
+        let (r, g, b) = (i16::from(px[0]), i16::from(px[1]), i16::from(px[2]));
+        let shift = 255 - r.max(g).max(b) - r.min(g).min(b);
+        // Each channel lies between min and max, so the result stays within 0..=255. Then
+        // squeeze into DARK_PAPER..=LIGHT_INK: pure black paper and white text glare.
+        for c in &mut px[..3] {
+            let inverted = i32::from((i16::from(*c) + shift).clamp(0, 255));
+            *c = (DARK_PAPER + inverted * (LIGHT_INK - DARK_PAPER) / 255) as u8;
+        }
+    }
 }
 
 /// Tiles an RGBA image for display at `logical` size, like rendered PDF pages.
@@ -124,6 +152,7 @@ pub(crate) fn tiled_image(
         width,
         logical,
         zoom: 1.0,
+        inverted: false,
     }
     .into_image()
 }
@@ -158,6 +187,32 @@ fn slice_tiles(pixels: &[u8], width: u32, height: u32) -> Vec<Vec<RawTile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverting_lightness_keeps_hues() {
+        let mut px = [
+            255, 255, 255, 255, // white paper
+            0, 0, 0, 255, // black text
+            255, 0, 0, 128, // red, half transparent
+            200, 220, 240, 255, // pale blue
+        ];
+        invert_lightness(&mut px);
+        assert_eq!(
+            &px[..4],
+            &[0x1E, 0x1E, 0x1E, 255],
+            "paper is dark grey, not black"
+        );
+        assert_eq!(&px[4..8], &[0xE6, 0xE6, 0xE6, 255]);
+        assert_eq!(
+            &px[8..12],
+            &[0xE6, 0x1E, 0x1E, 128],
+            "red stays red; alpha is kept"
+        );
+        assert!(
+            px[12] < px[13] && px[13] < px[14] && px[14] < 0x80,
+            "pale blue becomes dark blue"
+        );
+    }
 
     #[test]
     fn tiles_cover_the_image_exactly() {

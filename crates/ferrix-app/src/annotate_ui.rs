@@ -71,6 +71,7 @@ pub(crate) struct NoteEditor {
 pub enum SidebarTab {
     #[default]
     Pages,
+    Outline,
     Comments,
 }
 

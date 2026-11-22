@@ -88,6 +88,27 @@ pub fn app_data_dir() -> Option<PathBuf> {
     }
 }
 
+/// The per-user directory for preferences people may read, edit, back up or sync.
+///
+/// `FERRIX_DATA_DIR` overrides it too, so one variable isolates everything Ferrix keeps.
+pub fn app_config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("FERRIX_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    if cfg!(target_os = "macos") {
+        home().map(|h| h.join("Library/Application Support/Ferrix"))
+    } else if cfg!(windows) {
+        // Roaming, so preferences follow the user between machines; state stays local.
+        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Ferrix"))
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home().map(|h| h.join(".config")))
+            .map(|d| d.join("ferrix"))
+    }
+}
+
 /// Makes a newly created or renamed file's directory entry durable. Not possible (or needed)
 /// on every platform.
 pub(crate) fn sync_parent_dir(path: &Path) {
