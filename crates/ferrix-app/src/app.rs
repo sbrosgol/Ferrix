@@ -1,6 +1,6 @@
 //! Application state and update logic. Layout lives in `view.rs`.
 
-use std::{collections::HashSet, fmt, path::PathBuf, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use ferrix_convert::{Converter, Kind};
 use ferrix_core::{Edit, PageKey};
@@ -34,11 +34,12 @@ use crate::{
     writer::{Action as WriteAction, KeyCommand, MarginChoice, Writer},
 };
 
-const ZOOM_STEPS: [f32; 15] = [
-    0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0,
+const ZOOM_STEPS: [f32; 18] = [
+    0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0,
 ];
 pub(crate) const MIN_ZOOM: f32 = 0.1;
-pub(crate) const MAX_ZOOM: f32 = 4.0;
+/// Large pages render as tiles of the part in view, so zoom isn't limited by page memory.
+pub(crate) const MAX_ZOOM: f32 = 8.0;
 /// "Automatic" zoom fits the width but never enlarges beyond this (as pdf.js does).
 const MAX_AUTO_ZOOM: f32 = 1.25;
 pub(crate) const THUMB_WIDTH: f32 = 112.0;
@@ -343,7 +344,7 @@ pub struct App {
     pub(crate) engine: Result<Worker, String>,
     window: Option<window::Id>,
     pub(crate) window_size: iced::Size,
-    scale_factor: f32,
+    pub(crate) scale_factor: f32,
     pub(crate) appearance: Appearance,
     system_dark: bool,
     /// The toolbar's overflow menu (`⋯`) is open.
@@ -502,7 +503,15 @@ pub enum Message {
         f32,
         Result<Rendered, String>,
     ),
-    PageScrolled(f32),
+    /// The page view scrolled: vertical and horizontal offsets.
+    PageScrolled(f32, f32),
+    /// A band of tiles arrived (document, page, level, tiles).
+    TilesRendered(
+        DocId,
+        PageKey,
+        crate::render::Level,
+        Result<Vec<ferrix_render::TilePixels>, String>,
+    ),
     /// The thumbnail column scrolled: offset and visible height.
     ThumbsScrolled(f32, f32),
     Thumbnail(DocId, PageKey, Rotation, DocId, Result<Rendered, String>),
@@ -888,6 +897,7 @@ impl App {
                 if let Some(doc) = self.doc.as_mut() {
                     // Rendered pages and thumbnails carry the old colours.
                     doc.images.clear();
+                    doc.tiles.clear();
                     doc.thumbnails.clear();
                 }
                 return Task::batch([self.render_pages(), self.next_thumbnail()]);
@@ -1013,6 +1023,7 @@ impl App {
                                 source,
                                 zoom: r.zoom,
                                 scale_factor,
+                                base: r.base,
                                 image: r.into_image(),
                             },
                         );
@@ -1025,7 +1036,15 @@ impl App {
                 }
                 return Task::batch([self.render_pages(), self.load_texts()]);
             }
-            Message::PageScrolled(top) => return self.page_scrolled(top),
+            Message::PageScrolled(top, left) => {
+                if let Some(doc) = self.doc.as_mut() {
+                    doc.scroll_x = left;
+                }
+                return self.page_scrolled(top);
+            }
+            Message::TilesRendered(doc_id, key, level, result) => {
+                return self.tiles_rendered(doc_id, key, level, result);
+            }
             Message::ThumbsScrolled(top, height) => {
                 if let Some(doc) = self.doc.as_mut() {
                     doc.thumb_scroll = top;
@@ -2922,73 +2941,6 @@ impl App {
             Task::none()
         };
         Task::batch([scroll, self.render_pages()])
-    }
-
-    /// Renders the next page in or next to the view that is missing or out of date; each
-    /// result schedules the one after it. Pages further away are dropped.
-    pub(crate) fn render_pages(&mut self) -> Task<Message> {
-        let (height, scale_factor) = (self.viewport_height(), self.scale_factor);
-        let Ok(engine) = self.engine.clone() else {
-            return Task::none();
-        };
-        let Some(doc) = self.doc.as_mut().filter(|d| d.is_measured()) else {
-            return Task::none();
-        };
-        let visible = doc.strip.visible(doc.scroll, height);
-        // One page either side, so a short scroll finds it ready.
-        let near = visible.start.saturating_sub(1)..(visible.end + 1).min(doc.len());
-        let keep: HashSet<PageKey> = near.clone().filter_map(|i| doc.key_at(i)).collect();
-        doc.images.retain(|k, _| keep.contains(k));
-        if doc.render_busy {
-            return Task::none();
-        }
-        let zoom = doc.strip.zoom;
-        // The current page first, then the rest of the view, then its neighbours.
-        let next = std::iter::once(doc.current)
-            .chain(visible)
-            .chain(near.clone())
-            .filter(|i| near.contains(i))
-            .find_map(|i| {
-                let entry = doc.state.pages.get(i)?;
-                if doc.render_failed.contains(&entry.key) {
-                    return None;
-                }
-                let page = doc.page_ref(entry)?;
-                // Also stale once the source shows a newer annotation preview (ADR-0009 §7).
-                let fresh = doc.images.get(&entry.key).is_some_and(|s| {
-                    s.rotation == entry.rotation
-                        && s.source == page.doc
-                        && s.zoom == zoom
-                        && s.scale_factor == scale_factor
-                });
-                if fresh { None } else { Some((entry.key, page)) }
-            });
-        let Some((key, page)) = next else {
-            return Task::none();
-        };
-        doc.render_busy = true;
-        let doc_id = doc.info.id;
-        let invert = self.invert;
-        Task::perform(
-            async move {
-                let result = engine
-                    .call(move |e| {
-                        render_page(
-                            e,
-                            page,
-                            zoom * LOGICAL_PX_PER_POINT,
-                            scale_factor,
-                            zoom,
-                            invert,
-                        )
-                    })
-                    .await;
-                flatten(result)
-            },
-            move |result| {
-                Message::Rendered(doc_id, key, page.rotation, page.doc, scale_factor, result)
-            },
-        )
     }
 
     /// Reads the size of every page of an engine document in the background.

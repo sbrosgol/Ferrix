@@ -51,6 +51,10 @@ pub(crate) struct Strip {
     pub(crate) sizes: Vec<iced::Size>,
     /// Top of each page; pages in one row are centred on the row's middle.
     pub(crate) tops: Vec<f32>,
+    /// Left of each page in the content, as the view lays rows out (centred).
+    pub(crate) lefts: Vec<f32>,
+    /// A book's cover row: page 0 alone on the right, an empty page's width to its left.
+    pub(crate) cover: bool,
     /// The pages of each row, in order.
     pub(crate) rows: Vec<Range<usize>>,
     /// Top and height of each row.
@@ -76,6 +80,7 @@ impl Strip {
             .map(|s| iced::Size::new(s.width * scale, s.height * scale))
             .collect();
         let rows = rows(sizes.len(), layout, current);
+        let cover = layout == Layout::TwoPagesCover && rows.len() > 1;
         let mut tops = vec![0.0; sizes.len()];
         let (mut row_tops, mut row_heights) = (Vec::new(), Vec::new());
         let mut width: f32 = 0.0;
@@ -83,8 +88,11 @@ impl Strip {
         for row in &rows {
             let pages = &sizes[row.clone()];
             let height = pages.iter().map(|s| s.height).fold(0.0, f32::max);
-            let row_width =
+            let mut row_width =
                 pages.iter().map(|s| s.width).sum::<f32>() + PAGE_GAP * (pages.len() - 1) as f32;
+            if cover && row.start == 0 {
+                row_width += pages[0].width + PAGE_GAP;
+            }
             width = width.max(row_width);
             for i in row.clone() {
                 tops[i] = y + (height - sizes[i].height) / 2.0;
@@ -98,7 +106,26 @@ impl Strip {
         } else {
             y - PAGE_GAP + PAGE_MARGIN
         };
+        // Rows are centred in the widest one, as the view's column aligns them.
+        let mut lefts = vec![0.0; sizes.len()];
+        for row in &rows {
+            let pages = &sizes[row.clone()];
+            let mut row_width =
+                pages.iter().map(|s| s.width).sum::<f32>() + PAGE_GAP * (pages.len() - 1) as f32;
+            let mut x = PAGE_MARGIN;
+            if cover && row.start == 0 {
+                row_width += pages[0].width + PAGE_GAP;
+                x += pages[0].width + PAGE_GAP;
+            }
+            x += (width - row_width) / 2.0;
+            for i in row.clone() {
+                lefts[i] = x;
+                x += sizes[i].width + PAGE_GAP;
+            }
+        }
         Self {
+            lefts,
+            cover,
             zoom,
             sizes,
             tops,
@@ -288,5 +315,32 @@ mod tests {
         assert_eq!(s.current(0.0, 500.0), Some(3));
         assert_eq!(s.offset_of(3, 50.0), 0.0);
         assert_eq!(s.offset_of(1, 50.0), 0.0, "other pages have no place");
+    }
+
+    #[test]
+    fn pages_know_their_left_edge() {
+        let sizes = [
+            Size::new(72.0, 72.0),
+            Size::new(144.0, 72.0),
+            Size::new(72.0, 72.0),
+        ];
+        // One column, centred on the widest page (at 75 % a point is one logical px).
+        let s = Strip::with_layout(&sizes, 0.75, Layout::Continuous, 0);
+        assert_eq!(
+            s.lefts,
+            [PAGE_MARGIN + 36.0, PAGE_MARGIN, PAGE_MARGIN + 36.0]
+        );
+        // A book: the cover sits on the right half of a spread.
+        let s = Strip::with_layout(&sizes, 0.75, Layout::TwoPagesCover, 0);
+        assert!(s.cover);
+        let spread = 144.0 + PAGE_GAP + 72.0;
+        assert_eq!(s.content.width, spread + 2.0 * PAGE_MARGIN);
+        assert_eq!(s.lefts[1], PAGE_MARGIN);
+        assert_eq!(s.lefts[2], PAGE_MARGIN + 144.0 + PAGE_GAP);
+        let cover_spread = 72.0 * 2.0 + PAGE_GAP;
+        assert_eq!(
+            s.lefts[0],
+            PAGE_MARGIN + (spread - cover_spread) / 2.0 + 72.0 + PAGE_GAP
+        );
     }
 }

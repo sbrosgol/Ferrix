@@ -110,6 +110,9 @@ fn main() {
     if flag(&mut args, "--dark-pages") {
         script.push(Message::ToggleInvert);
     }
+    if flag(&mut args, "--zoom-600") {
+        script.push(Message::ZoomPicked(ferrix_app::ZoomChoice::Percent(600)));
+    }
     if flag(&mut args, "--zoom-in") {
         script.extend([Message::ZoomIn, Message::ZoomIn, Message::ZoomIn]);
     }

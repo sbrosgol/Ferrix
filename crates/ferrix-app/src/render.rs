@@ -7,9 +7,17 @@ use iced::widget::image;
 
 /// Logical pixels per PDF point at 100% zoom (96 dpi screens, 72 points per inch).
 pub(crate) const LOGICAL_PX_PER_POINT: f32 = 96.0 / 72.0;
-/// Caps the longest edge of a rendered page (~200 MB of pixels for Letter). The M1 canvas
-/// renders only visible tiles and removes this limit.
-const MAX_RENDER_EDGE: f32 = 8192.0;
+/// A page whose longest edge on screen is at most this many device pixels renders whole, in
+/// one engine call (up to ~28 MB for Letter). Larger ones get a [`BASE_EDGE`] image of the
+/// whole page plus sharp tiles of the part in view.
+pub(crate) const WHOLE_EDGE: u32 = 3072;
+/// Longest edge of the low-resolution whole page shown under the tiles.
+const BASE_EDGE: f32 = 1536.0;
+/// Rendered tiles kept, in bytes; beyond it the least recently drawn go first.
+pub(crate) const TILE_BUDGET: usize = 192 << 20;
+/// A tile band is at most this many tiles across and down (3072 × 1024 px, 12 MB).
+pub(crate) const BAND_COLS: u32 = 6;
+pub(crate) const BAND_ROWS: u32 = 2;
 /// Pages are shown as a grid of tiles this size. Each stays under iced's 2 MiB synchronous
 /// upload limit, so a new page appears in the same frame instead of flashing blank.
 const TILE_EDGE: u32 = 512;
@@ -39,6 +47,8 @@ pub struct Rendered {
     pub(crate) zoom: f32,
     /// Rendered with inverted lightness (the dark reading mode).
     pub(crate) inverted: bool,
+    /// A low-resolution image of a page too large to render whole; tiles go over it.
+    pub(crate) base: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -94,8 +104,12 @@ pub(crate) fn render_page(
 ) -> Result<Rendered, EngineError> {
     let size = page_size(engine, page)?;
     let wanted = logical_scale * scale_factor;
-    let longest = size.width.max(size.height) * wanted;
-    let scale = wanted * (MAX_RENDER_EDGE / longest).min(1.0);
+    let base = needs_tiles(size, wanted);
+    let scale = if base {
+        BASE_EDGE / size.width.max(size.height)
+    } else {
+        wanted
+    };
     let (width, height) = size.to_pixels(scale);
     // One engine call for the whole page (PDFium re-interprets the page per call), then slice.
     let pixels = engine.render_tile(&TileRequest {
@@ -117,6 +131,7 @@ pub(crate) fn render_page(
         logical: iced::Size::new(size.width * logical_scale, size.height * logical_scale),
         zoom,
         inverted: invert,
+        base,
     })
 }
 
@@ -140,6 +155,75 @@ pub(crate) fn invert_lightness(rgba: &mut [u8]) {
     }
 }
 
+/// Whether a page of `size` points at `device_scale` pixels per point is too large to render
+/// whole.
+pub(crate) fn needs_tiles(size: Size, device_scale: f32) -> bool {
+    let (w, h) = size.to_pixels(device_scale);
+    w.max(h) > WHOLE_EDGE
+}
+
+/// Which rendering of a page a tile belongs to: tiles of different levels never mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Level {
+    /// The engine document rendered (the file, or an annotation preview).
+    pub(crate) source: DocId,
+    pub(crate) rotation: Rotation,
+    /// Device pixels per point, as bits (exact equality is what's wanted).
+    pub(crate) scale_bits: u32,
+    pub(crate) inverted: bool,
+}
+
+impl Level {
+    pub(crate) fn scale(self) -> f32 {
+        f32::from_bits(self.scale_bits)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TileKey {
+    pub(crate) page: ferrix_core::PageKey,
+    pub(crate) level: Level,
+    pub(crate) cell: ferrix_render::Cell,
+}
+
+/// A tile ready to draw, and where on the page (device pixels).
+#[derive(Debug, Clone)]
+pub(crate) struct Tile {
+    pub(crate) handle: image::Handle,
+    pub(crate) rect: PixelRect,
+}
+
+/// Renders a band of tiles of `page` at `level` in one engine call, cut into tiles.
+pub(crate) fn render_band(
+    engine: &mut PdfiumEngine,
+    page: PageRef,
+    level: Level,
+    batch: &ferrix_render::Batch,
+) -> Result<Vec<ferrix_render::TilePixels>, EngineError> {
+    let size = page_size(engine, page)?;
+    let (width, height) = size.to_pixels(level.scale());
+    let rendered = engine.render_tile(&TileRequest {
+        doc: page.doc,
+        page: page.page,
+        scale: level.scale(),
+        rotation: page.rotation,
+        region: batch.region,
+        flags: RenderFlags::default(),
+    })?;
+    if rendered.region != batch.region {
+        return Err(EngineError::Backend(format!(
+            "asked for {:?}, got {:?}",
+            batch.region, rendered.region
+        )));
+    }
+    let mut pixels = rendered.pixels;
+    if level.inverted {
+        invert_lightness(&mut pixels);
+    }
+    let grid = ferrix_render::Grid::new(width, height);
+    Ok(ferrix_render::split(&grid, batch, &pixels))
+}
+
 /// Tiles an RGBA image for display at `logical` size, like rendered PDF pages.
 pub(crate) fn tiled_image(
     pixels: &[u8],
@@ -153,6 +237,7 @@ pub(crate) fn tiled_image(
         logical,
         zoom: 1.0,
         inverted: false,
+        base: false,
     }
     .into_image()
 }

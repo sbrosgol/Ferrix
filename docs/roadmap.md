@@ -19,8 +19,9 @@ demo. Exit criteria are the definition of done, not the feature list.
 - App shell: open (dialog, drag & drop, ~~recent files~~, file association), tabs. Open Recent is
   done (`ferrix-store`, the `⋯` menu and the empty state); file association and tabs remain.
 - `ferrix-render`: ~~continuous/single/two-page layouts~~ (done: Continuous, Single Page, Two
-  Pages, Two Pages with Cover), tiled progressive rendering, zoom (fit width/page, ~~⌘/Ctrl +
-  wheel~~; pinch needs iced support), rotation, HiDPI, memory budget.
+  Pages, Two Pages with Cover), ~~tiled progressive rendering~~ (`ferrix-render`; see
+  architecture §5.3), zoom (fit width/page, ~~⌘/Ctrl + wheel~~, up to 800 %; pinch needs iced
+  support), rotation, HiDPI, ~~memory budget~~ (tile cache).
 - ~~Thumbnails sidebar~~ (virtualized, no page cap), ~~outline/bookmarks~~ (Outline tab),
   ~~internal & external links (with confirmation)~~, plus Back/Forward.
 - ~~Text selection + copy~~ (done with ADR-0009 phase 3: `ferrix-text`, single page; drag,
