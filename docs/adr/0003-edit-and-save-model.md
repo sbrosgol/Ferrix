@@ -72,8 +72,15 @@ off, and pages of an encrypted file can't be inserted elsewhere. Both places whe
 new objects with the file's keys, and a mistake there would leave content readable without the
 password. Revisit when saving can keep the encryption and is tested against Acrobat and qpdf.
 
-`ferrix-pdf` itself can still write an incremental update into an encrypted file (a test
-organizes one), and the CLI's `organize` and `annotate` use that. Its check only re-reads the
-output with the password and counts pages; whether the added objects are encrypted correctly
-has not been verified against other readers.
+`ferrix-pdf` writes incremental updates into encrypted files correctly, and the CLI's
+`organize` and `annotate` use this. lopdf encrypts each added or replaced object with its own
+key and keeps `/Encrypt` and `/ID` in the new trailer. This was checked on 2026-11-22: 102
+outputs across RC4-128, AES-128 and AES-256, with user+owner and owner-only passwords, read back
+by qpdf, poppler, pypdf and PDFium (annotation text, appearance streams and page order).
 
+The CLI honours the file's permissions (`/P`, ISO 32000-2 §7.6.4.2) unless the owner password is
+given: `ferrix_pdf::edit_rights` reports what may change. Annotations need bit 6; organizing
+needs bit 11 or bit 4 (bit 4 only for revision 2). lopdf drops `/Encrypt` after decrypting, so
+the owner password is checked against a dictionary rebuilt from the kept security-handler
+values. Tests use qpdf-made fixtures (`crates/ferrix-pdf/tests/fixtures/encrypted`, with
+`make.py`) so lopdf isn't checked against itself. The app stays view-only regardless.
